@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DL Price Tracker - 管理页</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header>
+        <h1>DL Price Tracker 管理页</h1>
+        <div class="toolbar">
+          <button id="refresh">刷新</button>
+          <button id="update-all">更新收藏</button>
+          <button id="export">导出 CSV</button>
+        </div>
+      </header>
+
+      <p id="status" class="status"></p>
+
+      <section class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>RJ号</th>
+              <th>标题</th>
+              <th>当前价</th>
+              <th>史低价</th>
+              <th>差价</th>
+              <th>收藏</th>
+              <th>最后检查</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="table-body"></tbody>
+        </table>
+      </section>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

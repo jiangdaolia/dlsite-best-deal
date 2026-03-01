@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DL Price Tracker</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <h1>DL Price Tracker</h1>
+      <div class="stats">
+        <div class="card"><span>总记录</span><strong id="total">-</strong></div>
+        <div class="card"><span>收藏数</span><strong id="favorites">-</strong></div>
+        <div class="card"><span>当前≤史低</span><strong id="discounted">-</strong></div>
+      </div>
+      <div class="actions">
+        <button id="open-options">打开管理页</button>
+        <button id="update-favorites">更新收藏价格</button>
+      </div>
+      <p id="status" class="status"></p>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
