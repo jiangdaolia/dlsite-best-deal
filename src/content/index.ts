@@ -300,4 +300,90 @@ async function bootstrap(): Promise<void> {
   }
 }
 
+// ---- SPA 路由变化监听 ----
+// DLsite 可能使用多种方式切换页面（pushState / replaceState / 传统导航），
+// 为确保兼容，同时使用 history API 拦截 + URL 轮询 + popstate。
+let lastUrl = location.href;
+
+function onUrlChange(): void {
+  const currentUrl = location.href;
+  if (currentUrl === lastUrl) return;
+
+  console.log('[DLTracker] URL changed', { from: lastUrl, to: currentUrl });
+  lastUrl = currentUrl;
+
+  // 等待 DOM 更新完成后再注入
+  waitForElement(currentUrl).then(() => void bootstrap());
+}
+
+/**
+ * 等待页面关键元素出现（最多 5 秒），确保 DOM 已渲染完成。
+ * 作品页等待 #work_price，收藏页等待 #wishlist_work。
+ */
+function waitForElement(url: string): Promise<void> {
+  const selector = isProductPage(url)
+    ? '#work_price'
+    : isFavoritePage(url)
+      ? '#wishlist_work'
+      : null;
+
+  if (!selector) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    if (document.querySelector(selector)) {
+      resolve();
+      return;
+    }
+
+    const observer = new MutationObserver(() => {
+      if (document.querySelector(selector)) {
+        observer.disconnect();
+        resolve();
+      }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    setTimeout(() => {
+      observer.disconnect();
+      resolve();
+    }, 5000);
+  });
+}
+
+// 方式一：拦截 pushState / replaceState
+const originalPushState = history.pushState.bind(history);
+const originalReplaceState = history.replaceState.bind(history);
+
+history.pushState = function (...args) {
+  originalPushState(...args);
+  onUrlChange();
+};
+
+history.replaceState = function (...args) {
+  originalReplaceState(...args);
+  onUrlChange();
+};
+
+// 方式二：popstate 捕获浏览器前进/后退
+window.addEventListener('popstate', () => onUrlChange());
+
+// 方式三：URL 轮询兜底（每 500ms 检查一次），
+// 确保即使 DLsite 使用了其他导航方式也能捕获到。
+setInterval(() => onUrlChange(), 500);
+
+// 方式四：监听 DOM 变化，当 #work_price 出现但尚未注入时触发
+const domObserver = new MutationObserver(() => {
+  const url = location.href;
+  if (isProductPage(url)) {
+    const host = document.querySelector('#work_price .work_buy_container') || document.querySelector('#work_price');
+    if (host && !host.querySelector(`.${UI_CLASSNAME}`)) {
+      console.log('[DLTracker] DOM observer: detected uninjected product page');
+      void bootstrap();
+    }
+  }
+});
+
+domObserver.observe(document.body, { childList: true, subtree: true });
+
 void bootstrap();
