@@ -55,11 +55,14 @@ function renderPriceCard(record: PriceRecord | null, host: Element): void {
     typeof record.discountRate === 'number' ? ` (${record.discountRate.toFixed(1)}%OFF)` : '';
   chip.textContent = `史低：${toYen(record.lowestPrice)}${discountText}`;
 
-  const button = document.createElement('button');
+  const button = document.createElement('a');
   button.className = 'dltracker-btn';
   button.textContent = '查看价格趋势';
-  button.addEventListener('click', () => {
-    window.open(record.dlwatcherUrl, '_blank', 'noopener,noreferrer');
+  button.href = record.dlwatcherUrl;
+  button.target = '_blank';
+  button.rel = 'noopener noreferrer';
+  button.addEventListener('click', (e) => {
+    e.stopPropagation();
   });
 
   card.appendChild(chip);
