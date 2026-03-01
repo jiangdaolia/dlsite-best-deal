@@ -26,6 +26,7 @@ export interface SettingRecord {
 }
 
 export interface DlWatcherPriceResponse {
+  productName?: string;
   lowestPrice?: {
     priceInfo?: {
       price?: number;
@@ -38,6 +39,7 @@ export interface DlWatcherPriceResponse {
 
 export interface FetchPriceResult {
   rjCode: string;
+  title?: string;
   lowestPrice: number | null;
   regularPrice?: number;
   discountRate?: number;

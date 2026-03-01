@@ -1,40 +1,48 @@
+/* === DL Price Tracker Popup === */
+/* 配色: #73AE52 绿 + #FBF1D7 暖白 */
+
 body {
   margin: 0;
-  font-family: Arial, sans-serif;
-  min-width: 320px;
+  font-family: "Segoe UI", Arial, "Microsoft YaHei", sans-serif;
+  min-width: 280px;
+  background: #FBF1D7;
 }
 
 .popup {
-  padding: 14px;
+  padding: 16px;
 }
 
 h1 {
-  font-size: 16px;
-  margin: 0 0 10px;
+  font-size: 15px;
+  margin: 0 0 12px;
+  color: #3d6e2a;
 }
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 8px;
   margin-bottom: 12px;
 }
 
 .card {
-  padding: 8px;
-  background: #f2f6ff;
-  border-radius: 8px;
+  padding: 10px 8px;
+  background: #fff;
+  border: 1px solid #d9d2be;
+  border-radius: 10px;
   text-align: center;
 }
 
 .card span {
   display: block;
-  color: #666;
-  font-size: 12px;
+  color: #888;
+  font-size: 11px;
+  margin-bottom: 2px;
 }
 
 .card strong {
-  font-size: 16px;
+  font-size: 18px;
+  color: #3d6e2a;
 }
 
 .actions {
@@ -45,14 +53,20 @@ h1 {
 button {
   border: none;
   border-radius: 8px;
-  padding: 8px;
+  padding: 9px;
+  font-size: 13px;
   color: #fff;
-  background: #2463eb;
+  background: #73AE52;
   cursor: pointer;
+  transition: background .15s;
+}
+
+button:hover {
+  background: #5e9741;
 }
 
 .status {
   margin: 8px 0 0;
-  color: #333;
+  color: #666;
   font-size: 12px;
 }

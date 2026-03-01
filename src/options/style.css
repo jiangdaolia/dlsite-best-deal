@@ -1,27 +1,37 @@
+/* === DL Price Tracker 管理页 === */
+/* 配色: #73AE52 绿 + #FBF1D7 暖白 */
+
+* {
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
-  background: #f7f8fa;
-  color: #222;
-  font-family: Arial, sans-serif;
+  background: #FBF1D7;
+  color: #333;
+  font-family: "Segoe UI", Arial, "Microsoft YaHei", sans-serif;
 }
 
 .container {
-  max-width: 1120px;
+  max-width: 1140px;
   margin: 0 auto;
-  padding: 20px;
+  padding: 24px 20px;
 }
 
+/* --- Header --- */
 header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 
 h1 {
   margin: 0;
-  font-size: 20px;
+  font-size: 22px;
+  color: #3d6e2a;
+  letter-spacing: .5px;
 }
 
 .toolbar {
@@ -32,53 +42,124 @@ h1 {
 button {
   border: none;
   border-radius: 8px;
-  padding: 8px 12px;
+  padding: 8px 16px;
+  font-size: 13px;
   color: #fff;
-  background: #2463eb;
+  background: #73AE52;
   cursor: pointer;
+  transition: background .15s;
 }
 
+button:hover {
+  background: #5e9741;
+}
+
+button:active {
+  background: #4e8234;
+}
+
+button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+/* --- Status bar --- */
 .status {
   min-height: 20px;
-  margin: 0 0 10px;
-  color: #444;
+  margin: 0 0 12px;
+  color: #666;
+  font-size: 13px;
 }
 
+/* --- Table wrapper --- */
 .table-wrap {
   overflow: auto;
   background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
+  border: 1px solid #d9d2be;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .04);
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 900px;
+  min-width: 680px;
 }
 
-th,
-td {
-  border-bottom: 1px solid #f0f0f0;
-  padding: 10px;
+/* Column widths */
+.col-code   { width: 120px; }
+.col-title  { width: auto; }
+.col-price  { width: 100px; }
+.col-fav    { width: 60px; text-align: center; }
+.col-date   { width: 170px; }
+.col-action { width: 72px; text-align: center; }
+
+thead th {
+  position: sticky;
+  top: 0;
+  background: #73AE52;
+  color: #fff;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 10px 12px;
   text-align: left;
-  vertical-align: top;
+  white-space: nowrap;
+  border-bottom: 2px solid #5e9741;
+}
+
+thead th.col-fav,
+thead th.col-action {
+  text-align: center;
+}
+
+td {
+  padding: 9px 12px;
+  border-bottom: 1px solid #f0ead8;
+  font-size: 13px;
+  vertical-align: middle;
 }
 
 tr:hover td {
-  background: #fafcff;
+  background: #f8f4e6;
 }
 
+/* --- Cell: RJ code link --- */
+.cell-code a {
+  color: #3d6e2a;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.cell-code a:hover {
+  text-decoration: underline;
+  color: #73AE52;
+}
+
+/* --- Cell: title overflow --- */
+.cell-title {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #444;
+}
+
+/* --- Favorite star --- */
 .tag-yes {
-  color: #1f8f4e;
-  font-weight: 700;
+  color: #d4a017;
+  font-size: 15px;
+  text-align: center;
 }
 
 .tag-no {
-  color: #777;
+  color: #ccc;
+  text-align: center;
 }
 
-.low-highlight {
-  color: #cb2f2f;
-  font-weight: 700;
+/* --- Row update button --- */
+td button {
+  padding: 4px 12px;
+  font-size: 12px;
+  border-radius: 6px;
 }

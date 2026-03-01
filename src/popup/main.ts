@@ -2,7 +2,6 @@ import { sendRuntimeMessage } from '@/shared/runtime';
 
 const totalEl = document.getElementById('total') as HTMLSpanElement;
 const favoritesEl = document.getElementById('favorites') as HTMLSpanElement;
-const discountedEl = document.getElementById('discounted') as HTMLSpanElement;
 const statusEl = document.getElementById('status') as HTMLParagraphElement;
 
 async function loadStats(): Promise<void> {
@@ -17,7 +16,6 @@ async function loadStats(): Promise<void> {
 
   totalEl.textContent = String(response.data.total);
   favoritesEl.textContent = String(response.data.favorites);
-  discountedEl.textContent = String(response.data.discounted);
 }
 
 document.getElementById('open-options')?.addEventListener('click', () => {

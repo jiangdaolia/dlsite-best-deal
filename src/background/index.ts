@@ -75,7 +75,7 @@ async function buildOrUpdateRecord(params: {
 
   const record: PriceRecord = {
     rjCode,
-    title: existing?.title || title,
+    title: existing?.title && existing.title !== rjCode ? existing.title : (fetched.title || title),
     currentPrice,
     lowestPrice: existing ? Math.min(existing.lowestPrice, fetched.lowestPrice) : fetched.lowestPrice,
     regularPrice: fetched.regularPrice,
@@ -129,7 +129,7 @@ async function handleImportFavorites(rjCodes: string[]): Promise<RuntimeResponse
     const existing = await getPriceRecord(rjCode);
     const record: PriceRecord = {
       rjCode,
-      title: existing?.title || rjCode,
+      title: existing?.title && existing.title !== rjCode ? existing.title : (fetched.title || rjCode),
       currentPrice: existing?.currentPrice,
       lowestPrice: existing ? Math.min(existing.lowestPrice, fetched.lowestPrice) : fetched.lowestPrice,
       regularPrice: fetched.regularPrice,

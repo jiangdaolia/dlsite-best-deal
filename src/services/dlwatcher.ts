@@ -43,6 +43,7 @@ export async function fetchPriceFromDlwatcher(rjCode: string): Promise<FetchPric
 
     return {
       rjCode,
+      title: json.productName || undefined,
       lowestPrice,
       regularPrice: safeNumber(json.lowestPrice?.priceInfo?.regularPrice),
       discountRate: safeNumber(json.lowestPrice?.priceInfo?.discountRate),

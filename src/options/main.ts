@@ -9,30 +9,27 @@ function setStatus(message: string): void {
   statusEl.textContent = message;
 }
 
-function computeDiff(record: PriceRecord): number | null {
-  if (typeof record.currentPrice !== 'number') {
-    return null;
-  }
-  return record.currentPrice - record.lowestPrice;
-}
-
 function dlsiteSection(code: string): string {
   return code.toUpperCase().startsWith('BJ') ? 'girls-drama' : 'girls';
 }
 
+function escapeHtml(str: string): string {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
 function buildRow(record: PriceRecord): HTMLTableRowElement {
   const tr = document.createElement('tr');
-  const diff = computeDiff(record);
-  const lowerOrEqual = typeof record.currentPrice === 'number' && record.currentPrice <= record.lowestPrice;
   const section = dlsiteSection(record.rjCode);
+  const dlsiteUrl = `https://www.dlsite.com/${section}/work/=/product_id/${record.rjCode}.html`;
+  const displayTitle = record.title && record.title !== record.rjCode ? escapeHtml(record.title) : '';
 
   tr.innerHTML = `
-    <td>${record.rjCode}</td>
-    <td><a href="https://www.dlsite.com/${section}/work/=/product_id/${record.rjCode}.html" target="_blank" rel="noreferrer">${record.title}</a></td>
-    <td>${toYen(record.currentPrice)}</td>
+    <td class="cell-code"><a href="${dlsiteUrl}" target="_blank" rel="noreferrer">${record.rjCode}</a></td>
+    <td class="cell-title" title="${escapeHtml(record.title || '')}">${displayTitle}</td>
     <td>${toYen(record.lowestPrice)}</td>
-    <td class="${lowerOrEqual ? 'low-highlight' : ''}">${diff === null ? '-' : toYen(diff)}</td>
-    <td class="${record.isFavorite ? 'tag-yes' : 'tag-no'}">${record.isFavorite ? '是' : '否'}</td>
+    <td class="${record.isFavorite ? 'tag-yes' : 'tag-no'}">${record.isFavorite ? '★' : '-'}</td>
     <td>${record.lastChecked || '-'}</td>
     <td><button data-rj="${record.rjCode}">更新</button></td>
   `;

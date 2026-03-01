@@ -165,8 +165,8 @@ function injectFavoriteImportBox(): void {
     return;
   }
 
-  const h1 = document.querySelector('#main_inner > div.base_title > h1');
-  const anchor = h1?.parentElement || document.body;
+  const baseTitle = document.querySelector('#main_inner > div.base_title');
+  const anchor = baseTitle?.parentElement || document.body;
   const box = document.createElement('div');
   box.className = 'dltracker-import-box';
 
@@ -177,6 +177,7 @@ function injectFavoriteImportBox(): void {
   button.textContent = '导入收藏';
 
   const status = document.createElement('span');
+  status.className = 'dltracker-import-status';
   status.textContent = '';
 
   button.addEventListener('click', async () => {
@@ -222,10 +223,10 @@ function injectFavoriteImportBox(): void {
   box.appendChild(button);
   box.appendChild(status);
 
-  // 插入到 <h1> 后面
-  if (h1 && h1.nextSibling) {
-    anchor.insertBefore(box, h1.nextSibling);
-  } else if (h1) {
+  // 插入到 base_title div 的下方
+  if (baseTitle && baseTitle.nextSibling) {
+    anchor.insertBefore(box, baseTitle.nextSibling);
+  } else if (baseTitle) {
     anchor.appendChild(box);
   } else {
     anchor.prepend(box);
