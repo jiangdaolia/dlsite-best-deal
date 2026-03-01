@@ -3,6 +3,7 @@ import {
   BATCH_SIZE,
   DLWATCHER_BASE,
   REQUEST_TIMEOUT_MS,
+  USER_AGENT,
 } from '@/shared/constants';
 import type { DlWatcherPriceResponse, FetchPriceResult } from '@/shared/types';
 import { safeNumber, sleep } from '@/shared/utils';
@@ -25,6 +26,7 @@ export async function fetchPriceFromDlwatcher(rjCode: string): Promise<FetchPric
       signal: controller.signal,
       headers: {
         Accept: 'application/json',
+        'User-Agent': USER_AGENT,
       },
     });
 
@@ -37,13 +39,16 @@ export async function fetchPriceFromDlwatcher(rjCode: string): Promise<FetchPric
       };
     }
 
-    const json = (await response.json()) as DlWatcherPriceResponse;
+    const raw: unknown = await response.json();
+    // 运行时类型验证：确保 API 响应结构安全
+    const json = (typeof raw === 'object' && raw !== null ? raw : {}) as DlWatcherPriceResponse;
     const lowestPrice = safeNumber(json.lowestPrice?.priceInfo?.price) ?? null;
+    const productName = typeof json.productName === 'string' ? json.productName : undefined;
     console.log(`[DLTracker] fetch ${rjCode} → lowestPrice=${lowestPrice}`);
 
     return {
       rjCode,
-      title: json.productName || undefined,
+      title: productName,
       lowestPrice,
       regularPrice: safeNumber(json.lowestPrice?.priceInfo?.regularPrice),
       discountRate: safeNumber(json.lowestPrice?.priceInfo?.discountRate),

@@ -31,8 +31,10 @@ export function safeNumber(value: unknown): number | undefined {
 export function toCsvCell(raw: string | number | undefined): string {
   if (raw === undefined) return '';
   const value = String(raw);
-  if (value.includes(',') || value.includes('"') || value.includes('\n')) {
-    return `"${value.replaceAll('"', '""')}"`;
+  // 防御 CSV 公式注入：以 = + - @ \t \r 开头的值加前缀单引号
+  const formulaPrefix = /^[=+\-@\t\r]/.test(value) ? "'" : '';
+  if (formulaPrefix || value.includes(',') || value.includes('"') || value.includes('\n')) {
+    return `"${formulaPrefix}${value.replaceAll('"', '""')}"`;
   }
   return value;
 }

@@ -14,9 +14,40 @@ function dlsiteSection(code: string): string {
 }
 
 function escapeHtml(str: string): string {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatLowestPrice(record: PriceRecord): string {
+  const yen = toYen(record.lowestPrice);
+  if (yen === '-') return '-';
+  if (typeof record.discountRate === 'number' && record.discountRate > 0) {
+    return `${yen}（${Math.round(record.discountRate)}%OFF）`;
+  }
+  return yen;
+}
+
+function formatBeijingTime(isoStr?: string): string {
+  if (!isoStr) return '-';
+  try {
+    const date = new Date(isoStr);
+    if (Number.isNaN(date.getTime())) return '-';
+    return date.toLocaleString('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+  } catch {
+    return '-';
+  }
 }
 
 function buildRow(record: PriceRecord): HTMLTableRowElement {
@@ -28,9 +59,9 @@ function buildRow(record: PriceRecord): HTMLTableRowElement {
   tr.innerHTML = `
     <td class="cell-code"><a href="${dlsiteUrl}" target="_blank" rel="noreferrer">${record.rjCode}</a></td>
     <td class="cell-title" title="${escapeHtml(record.title || '')}">${displayTitle}</td>
-    <td>${toYen(record.lowestPrice)}</td>
+    <td>${formatLowestPrice(record)}</td>
     <td class="${record.isFavorite ? 'tag-yes' : 'tag-no'}">${record.isFavorite ? '★' : '-'}</td>
-    <td>${record.lastChecked || '-'}</td>
+    <td>${formatBeijingTime(record.lastChecked)}</td>
     <td><button data-rj="${record.rjCode}">更新</button></td>
   `;
 

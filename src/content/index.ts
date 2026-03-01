@@ -373,16 +373,21 @@ window.addEventListener('popstate', () => onUrlChange());
 // 确保即使 DLsite 使用了其他导航方式也能捕获到。
 setInterval(() => onUrlChange(), 500);
 
-// 方式四：监听 DOM 变化，当 #work_price 出现但尚未注入时触发
+// 方式四：监听 DOM 变化，当 #work_price 出现但尚未注入时触发（去抖 300ms）
+let domDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 const domObserver = new MutationObserver(() => {
-  const url = location.href;
-  if (isProductPage(url)) {
-    const host = document.querySelector('#work_price .work_buy_container') || document.querySelector('#work_price');
-    if (host && !host.querySelector(`.${UI_CLASSNAME}`)) {
-      console.log('[DLTracker] DOM observer: detected uninjected product page');
-      void bootstrap();
+  if (domDebounceTimer) return;
+  domDebounceTimer = setTimeout(() => {
+    domDebounceTimer = null;
+    const url = location.href;
+    if (isProductPage(url)) {
+      const host = document.querySelector('#work_price .work_buy_container') || document.querySelector('#work_price');
+      if (host && !host.querySelector(`.${UI_CLASSNAME}`)) {
+        console.log('[DLTracker] DOM observer: detected uninjected product page');
+        void bootstrap();
+      }
     }
-  }
+  }, 300);
 });
 
 domObserver.observe(document.body, { childList: true, subtree: true });

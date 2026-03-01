@@ -1,6 +1,18 @@
 import type { RuntimeRequest, RuntimeResponse, PriceRecord } from '@/shared/types';
-import { MAX_FAVORITES } from '@/shared/constants';
+import { CACHE_TTL_MS, MAX_FAVORITES } from '@/shared/constants';
 import { extractRjCodeFromUrl, nowIso } from '@/shared/utils';
+
+/** 运行时验证 RJ/BJ 编号格式，防止注入 */
+function isValidRjCode(code: unknown): code is string {
+  return typeof code === 'string' && /^[RB]J\d{6,}$/i.test(code);
+}
+
+/** 判断缓存记录是否在 TTL（24h）内，无需重新请求 DLwatcher */
+function isCacheFresh(record: PriceRecord): boolean {
+  if (!record.lastChecked) return false;
+  const checkedAt = new Date(record.lastChecked).getTime();
+  return Date.now() - checkedAt < CACHE_TTL_MS;
+}
 import {
   clearFavoriteFlagForMissing,
   getPriceRecord,
@@ -65,6 +77,12 @@ async function buildOrUpdateRecord(params: {
     return existing;
   }
 
+  // 即使 forceFetch，如果本地缓存在 24h TTL 内也跳过远程请求
+  if (existing && forceFetch && isCacheFresh(existing)) {
+    console.log(`[DLTracker] cache fresh for ${rjCode}, skip remote fetch`);
+    return existing;
+  }
+
   const fetched = await fetchPriceFromDlwatcher(rjCode);
   if (fetched.lowestPrice === null) {
     return existing ?? null;
@@ -111,15 +129,30 @@ async function handleImportFavorites(rjCodes: string[]): Promise<RuntimeResponse
   let imported = 0;
 
   try {
-    console.log(`[DLTracker] batchFetch start, total=${codes.length}`);
-    const prices = await batchFetchPrices(codes, {
+    // 过滤掉 24h 内已请求过的作品，减少对 DLwatcher 的请求
+    const staleCodes: string[] = [];
+    for (const code of codes) {
+      const cached = await getPriceRecord(code);
+      if (cached && isCacheFresh(cached)) {
+        imported += 1; // 缓存有效，直接计入
+      } else {
+        staleCodes.push(code);
+      }
+    }
+    console.log(`[DLTracker] import: ${codes.length} total, ${staleCodes.length} need fetch, ${imported} cached`);
+
+    if (staleCodes.length === 0) {
+      return { ok: true, data: { imported } };
+    }
+
+    const prices = await batchFetchPrices(staleCodes, {
       keepAlive: () => void chrome.runtime.getPlatformInfo(),
     });
     const successCount = [...prices.values()].filter((p) => p.lowestPrice !== null).length;
     const failCount = prices.size - successCount;
     console.log(`[DLTracker] batchFetch done, map.size=${prices.size}, success=${successCount}, fail=${failCount}`);
 
-    for (const rjCode of codes) {
+    for (const rjCode of staleCodes) {
     const fetched = prices.get(rjCode);
     if (!fetched || fetched.lowestPrice === null) {
       console.warn(`[DLTracker] skip ${rjCode}: no price data`);
@@ -166,8 +199,12 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, sender, sendRespo
     try {
       if (request.type === 'GET_OR_FETCH_PRICE') {
         const { rjCode, title, currentPrice } = request.payload;
+        if (!isValidRjCode(rjCode)) {
+          sendResponse(responseError('无效的作品编号'));
+          return;
+        }
         const record = await buildOrUpdateRecord({
-          rjCode,
+          rjCode: rjCode.toUpperCase(),
           title,
           currentPrice,
           forceFetch: false,
@@ -177,7 +214,8 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, sender, sendRespo
       }
 
       if (request.type === 'IMPORT_FAVORITES') {
-        const result = await handleImportFavorites(request.payload.rjCodes);
+        const validCodes = request.payload.rjCodes.filter(isValidRjCode).map((c) => c.toUpperCase());
+        const result = await handleImportFavorites(validCodes);
         sendResponse(result);
         return;
       }
@@ -190,8 +228,12 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, sender, sendRespo
 
       if (request.type === 'UPDATE_ONE') {
         const { rjCode } = request.payload;
+        if (!isValidRjCode(rjCode)) {
+          sendResponse(responseError('无效的作品编号'));
+          return;
+        }
         const updated = await buildOrUpdateRecord({
-          rjCode,
+          rjCode: rjCode.toUpperCase(),
           forceFetch: true,
           forcePersist: true,
         });
@@ -241,6 +283,11 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, sender, sendRespo
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete' || !tab.url) {
+    return;
+  }
+
+  // 仅处理 DLsite 域名，避免向外部泄露浏览信息
+  if (!tab.url.startsWith('https://www.dlsite.com/')) {
     return;
   }
 

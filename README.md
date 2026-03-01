@@ -1,78 +1,96 @@
 # DL Price Tracker
 
-基于需求规格说明实现的 Edge/Chrome (Manifest V3) 浏览器插件原型。
+在 DLsite 作品页面显示历史最低价，一键导入收藏并批量追踪价格变动。
 
-## 已实现功能（V1 可用）
+> 史低价格数据来源：[DLwatcher](https://dlwatcher.com/)
 
-- 作品页注入：在价格区域显示“史低价 + 查看趋势按钮”
-- 收藏页导入：在收藏页面注入“导入收藏”入口，调用 DLsite 收藏接口并批量同步 DLwatcher 史低
-- 后台数据策略：
-  - 本地有数据：直接展示
-  - 本地无数据：实时请求 DLwatcher
-  - 非收藏作品默认不持久化（仅展示）
-  - 当前价格低于史低时，自动下修本地史低
-- 管理页面（Options）：
-  - 列表查看（标题、当前价、史低、差价、收藏状态）
-  - 单作品手动更新
-  - 批量更新收藏
-  - CSV 导出
-- Popup：
-  - 总记录/收藏数/当前<=史低统计
-  - 快速打开管理页
-  - 一键更新收藏
+## ✨ 功能
 
-## 技术栈
+- **作品页史低显示** — 在价格区域注入"史低价"标签 + "查看价格趋势"按钮（链接到 DLwatcher）
+- **收藏一键导入** — 在 DLsite 收藏 / Wishlist 页面注入导入入口，自动解析并批量同步史低数据
+- **收藏卡片增强** — 收藏列表页每张卡片直接显示史低价
+- **管理页面** — 表格展示所有追踪作品（RJ号超链接、作品标题、史低价、收藏状态），支持单条 / 批量更新、CSV 导出
+- **Popup 快捷面板** — 查看统计数据，一键更新收藏价格
+- **SPA 路由兼容** — 支持 DLsite 站内导航不刷新页面的场景
+- **girls + girls-drama** — 同时支持 RJ（同人）和 BJ（乙女）作品编号
 
-- TypeScript
-- Vite
-- vite-plugin-web-extension
-- IndexedDB（idb）
-- dayjs
+## 📦 安装
 
-## 数据库设计（优化版）
+### 从 GitHub Releases 下载（推荐）
 
-### stores
+1. 前往 [Releases](https://github.com/Cassandra-fox/dlTracker/releases) 下载最新版 `dl-price-tracker-vX.X.X.zip`
+2. 解压到任意文件夹（**不要删除该文件夹，Edge 需要持续读取**）
+3. 打开 Edge，地址栏输入 `edge://extensions/`
+4. 打开左下角 **「开发人员模式」**
+5. 点击 **「加载解压缩的扩展」** → 选择解压后的文件夹
+6. 完成 🎉
 
-1. `prices`（keyPath: `rjCode`）
-   - 核心字段：`title`, `currentPrice`, `lowestPrice`, `regularPrice`, `discountRate`, `isFavorite`, `lastChecked`
-   - 索引：`by-lastChecked`, `by-lowestPrice`, `by-isFavorite`, `by-updatedAt`
-2. `favorites`（keyPath: `rjCode`）
-   - 字段：`addedAt`
-   - 索引：`by-addedAt`
-3. `settings`（keyPath: `key`）
-   - 字段：`value`, `updatedAt`
-   - 索引：`by-updatedAt`
+> Chrome 用户同理，访问 `chrome://extensions/` 操作即可。
 
-## 本地运行
+### 从源码构建
 
-1. 安装依赖
-   - `npm install`
-2. 开发构建
-   - `npm run build`
-3. 在 Edge 打开扩展管理页
-   - 启用开发者模式
-   - 加载已解压扩展：选择 `dist` 目录
+```bash
+git clone https://github.com/Cassandra-fox/dlTracker.git
+cd dlTracker
+npm install
+npm run build
+```
 
-## 目录结构
+构建产物在 `dist/` 目录，按上述步骤加载即可。
 
-- `src/background`: Service Worker + 业务逻辑
-- `src/content`: 页面注入脚本
-- `src/db`: IndexedDB 定义与仓储层
-- `src/services`: 外部站点请求（DLwatcher）
-- `src/popup`: 弹窗
-- `src/options`: 管理页
-- `src/shared`: 类型、常量、工具函数
+## 🖼️ 使用说明
 
-## 待你确认的信息
+| 场景     | 操作                                                                                             |
+| -------- | ------------------------------------------------------------------------------------------------ |
+| 查看史低 | 打开任意 DLsite 作品页面，价格区域自动显示                                                       |
+| 导入收藏 | 进入 [DLsite 收藏页](https://www.dlsite.com/girls/mypage/wishlist)，点击页面上方「导入收藏」按钮 |
+| 管理数据 | 点击扩展图标 →「打开管理页」                                                                     |
+| 更新价格 | 管理页中单条更新 / 批量「更新收藏」                                                              |
+| 导出数据 | 管理页中点击「导出 CSV」                                                                         |
 
-1. DLsite 是否只支持 `girls` 站点路径？（当前作品链接和收藏 API 按 `girls` 默认）
-2. 收藏页导入入口希望固定插在页面哪个具体区域？（当前插在 `main` 顶部）
-3. 作品页当前价解析选择器是否需要我按你常用主题做更精细适配？
-4. 管理页默认排序目前是“收藏优先 + 最近更新”，是否改成“按价格/添加时间可切换”？
+## 🏗️ 技术栈
 
-确认后我可以继续做 V1.1：
+| 类别     | 技术                             |
+| -------- | -------------------------------- |
+| 扩展框架 | Manifest V3 (Edge / Chrome)      |
+| 语言     | TypeScript                       |
+| 构建     | Vite + vite-plugin-web-extension |
+| 存储     | IndexedDB (idb)                  |
+| 日期     | dayjs                            |
 
-- 收藏列表页逐行史低增强
-- 标签系统
-- 图表趋势（chart.js）
-- 更完整的首次安装引导
+## 📁 项目结构
+
+```
+src/
+├── background/   # Service Worker — 消息处理、业务逻辑
+├── content/      # Content Script — 页面注入（史低卡片、导入按钮）
+├── db/           # IndexedDB 定义与数据仓储层
+├── services/     # 外部 API 请求（DLwatcher）
+├── popup/        # Popup 弹窗
+├── options/      # 管理页面
+└── shared/       # 类型定义、常量、工具函数
+```
+
+## ⚙️ 设计要点
+
+- **24h 本地缓存 TTL** — 已有数据在 24 小时内不重复请求 DLwatcher，降低服务器压力
+- **非收藏不持久化** — 仅浏览的作品只展示不写入数据库，节省存储空间
+- **当前价 < 史低自动下修** — 页面当前价格低于已知史低时自动更新本地记录
+- **MV3 Service Worker 保活** — 批量导入时通过 keepalive 机制防止 Worker 被终止
+- **输入校验** — 所有 RJ/BJ 编号在后台入口处做格式验证，防止注入攻击
+- **User-Agent 标识** — DLwatcher 请求携带插件标识，便于上游识别和限流
+
+## ❓ FAQ
+
+**Q: 更新扩展版本后怎么操作？**
+A: 下载新版 zip，解压覆盖原文件夹，然后在 `edge://extensions/` 点击扩展卡片上的刷新按钮。
+
+**Q: 数据存在哪里？**
+A: 所有数据存储在浏览器本地的 IndexedDB 中，不会上传到任何服务器。
+
+**Q: 支持哪些 DLsite 分区？**
+A: 目前支持 `girls`（同人/RJ）和 `girls-drama`（乙女/BJ）两个分区。
+
+## 📝 许可
+
+MIT
