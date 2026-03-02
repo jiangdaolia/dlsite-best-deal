@@ -85,18 +85,6 @@ async function buildOrUpdateRecord(params: {
 async function syncCurrentPrice(existing: PriceRecord, currentPrice?: number): Promise<PriceRecord> {
   if (typeof currentPrice !== 'number') return existing;
 
-  // 当前价低于史低价：更新史低
-  if (currentPrice < existing.lowestPrice) {
-    const next: PriceRecord = {
-      ...existing,
-      currentPrice,
-      lowestPrice: currentPrice,
-      updatedAt: nowIso(),
-    };
-    await upsertPriceRecord(next);
-    return next;
-  }
-
   // 当前价变化：同步
   if (currentPrice !== existing.currentPrice) {
     const next: PriceRecord = { ...existing, currentPrice, updatedAt: nowIso() };
