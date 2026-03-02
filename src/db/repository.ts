@@ -70,3 +70,16 @@ export async function clearFavoriteFlagForMissing(nextFavoriteSet: Set<string>):
 
   await tx.done;
 }
+
+/** 删除单条记录（用于缓存清理） */
+export async function deletePriceRecord(rjCode: string): Promise<void> {
+  const db = await getDb();
+  await db.delete('prices', rjCode);
+}
+
+/** 返回所有非收藏记录（缓存条目） */
+export async function listNonFavoriteRecords(): Promise<PriceRecord[]> {
+  const db = await getDb();
+  const all = await db.getAll('prices');
+  return all.filter((r) => !r.isFavorite);
+}

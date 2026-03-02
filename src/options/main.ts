@@ -96,12 +96,11 @@ async function loadTable(): Promise<void> {
     return;
   }
 
-  const records = [...response.data].sort((a, b) => {
-    if (a.isFavorite !== b.isFavorite) {
-      return a.isFavorite ? -1 : 1;
-    }
-    return (b.updatedAt || '').localeCompare(a.updatedAt || '');
-  });
+  const records = [...response.data]
+    .filter((r) => r.isFavorite)
+    .sort((a, b) => {
+      return (b.updatedAt || '').localeCompare(a.updatedAt || '');
+    });
 
   tableBody.innerHTML = '';
   for (const record of records) {

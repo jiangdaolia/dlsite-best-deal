@@ -2,6 +2,13 @@ import dayjs from 'dayjs';
 import { RJ_CODE_REGEX } from './constants';
 
 export function extractRjCodeFromUrl(url: string): string | null {
+  // 优先从 product_id/ 路径段提取基础编号
+  // 简中翻译版作品 URL 形如 product_id/RJ01059221.html?select=RJ01059226
+  // 其中 product_id 后为基础编号，?select= 为翻译版编号（DLwatcher 不收录）
+  const pathMatch = url.match(/product_id\/([RB]J\d{6,})/i);
+  if (pathMatch) return pathMatch[1].toUpperCase();
+
+  // 兜底：提取 URL 中第一个 RJ/BJ 编号
   const matched = url.match(RJ_CODE_REGEX);
   return matched ? matched[1].toUpperCase() : null;
 }

@@ -1,6 +1,5 @@
 import { sendRuntimeMessage } from '@/shared/runtime';
 
-const totalEl = document.getElementById('total') as HTMLSpanElement;
 const favoritesEl = document.getElementById('favorites') as HTMLSpanElement;
 const statusEl = document.getElementById('status') as HTMLParagraphElement;
 
@@ -14,7 +13,7 @@ async function loadStats(): Promise<void> {
     return;
   }
 
-  totalEl.textContent = String(response.data.total);
+  // 只显示收藏数，缓存条目不显示
   favoritesEl.textContent = String(response.data.favorites);
 }
 

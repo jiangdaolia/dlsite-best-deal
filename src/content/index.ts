@@ -88,7 +88,10 @@ function renderLoadingCard(host: Element): void {
 }
 
 async function enhanceProductPage(): Promise<void> {
-  const rjCode = extractRjCodeFromUrl(location.href);
+  // 优先从 URL 路径中的 product_id/ 提取基础编号
+  // 简中翻译版作品 URL 的 ?select= 参数是翻译版编号，不应使用
+  const pathMatch = location.pathname.match(/product_id\/([RB]J\d{6,})/i);
+  const rjCode = pathMatch ? pathMatch[1].toUpperCase() : extractRjCodeFromUrl(location.href);
   if (!rjCode) return;
 
   const host = document.querySelector('#work_price .work_buy_container') || document.querySelector('#work_price');
@@ -113,6 +116,12 @@ async function enhanceProductPage(): Promise<void> {
   renderPriceCard(response.data ?? null, host);
 }
 
+/**
+ * ⚠️ 降级方案：从 DLsite 收藏 API 获取作品编号。
+ * 注意：API 可能返回翻译版编号（如简中版 RJ01059226），
+ * 而非 DLwatcher 可识别的基础编号（如 RJ01059221）。
+ * 应优先使用 parseFavoriteCodesFromDom() 从 DOM 的 product_id/ 链接提取。
+ */
 async function fetchFavoriteCodesFromApi(): Promise<string[]> {
   const url = `${location.origin}${FAVORITE_API_PATH}?_=${Date.now()}`;
   const response = await fetch(url, {

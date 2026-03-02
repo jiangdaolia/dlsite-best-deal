@@ -15,8 +15,10 @@ function isCacheFresh(record: PriceRecord): boolean {
 }
 import {
   clearFavoriteFlagForMissing,
+  deletePriceRecord,
   getPriceRecord,
   listFavoriteCodes,
+  listNonFavoriteRecords,
   listPriceRecords,
   markFavorites,
   upsertPriceRecord,
@@ -52,44 +54,79 @@ async function buildOrUpdateRecord(params: {
   const { rjCode, title = rjCode, currentPrice, forceFetch, forcePersist = false } = params;
 
   const existing = await getPriceRecord(rjCode);
-  if (existing && !forceFetch) {
-    if (typeof currentPrice === 'number' && currentPrice < existing.lowestPrice) {
-      const next: PriceRecord = {
-        ...existing,
-        currentPrice,
-        lowestPrice: currentPrice,
-        lastChecked: nowIso(),
-        updatedAt: nowIso(),
-      };
+
+  // ── 强制刷新（管理页「更新」按钮）──
+  // 直接向 DLwatcher 请求，不论缓存状态
+  if (forceFetch) {
+    return await fetchRemoteAndPersist(rjCode, title, currentPrice, existing, forcePersist);
+  }
+
+  // ── 非强制模式（浏览作品页 / tabs.onUpdated）──
+  if (existing) {
+    // 收藏作品（永久存储）：永远使用本地数据，仅同步页面当前价
+    // 只通过「更新收藏」按钮手动刷新
+    if (existing.isFavorite) {
+      return await syncCurrentPrice(existing, currentPrice);
+    }
+
+    // 非收藏作品（24h 缓存）：TTL 内直接返回缓存
+    if (isCacheFresh(existing)) {
+      return await syncCurrentPrice(existing, currentPrice);
+    }
+
+    // 缓存过期 → 重新从 DLwatcher 获取（fall through）
+  }
+
+  // 无本地数据 或 非收藏缓存过期：请求 DLwatcher 并存储
+  return await fetchRemoteAndPersist(rjCode, title, currentPrice, existing, forcePersist);
+}
+
+/** 同步页面当前价到本地记录，不触发远程请求，不更新 lastChecked */
+async function syncCurrentPrice(existing: PriceRecord, currentPrice?: number): Promise<PriceRecord> {
+  if (typeof currentPrice !== 'number') return existing;
+
+  // 当前价低于史低价：更新史低
+  if (currentPrice < existing.lowestPrice) {
+    const next: PriceRecord = {
+      ...existing,
+      currentPrice,
+      lowestPrice: currentPrice,
+      updatedAt: nowIso(),
+    };
+    await upsertPriceRecord(next);
+    return next;
+  }
+
+  // 当前价变化：同步
+  if (currentPrice !== existing.currentPrice) {
+    const next: PriceRecord = { ...existing, currentPrice, updatedAt: nowIso() };
+    await upsertPriceRecord(next);
+    return next;
+  }
+
+  return existing;
+}
+
+/** 从 DLwatcher 获取数据并写入 IndexedDB */
+async function fetchRemoteAndPersist(
+  rjCode: string,
+  title: string,
+  currentPrice: number | undefined,
+  existing: PriceRecord | undefined,
+  forcePersist: boolean,
+): Promise<PriceRecord | null> {
+  const fetched = await fetchPriceFromDlwatcher(rjCode);
+  if (fetched.lowestPrice === null) {
+    // DLwatcher 无数据也更新 lastChecked，表示已尝试检查
+    if (existing) {
+      const next: PriceRecord = { ...existing, lastChecked: nowIso(), updatedAt: nowIso() };
       await upsertPriceRecord(next);
       return next;
     }
-
-    if (typeof currentPrice === 'number' && currentPrice !== existing.currentPrice) {
-      await upsertPriceRecord({
-        ...existing,
-        currentPrice,
-        lastChecked: nowIso(),
-        updatedAt: nowIso(),
-      });
-    }
-
-    return existing;
-  }
-
-  // 即使 forceFetch，如果本地缓存在 24h TTL 内也跳过远程请求
-  if (existing && forceFetch && isCacheFresh(existing)) {
-    console.log(`[DLTracker] cache fresh for ${rjCode}, skip remote fetch`);
-    return existing;
-  }
-
-  const fetched = await fetchPriceFromDlwatcher(rjCode);
-  if (fetched.lowestPrice === null) {
-    return existing ?? null;
+    return null;
   }
 
   const favoriteSet = new Set(await listFavoriteCodes());
-  const shouldPersist = forcePersist || favoriteSet.has(rjCode) || Boolean(existing);
 
   const record: PriceRecord = {
     rjCode,
@@ -107,14 +144,14 @@ async function buildOrUpdateRecord(params: {
     updatedAt: nowIso(),
   };
 
-  if (shouldPersist) {
-    await upsertPriceRecord(record);
-  }
+  // 收藏作品 / 已有记录 / 强制持久化：当然写入
+  // 非收藏浏览：也写入，作为 24h 缓存
+  await upsertPriceRecord(record);
 
   return record;
 }
 
-async function handleImportFavorites(rjCodes: string[]): Promise<RuntimeResponse<{ imported: number }>> {
+async function handleImportFavorites(rjCodes: string[], skipCache = false): Promise<RuntimeResponse<{ imported: number }>> {
   if (!rjCodes.length) {
     return { ok: true, data: { imported: 0 } };
   }
@@ -130,8 +167,13 @@ async function handleImportFavorites(rjCodes: string[]): Promise<RuntimeResponse
 
   try {
     // 过滤掉 24h 内已请求过的作品，减少对 DLwatcher 的请求
+    // skipCache=true 时（用户手动触发「更新收藏」）跳过 TTL 过滤
     const staleCodes: string[] = [];
     for (const code of codes) {
+      if (skipCache) {
+        staleCodes.push(code);
+        continue;
+      }
       const cached = await getPriceRecord(code);
       if (cached && isCacheFresh(cached)) {
         imported += 1; // 缓存有效，直接计入
@@ -156,6 +198,11 @@ async function handleImportFavorites(rjCodes: string[]): Promise<RuntimeResponse
     const fetched = prices.get(rjCode);
     if (!fetched || fetched.lowestPrice === null) {
       console.warn(`[DLTracker] skip ${rjCode}: no price data`);
+      // DLwatcher 无数据也更新 lastChecked，表示已尝试检查
+      const rec = await getPriceRecord(rjCode);
+      if (rec) {
+        await upsertPriceRecord({ ...rec, lastChecked: nowIso(), updatedAt: nowIso() });
+      }
       continue;
     }
 
@@ -243,7 +290,7 @@ chrome.runtime.onMessage.addListener((request: RuntimeRequest, sender, sendRespo
 
       if (request.type === 'UPDATE_ALL_FAVORITES') {
         const favoriteCodes = await listFavoriteCodes();
-        const result = await handleImportFavorites(favoriteCodes);
+        const result = await handleImportFavorites(favoriteCodes, true);
         sendResponse(result);
         return;
       }
@@ -301,3 +348,23 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     forceFetch: false,
   });
 });
+
+// ---- 缓存清理：删除过期的非收藏记录 ----
+async function cleanExpiredCache(): Promise<void> {
+  const nonFavorites = await listNonFavoriteRecords();
+  let cleaned = 0;
+
+  for (const record of nonFavorites) {
+    if (!isCacheFresh(record)) {
+      await deletePriceRecord(record.rjCode);
+      cleaned += 1;
+    }
+  }
+
+  if (cleaned > 0) {
+    console.log(`[DLTracker] cleaned ${cleaned} expired cache entries`);
+  }
+}
+
+// Service Worker 启动时执行一次缓存清理
+void cleanExpiredCache();
