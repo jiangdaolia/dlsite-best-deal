@@ -1,7 +1,7 @@
 const manifest = {
   manifest_version: 3,
   name: 'DL Price Tracker',
-  version: '0.1.0',
+  version: '0.1.1',
   description: '在 DLsite 页面显示历史最低价，并管理收藏作品价格数据。',
   permissions: [],
   host_permissions: ['https://www.dlsite.com/*', 'https://dlwatcher.com/*'],

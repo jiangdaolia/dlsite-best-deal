@@ -1,5 +1,5 @@
 export const APP_NAME = 'DL Price Tracker';
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.1.1';
 
 export const DLWATCHER_BASE = 'https://dlwatcher.com/product';
 
