@@ -125,6 +125,14 @@
     return /-touch\//i.test(url);
   }
 
+  function isNarrowViewport() {
+    try {
+      return window.matchMedia("(max-width: 900px)").matches;
+    } catch {
+      return window.innerWidth <= 900;
+    }
+  }
+
   function firstElementBySelectors(selectors, root) {
     for (const selector of selectors) {
       const found = root.querySelector(selector);
@@ -154,7 +162,7 @@
   }
 
   function ensureMobileProductRenderHost() {
-    if (!isTouchPath(location.href)) return null;
+    if (!isTouchPath(location.href) && !isNarrowViewport()) return null;
 
     const purchaseInner = document.querySelector(".c-purchaseBox__inner");
     if (!purchaseInner) return null;
@@ -563,11 +571,17 @@
   function extractDlwatcherCurrentPrice(json) {
     const candidates = [
       json?.currentPrice?.priceInfo?.price,
+      json?.currentPrice?.priceInfo?.currentPrice,
+      json?.currentPrice?.priceInfo?.value,
       json?.currentPrice?.price,
+      json?.currentPrice?.amount,
+      json?.currentPrice?.value,
       json?.currentPrice,
       json?.priceInfo?.price,
+      json?.priceInfo?.currentPrice,
       json?.price?.current,
       json?.price?.price,
+      json?.price?.amount,
       json?.price,
     ];
 
@@ -734,8 +748,12 @@
     }
 
     if (existing) {
+      const hasDlwatcherCurrent =
+        typeof existing.dlwatcherCurrentPrice === "number";
       if (existing.isFavorite || isCacheFresh(existing)) {
-        return syncCurrentPrice(existing, currentPrice);
+        if (hasDlwatcherCurrent) {
+          return syncCurrentPrice(existing, currentPrice);
+        }
       }
     }
 
@@ -882,7 +900,7 @@
 
     const card = document.createElement("div");
     card.className = UI_CLASSNAME;
-    if (isProductPage(location.href) && !isTouchPath(location.href)) {
+    if (isProductPage(location.href)) {
       card.classList.add("dltracker-product-wide");
     }
 
@@ -900,11 +918,18 @@
     const compareCurrent =
       typeof record.dlwatcherCurrentPrice === "number"
         ? record.dlwatcherCurrentPrice
-        : record.currentPrice;
+        : undefined;
     const isAtLowest =
       typeof compareCurrent === "number" &&
       typeof record.lowestPrice === "number" &&
       Math.abs(compareCurrent - record.lowestPrice) < 0.01;
+
+    if (typeof compareCurrent === "number" && !isAtLowest) {
+      const currentChip = document.createElement("span");
+      currentChip.className = "dltracker-chip dltracker-chip-current";
+      currentChip.textContent = `当前价格: ${toYen(compareCurrent)}`;
+      card.appendChild(currentChip);
+    }
 
     chip.classList.add(
       isAtLowest ? "dltracker-chip-hot" : "dltracker-chip-normal",
@@ -961,6 +986,14 @@
 
     const host = findProductRenderHost();
     if (!host) return;
+
+    // 清理旧位置残留的商品页卡片，避免布局策略切换后出现两份 UI。
+    const allCards = document.querySelectorAll(`.${UI_CLASSNAME}`);
+    for (const card of allCards) {
+      if (!host.contains(card)) {
+        card.remove();
+      }
+    }
 
     renderLoadingCard(host);
 
@@ -1243,6 +1276,10 @@
 
 .${UI_CLASSNAME} .dltracker-chip-hot {
   background: #d4571a;
+}
+
+.${UI_CLASSNAME} .dltracker-chip-current {
+  background: #4c6379;
 }
 
 .${UI_CLASSNAME} .dltracker-chip-normal {
