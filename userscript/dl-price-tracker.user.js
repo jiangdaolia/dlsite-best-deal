@@ -130,28 +130,34 @@
   function ensureMobileProductRenderHost() {
     if (!isTouchPath(location.href)) return null;
 
+    const purchaseInner = document.querySelector('.c-purchaseBox__inner');
+    if (!purchaseInner) return null;
+
+    // 清理旧版本可能插在 c-purchaseBox 外层的容器，避免结构污染。
     const purchaseBox = document.querySelector('.c-purchaseBox');
-    if (!purchaseBox) return null;
-    if (!purchaseBox.parentElement) return null;
+    if (purchaseBox?.previousElementSibling?.classList?.contains('dltracker-mobile-product-host')) {
+      purchaseBox.previousElementSibling.remove();
+    }
 
-    const parent = purchaseBox.parentElement;
-    const beforeSibling = purchaseBox.previousElementSibling;
+    const purchaseSection = purchaseInner.querySelector(':scope > .c-purchaseBox__purchase') ||
+      purchaseInner.querySelector('.c-purchaseBox__purchase');
+    if (!purchaseSection) return null;
 
-    let host =
-      (beforeSibling && beforeSibling.classList?.contains('dltracker-mobile-product-host') ? beforeSibling : null) ||
-      purchaseBox.querySelector('.dltracker-mobile-product-host');
+    const allHosts = document.querySelectorAll('.dltracker-mobile-product-host');
+    let host = purchaseSection.querySelector(':scope > .dltracker-mobile-product-host') ||
+      purchaseSection.querySelector('.dltracker-mobile-product-host');
 
     if (!host) {
       host = document.createElement('div');
       host.className = 'dltracker-mobile-product-host';
     }
 
-    if (host.parentElement !== parent || host.nextElementSibling !== purchaseBox) {
-      parent.insertBefore(host, purchaseBox);
+    // 固定插在购买模块顶部（优惠券区前），确保单独一行且不影响上方价格/评分布局。
+    if (host.parentElement !== purchaseSection || host !== purchaseSection.firstElementChild) {
+      purchaseSection.prepend(host);
     }
 
-    // 清理旧位置残留，避免 SPA 场景出现多个容器。
-    const allHosts = document.querySelectorAll('.dltracker-mobile-product-host');
+    // 去重：只保留当前宿主，避免 SPA 场景重复注入。
     for (const node of allHosts) {
       if (node !== host) node.remove();
     }
@@ -160,7 +166,7 @@
   }
 
   function findProductRenderHost() {
-    // 移动端优先：插在整个 c-purchaseBox 前面，独占一行。
+    // 移动端优先：插在 c-purchaseBox__purchase 顶部（优惠券区前），确保单独一行。
     const mobileHost = ensureMobileProductRenderHost();
     if (mobileHost) return mobileHost;
     return findProductPriceHost();
@@ -223,6 +229,27 @@
     }
 
     return card;
+  }
+
+  function ensureWishlistRenderHost(card, priceHost) {
+    if (priceHost) {
+      const legacyCard = priceHost.querySelector(`.${UI_CLASSNAME}`);
+      if (legacyCard) legacyCard.remove();
+    }
+
+    const existed = card.querySelector('.dltracker-wishlist-host');
+    if (existed) return existed;
+
+    const host = document.createElement('div');
+    host.className = 'dltracker-wishlist-host';
+
+    if (priceHost && priceHost !== card && priceHost.parentElement && card.contains(priceHost)) {
+      priceHost.insertAdjacentElement('afterend', host);
+    } else {
+      card.appendChild(host);
+    }
+
+    return host;
   }
 
   function findFavoritePanelAnchor() {
@@ -927,7 +954,8 @@
     for (const card of cards) {
       const priceHost = findWishlistPriceHost(card);
       if (!priceHost) continue;
-      if (priceHost.querySelector(`.${UI_CLASSNAME}`)) continue;
+      const renderHost = ensureWishlistRenderHost(card, priceHost);
+      if (renderHost.querySelector(`.${UI_CLASSNAME}`)) continue;
 
       const link = card.querySelector('a[href*="product_id/"]');
       const href = link?.getAttribute('href') || '';
@@ -937,13 +965,13 @@
       const rjCode = matched[1].toUpperCase();
       const title = link?.textContent?.trim() || rjCode;
 
-      renderLoadingCard(priceHost);
+      renderLoadingCard(renderHost);
 
       void buildOrUpdateRecord({
         rjCode,
         title,
         forceFetch: false,
-      }).then((record) => renderPriceCard(record, priceHost));
+      }).then((record) => renderPriceCard(record, renderHost));
     }
   }
 
@@ -1046,10 +1074,24 @@
   margin-top: 6px;
 }
 
-.dltracker-mobile-product-host {
-  margin: 0 0 10px;
+.dltracker-wishlist-host {
+  margin-top: 6px;
   width: 100%;
   box-sizing: border-box;
+  clear: both;
+}
+
+.dltracker-mobile-product-host {
+  margin: 0 0 10px;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  clear: both;
+}
+
+.dltracker-mobile-product-host .${UI_CLASSNAME} {
+  margin-top: 0;
 }
 
 .dltracker-import-box {
@@ -1111,8 +1153,8 @@
     font-size: 12px;
   }
 
-  .${UI_CLASSNAME} .dltracker-chip,
-  .${UI_CLASSNAME} .dltracker-btn {
+  .dltracker-mobile-product-host .${UI_CLASSNAME} .dltracker-chip,
+  .dltracker-mobile-product-host .${UI_CLASSNAME} .dltracker-btn {
     width: 100%;
     justify-content: center;
   }
@@ -1122,6 +1164,10 @@
     padding: 8px 10px;
     gap: 8px;
     border-radius: 8px;
+  }
+
+  .dltracker-wishlist-host {
+    margin-top: 8px;
   }
 
   .dltracker-mobile-product-host {
