@@ -9,8 +9,8 @@
 // @noframes
 // @grant        GM_xmlhttpRequest
 // @connect      dlwatcher.com
-// @updateURL    https://gitee.com/syoius/dlTracker4TamperMonkey/raw/main/userscript/dl-price-tracker.user.js
-// @downloadURL  https://gitee.com/syoius/dlTracker4TamperMonkey/raw/main/userscript/dl-price-tracker.user.js
+// @updateURL    https://github.com/syoius/dlTracker4TamperMonkey/raw/refs/heads/main/userscript/dl-price-tracker.user.js
+// @downloadURL  https://github.com/syoius/dlTracker4TamperMonkey/raw/refs/heads/main/userscript/dl-price-tracker.user.js
 // ==/UserScript==
 
 (function () {

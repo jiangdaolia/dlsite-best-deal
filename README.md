@@ -4,12 +4,6 @@
 
 > 史低/当前价格数据来源：[DLwatcher](https://dlwatcher.com/)
 
-## 说明
-
-- 本仓库是 **Tampermonkey 专用分支**。
-- 核心脚本文件：`userscript/dl-price-tracker.user.js`
-- 为方便国内用户使用，已自动同步至[Gitee仓库](https://gitee.com/syoius/dlTracker4TamperMonkey/)
-
 ## 当前功能
 
 - DLsite RJ（同人）/BJ（乙女）商品页显示价格标签（当前价、史低、折扣）
@@ -21,7 +15,7 @@
 ## 安装
 
 1. 安装浏览器插件 Tampermonkey（或 Violentmonkey），或使用支持脚本的浏览器（如Via浏览器）
-2. [点击链接安装脚本（大陆可直接访问）](https://gitee.com/syoius/dlTracker4TamperMonkey/raw/main/userscript/dl-price-tracker.user.js)
+2. [点击链接安装脚本](https://github.com/syoius/dlTracker4TamperMonkey/raw/refs/heads/main/userscript/dl-price-tracker.user.js)
 3. 安装并启用脚本后，打开或刷新 `https://www.dlsite.com/*` 相关页面即可生效
 
 ## 仓库结构
