@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DL Price Tracker
 // @namespace    https://github.com/syoius/dlTracker4TamperMonkey
-// @version      0.1.1.1
+// @version      0.1.1.2
 // @description  在 DLsite 页面显示史低价格，并支持导入收藏进行本地追踪
 // @author       Syoius & Cassandra-fox
 // @match        https://www.dlsite.com/*
@@ -17,7 +17,7 @@
   "use strict";
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.1.1.1";
+  const APP_VERSION = "0.1.1.2";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -31,6 +31,18 @@
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   const MAX_FAVORITES = 500;
   const ENABLE_WISHLIST_ACTION_PANEL = false;
+  const BUY_LATER_SORT_STORAGE_KEY = "dltracker-buy-later-sort-enabled";
+  const BUY_LATER_SORT_MODE_STORAGE_KEY = "dltracker-buy-later-sort-mode";
+  const BUY_LATER_SORT_MODE_PRICE = "price";
+  const BUY_LATER_SORT_MODE_DISCOUNT = "discount";
+  const UPDATE_NOTICE_SEEN_VERSION_KEY = "dltracker-update-notice-seen-version";
+  const RELEASE_NOTES = {
+    "0.1.1.2": [
+      "支持购物车页面显示提示标签",
+      "新增【稍后再买】列表的智能排序（史低优先）开关+次级排序模式设置（低价优先/折扣优先）",
+      "新增标签【无折扣记录】",
+    ],
+  };
 
   const RJ_CODE_REGEX = /\b([RB]J\d{6,})\b/i;
   const UI_CLASSNAME = "dltracker-lowest-price-card";
@@ -81,6 +93,38 @@
 
   function nowIso() {
     return new Date().toISOString();
+  }
+
+  function getSeenUpdateVersion() {
+    try {
+      return String(localStorage.getItem(UPDATE_NOTICE_SEEN_VERSION_KEY) || "");
+    } catch {
+      return "";
+    }
+  }
+
+  function setSeenUpdateVersion(version) {
+    try {
+      localStorage.setItem(UPDATE_NOTICE_SEEN_VERSION_KEY, String(version));
+    } catch {
+      // noop
+    }
+  }
+
+  function showUpdateNoticeIfNeeded() {
+    if (getSeenUpdateVersion() === APP_VERSION) return;
+
+    const notes = Array.isArray(RELEASE_NOTES[APP_VERSION])
+      ? RELEASE_NOTES[APP_VERSION]
+      : ["本次版本包含功能优化与问题修复。"];
+    const message = [
+      `${APP_NAME} 已更新到 v${APP_VERSION}`,
+      "",
+      ...notes.map((x) => `- ${x}`),
+    ].join("\n");
+
+    alert(message);
+    setSeenUpdateVersion(APP_VERSION);
   }
 
   function sleep(ms) {
@@ -583,6 +627,362 @@
       !!ownerItem.querySelector(".__buy_now_target, .__buy_later_target");
     if (!hasCartTarget) return false;
     return true;
+  }
+
+  function isBuyLaterSortEnabled() {
+    try {
+      const raw = localStorage.getItem(BUY_LATER_SORT_STORAGE_KEY);
+      if (raw === null) return true;
+      return raw !== "0" && raw !== "false";
+    } catch {
+      return true;
+    }
+  }
+
+  function setBuyLaterSortEnabled(enabled) {
+    try {
+      localStorage.setItem(BUY_LATER_SORT_STORAGE_KEY, enabled ? "1" : "0");
+    } catch {
+      // noop
+    }
+  }
+
+  function getBuyLaterSortMode() {
+    try {
+      const raw = localStorage.getItem(BUY_LATER_SORT_MODE_STORAGE_KEY);
+      if (raw === BUY_LATER_SORT_MODE_DISCOUNT) {
+        return BUY_LATER_SORT_MODE_DISCOUNT;
+      }
+      return BUY_LATER_SORT_MODE_PRICE;
+    } catch {
+      return BUY_LATER_SORT_MODE_PRICE;
+    }
+  }
+
+  function setBuyLaterSortMode(mode) {
+    const normalized =
+      mode === BUY_LATER_SORT_MODE_DISCOUNT
+        ? BUY_LATER_SORT_MODE_DISCOUNT
+        : BUY_LATER_SORT_MODE_PRICE;
+    try {
+      localStorage.setItem(BUY_LATER_SORT_MODE_STORAGE_KEY, normalized);
+    } catch {
+      // noop
+    }
+  }
+
+  function ensureBuyLaterSubtitleHost() {
+    const desktopSection = document.querySelector("section.buy_later");
+    const desktopHost = desktopSection?.querySelector(".contents_sub_title");
+    const desktopTitle = desktopHost?.querySelector("h2");
+    if (desktopHost && desktopTitle) {
+      return { host: desktopHost, title: desktopTitle, isMobile: false };
+    }
+
+    const mobileSection = document.querySelector("section.cart_hold");
+    if (!mobileSection) return null;
+
+    // 兼容旧版本：把曾经包裹 h2 的临时容器移除，恢复 h2 为 section 直子元素。
+    const legacyHost = mobileSection.querySelector(
+      ":scope > .dltracker-buy-later-mobile-subtitle",
+    );
+    if (legacyHost) {
+      const legacyTitle =
+        legacyHost.querySelector(":scope > h2.sub_lead_01") ||
+        legacyHost.querySelector(":scope > h2");
+      if (legacyTitle) {
+        mobileSection.insertBefore(legacyTitle, legacyHost);
+      }
+      legacyHost.remove();
+    }
+
+    const mobileTitle =
+      mobileSection.querySelector(":scope > h2.sub_lead_01") ||
+      mobileSection.querySelector(":scope > h2");
+    if (!mobileTitle) return null;
+
+    mobileSection.classList.add("dltracker-buy-later-mobile-section");
+    return { host: mobileSection, title: mobileTitle, isMobile: true };
+  }
+
+  function injectBuyLaterSortToggle() {
+    if (!isCartPage(location.href)) return;
+
+    const header = ensureBuyLaterSubtitleHost();
+    if (!header?.host || !header.title) return;
+    const subtitle = header.host;
+    if (!header.isMobile) {
+      subtitle.classList.add("dltracker-buy-later-subtitle");
+    }
+
+    let controls = header.isMobile
+      ? subtitle.querySelector(":scope > .dltracker-buy-later-controls")
+      : subtitle.querySelector(".dltracker-buy-later-controls");
+    if (!controls) {
+      controls = document.createElement("div");
+      controls.className = "dltracker-buy-later-controls";
+
+      const toggle = document.createElement("label");
+      toggle.className = "dltracker-buy-later-toggle";
+
+      const input = document.createElement("input");
+      input.type = "checkbox";
+
+      const text = document.createElement("span");
+      text.textContent = "优先显示史低作品";
+
+      toggle.appendChild(input);
+      toggle.appendChild(text);
+
+      const modeWrap = document.createElement("label");
+      modeWrap.className = "dltracker-buy-later-mode";
+
+      const modeLabel = document.createElement("span");
+      modeLabel.textContent = "次级排序";
+
+      const modeSelect = document.createElement("select");
+      modeSelect.className = "dltracker-buy-later-mode-select";
+      modeSelect.innerHTML = `
+        <option value="${BUY_LATER_SORT_MODE_PRICE}">低价优先</option>
+        <option value="${BUY_LATER_SORT_MODE_DISCOUNT}">折扣优先</option>
+      `;
+
+      const updateState = () => {
+        modeSelect.disabled = !input.checked;
+        modeWrap.classList.toggle("is-disabled", modeSelect.disabled);
+      };
+
+      input.addEventListener("change", () => {
+        const enabled = Boolean(input.checked);
+        setBuyLaterSortEnabled(enabled);
+        updateState();
+        if (enabled) {
+          stampBuyLaterOriginalOrder();
+          void sortBuyLaterItems();
+        } else {
+          restoreBuyLaterOriginalOrder();
+        }
+      });
+
+      modeSelect.addEventListener("change", () => {
+        setBuyLaterSortMode(modeSelect.value);
+        if (input.checked) {
+          void sortBuyLaterItems();
+        }
+      });
+
+      modeWrap.appendChild(modeLabel);
+      modeWrap.appendChild(modeSelect);
+
+      controls.appendChild(toggle);
+      controls.appendChild(modeWrap);
+      if (header.isMobile) {
+        header.title.insertAdjacentElement("afterend", controls);
+      } else {
+        subtitle.appendChild(controls);
+      }
+    } else if (
+      header.isMobile &&
+      (controls.parentElement !== subtitle ||
+        controls.previousElementSibling !== header.title)
+    ) {
+      header.title.insertAdjacentElement("afterend", controls);
+    }
+
+    const input = controls.querySelector(
+      '.dltracker-buy-later-toggle input[type="checkbox"]',
+    );
+    const modeSelect = controls.querySelector(
+      ".dltracker-buy-later-mode-select",
+    );
+    const modeWrap = controls.querySelector(".dltracker-buy-later-mode");
+
+    if (input) {
+      input.checked = isBuyLaterSortEnabled();
+    }
+    if (modeSelect) {
+      modeSelect.value = getBuyLaterSortMode();
+      modeSelect.disabled = !(input?.checked ?? true);
+    }
+    if (modeWrap && modeSelect) {
+      modeWrap.classList.toggle("is-disabled", modeSelect.disabled);
+    }
+  }
+
+  function getCartOwnerItem(item) {
+    return item?.closest("li.cart_list_item, li.n_work_list_item") || item;
+  }
+
+  function getBuyLaterOwnerItems() {
+    const rawItems = getCartItems().filter(
+      (item) => isRenderableCartItem(item) && isBuyLaterCartItem(item),
+    );
+    if (!rawItems.length) return [];
+
+    const ownerItems = [];
+    const seenOwners = new Set();
+    for (const item of rawItems) {
+      const owner = getCartOwnerItem(item);
+      if (!owner || seenOwners.has(owner)) continue;
+      seenOwners.add(owner);
+      ownerItems.push(owner);
+    }
+
+    return ownerItems;
+  }
+
+  function stampBuyLaterOriginalOrder() {
+    const ownerItems = getBuyLaterOwnerItems();
+    if (!ownerItems.length) return;
+
+    const parentCounters = new Map();
+    for (const owner of ownerItems) {
+      const parent = owner.parentElement;
+      if (!parent) continue;
+
+      const current = parentCounters.get(parent) || 0;
+      if (!owner.dataset.dltrackerBuyLaterOrder) {
+        owner.dataset.dltrackerBuyLaterOrder = String(current);
+      }
+      parentCounters.set(parent, current + 1);
+    }
+  }
+
+  function restoreBuyLaterOriginalOrder() {
+    if (!isCartPage(location.href)) return;
+
+    stampBuyLaterOriginalOrder();
+    const ownerItems = getBuyLaterOwnerItems();
+    if (!ownerItems.length) return;
+
+    const grouped = new Map();
+    for (const owner of ownerItems) {
+      const parent = owner.parentElement;
+      if (!parent) continue;
+
+      const parsed = Number(owner.dataset.dltrackerBuyLaterOrder);
+      const order = Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+
+      if (!grouped.has(parent)) grouped.set(parent, []);
+      grouped.get(parent).push({ node: owner, order });
+    }
+
+    for (const [parent, entries] of grouped.entries()) {
+      entries.sort((a, b) => a.order - b.order);
+      for (const entry of entries) {
+        parent.appendChild(entry.node);
+      }
+    }
+  }
+
+  function isBuyLaterCartItem(item) {
+    const owner = getCartOwnerItem(item);
+    const ownerId = String(owner?.id || "");
+    if (/^buy_later_/i.test(ownerId)) return true;
+    if (owner?.matches?.(".__buy_later_target")) return true;
+    if (owner?.querySelector?.(".__buy_later_target")) return true;
+    return false;
+  }
+
+  function getRecordCompareCurrentPrice(record) {
+    return (
+      safeNumber(record?.dlwatcherCurrentPrice) ??
+      safeNumber(record?.currentPrice)
+    );
+  }
+
+  function getRecordDiscountScore(record) {
+    const discountRate = safeNumber(record?.discountRate);
+    if (typeof discountRate === "number" && discountRate > 0) {
+      return discountRate;
+    }
+
+    const regularPrice = safeNumber(record?.regularPrice);
+    const lowestPrice = safeNumber(record?.lowestPrice);
+    if (
+      typeof regularPrice === "number" &&
+      typeof lowestPrice === "number" &&
+      regularPrice > 0
+    ) {
+      return Math.max(0, (1 - lowestPrice / regularPrice) * 100);
+    }
+
+    return 0;
+  }
+
+  function isRecordNewLowest(record) {
+    const compareCurrent = getRecordCompareCurrentPrice(record);
+    const lowestPrice = safeNumber(record?.lowestPrice);
+    if (typeof compareCurrent !== "number" || typeof lowestPrice !== "number") {
+      return false;
+    }
+    return (
+      hasEffectiveDiscount(record) &&
+      Math.abs(compareCurrent - lowestPrice) < 0.01
+    );
+  }
+
+  async function sortBuyLaterItems() {
+    if (!isCartPage(location.href)) return;
+    if (!isBuyLaterSortEnabled()) return;
+
+    stampBuyLaterOriginalOrder();
+    const ownerItems = getBuyLaterOwnerItems();
+    if (!ownerItems.length) return;
+    const sortMode = getBuyLaterSortMode();
+
+    const grouped = new Map();
+    for (const owner of ownerItems) {
+      const parent = owner.parentElement;
+      if (!parent) continue;
+
+      const rjCode = extractRjCodeFromCartItem(owner);
+      const record = rjCode ? await getPriceRecord(rjCode) : null;
+      const isNewLowest = isRecordNewLowest(record);
+      const compareCurrent = getRecordCompareCurrentPrice(record);
+      const currentRank =
+        typeof compareCurrent === "number"
+          ? compareCurrent
+          : Number.POSITIVE_INFINITY;
+      const discountRank = getRecordDiscountScore(record);
+
+      if (!grouped.has(parent)) grouped.set(parent, []);
+      grouped.get(parent).push({
+        node: owner,
+        isNewLowest,
+        currentRank,
+        discountRank,
+        order: grouped.get(parent).length,
+      });
+    }
+
+    for (const [parent, entries] of grouped.entries()) {
+      entries.sort((a, b) => {
+        if (a.isNewLowest !== b.isNewLowest) {
+          return a.isNewLowest ? -1 : 1;
+        }
+        if (sortMode === BUY_LATER_SORT_MODE_DISCOUNT) {
+          if (a.discountRank !== b.discountRank) {
+            return b.discountRank - a.discountRank;
+          }
+          if (a.currentRank !== b.currentRank) {
+            return a.currentRank - b.currentRank;
+          }
+        } else {
+          if (a.currentRank !== b.currentRank) {
+            return a.currentRank - b.currentRank;
+          }
+          if (a.discountRank !== b.discountRank) {
+            return b.discountRank - a.discountRank;
+          }
+        }
+        return a.order - b.order;
+      });
+
+      for (const entry of entries) {
+        parent.appendChild(entry.node);
+      }
+    }
   }
 
   function parseCurrentPrice() {
@@ -1331,9 +1731,7 @@
             record.regularPrice > 0
           ? (1 - record.lowestPrice / record.regularPrice) * 100
           : undefined;
-    const showOffBadge =
-      discounted &&
-      (!isCartContext || isAtLowest || isMobileCartContext);
+    const showOffBadge = discounted;
     if (
       showOffBadge &&
       typeof derivedDiscountRate === "number" &&
@@ -1576,6 +1974,8 @@
   }
 
   async function enhanceCartItems() {
+    injectBuyLaterSortToggle();
+
     const items = getCartItems();
     if (!items.length) return;
 
@@ -1612,7 +2012,10 @@
       });
     }
 
-    if (!tasks.length) return;
+    if (!tasks.length) {
+      await sortBuyLaterItems();
+      return;
+    }
 
     await mapWithConcurrency(tasks, CART_RENDER_CONCURRENCY, async (task) => {
       try {
@@ -1630,6 +2033,8 @@
         renderPriceCard(null, task.renderHost);
       }
     });
+
+    await sortBuyLaterItems();
   }
 
   function queueCartBootstrap() {
@@ -1798,8 +2203,11 @@
 }
 
 .${UI_CLASSNAME}.dltracker-cart-inline .dltracker-chip-normal {
+  flex-direction: column;
+  align-items: center;
   justify-content: center;
   text-align: center;
+  gap: 4px;
 }
 
 .${UI_CLASSNAME}.dltracker-cart-inline .dltracker-chip-hot {
@@ -1910,6 +2318,82 @@
   margin-top: 0;
 }
 
+.dltracker-buy-later-subtitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dltracker-buy-later-mobile-subtitle {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.dltracker-buy-later-controls {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.dltracker-buy-later-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #666;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.dltracker-buy-later-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.dltracker-buy-later-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #666;
+  white-space: nowrap;
+  margin-left: auto;
+}
+
+.dltracker-buy-later-mode.is-disabled {
+  opacity: 0.55;
+}
+
+.dltracker-buy-later-mode .dltracker-buy-later-mode-select {
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 6px;
+  border: 1px solid #c9c9c9;
+  background: #fff;
+  color: #444;
+  font-size: 12px;
+}
+
+.dltracker-buy-later-mobile-section > h2.sub_lead_01,
+.dltracker-buy-later-mobile-section > h2 {
+  width: 100%;
+}
+
+.dltracker-buy-later-mobile-section > .dltracker-buy-later-controls {
+  width: 100%;
+  margin: 8px 0 0;
+  margin-left: 0;
+  padding: 0 10px;
+  box-sizing: border-box;
+  justify-content: space-between;
+}
+
 .dltracker-import-box {
   margin: 10px 0 14px;
   padding: 10px 16px;
@@ -2017,6 +2501,22 @@
     margin: 0 0 8px;
   }
 
+  .dltracker-buy-later-subtitle {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .dltracker-buy-later-controls {
+    width: 100%;
+    justify-content: space-between;
+    margin-left: 0;
+  }
+
+  .dltracker-buy-later-mobile-section > .dltracker-buy-later-controls {
+    justify-content: space-between;
+  }
+
   .dltracker-import-box button {
     flex: 1 1 auto;
     min-width: 92px;
@@ -2090,6 +2590,7 @@
   async function start() {
     try {
       injectStyle();
+      showUpdateNoticeIfNeeded();
       await cleanExpiredCache();
       await bootstrap();
       installSpaListeners();
