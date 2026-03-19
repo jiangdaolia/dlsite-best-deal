@@ -37,6 +37,28 @@ npm run build
 
 构建产物在 `dist/` 目录，按上述步骤加载即可。
 
+### 油猴脚本安装（核心版）
+
+> 适合不想安装扩展、只需要页面注入功能的场景。
+
+1. 浏览器安装 Tampermonkey（或 Violentmonkey）
+2. 新建脚本
+3. 将仓库中的 `userscript/dl-price-tracker.user.js` 全部内容粘贴进去并保存
+4. 打开任意 `https://www.dlsite.com/*` 页面，脚本会自动运行
+
+油猴核心版当前包含：
+
+- 作品页史低显示 + 跳转 DLwatcher
+- 收藏 / Wishlist 页面导入收藏并批量同步史低
+- 收藏页卡片注入史低信息
+- 24h 本地缓存（IndexedDB）
+- 收藏页按钮：导入收藏 / 更新收藏价 / 导出 CSV
+
+与扩展版相比，油猴核心版不包含：
+
+- 浏览器扩展 Popup 面板
+- 独立的 Options 管理页
+
 ## 🖼️ 使用说明
 
 | 场景     | 操作                                                                                             |
