@@ -1,21 +1,23 @@
 // ==UserScript==
-// @name         DL Price Tracker (Userscript)
-// @namespace    https://github.com/Cassandra-fox/dlTracker
-// @version      0.1.1-us
+// @name         DL Price Tracker
+// @namespace    https://github.com/syoius/dlTracker4TamperMonkey
+// @version      0.1.1.1
 // @description  在 DLsite 页面显示史低价格，并支持导入收藏进行本地追踪
-// @author       Cassandra-fox
+// @author       Syoius & Cassandra-fox
 // @match        https://www.dlsite.com/*
 // @run-at       document-idle
 // @noframes
 // @grant        GM_xmlhttpRequest
 // @connect      dlwatcher.com
+// @updateURL    https://gitee.com/syoius/dlTracker4TamperMonkey/raw/main/userscript/dl-price-tracker.user.js
+// @downloadURL  https://gitee.com/syoius/dlTracker4TamperMonkey/raw/main/userscript/dl-price-tracker.user.js
 // ==/UserScript==
 
 (function () {
   "use strict";
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.1.1-us";
+  const APP_VERSION = "0.1.1.1";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
