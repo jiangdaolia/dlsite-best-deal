@@ -39,6 +39,8 @@
     '#work_price .work_buy_container',
     '#work_price',
     '#work_buy',
+    '.c-purchaseBox__priceInfo',
+    '.c-purchaseBox__value',
     '.work_buy_container',
     '.work_buy_content',
     '.work_price_wrap',
@@ -113,12 +115,55 @@
     const fuzzyCandidates = document.querySelectorAll('[id*="price"], [class*="price"]');
     for (const el of fuzzyCandidates) {
       const text = (el.textContent || '').replace(/\s+/g, ' ');
-      if (/円/.test(text)) {
+      if (/円|jpy|rmb/i.test(text)) {
         return el;
       }
     }
 
     return null;
+  }
+
+  function ensureMobileProductRenderHost() {
+    const purchaseBox = document.querySelector('.c-purchaseBox');
+    if (!purchaseBox) return null;
+
+    const purchaseNode = purchaseBox.querySelector(':scope > .c-purchaseBox__purchase') ||
+      purchaseBox.querySelector('.c-purchaseBox__purchase');
+
+    const existed = purchaseBox.querySelector('.dltracker-mobile-product-host');
+    if (existed) {
+      if (purchaseNode && existed.nextSibling !== purchaseNode) {
+        purchaseBox.insertBefore(existed, purchaseNode);
+      }
+      return existed;
+    }
+
+    const host = document.createElement('div');
+    host.className = 'dltracker-mobile-product-host';
+
+    if (purchaseNode) {
+      purchaseBox.insertBefore(host, purchaseNode);
+    } else {
+      purchaseBox.appendChild(host);
+    }
+
+    return host;
+  }
+
+  function findProductRenderHost() {
+    // 移动端优先：插在 c-purchaseBox__inner 和 c-purchaseBox__purchase 之间
+    const mobileHost = ensureMobileProductRenderHost();
+    if (mobileHost) return mobileHost;
+    return findProductPriceHost();
+  }
+
+  function hasProductContainer() {
+    return !!(
+      findProductPriceHost() ||
+      document.querySelector('.c-purchaseBox') ||
+      document.querySelector('.c-purchaseBox__inner') ||
+      document.querySelector('.c-purchaseBox__purchase')
+    );
   }
 
   function getWishlistCards() {
@@ -211,6 +256,8 @@
 
   function parseCurrentPrice() {
     const candidates = [
+      document.querySelector('.c-purchaseBox__priceInfo .app-price'),
+      document.querySelector('.c-purchaseBox__priceInfo .c-purchaseBox__value'),
       findProductPriceHost(),
       document.querySelector('.work_price_wrap'),
       document.querySelector('[class*="work_price"]'),
@@ -218,7 +265,9 @@
 
     for (const target of candidates) {
       const cleaned = (target.textContent || '').replace(/,/g, '');
-      const matched = cleaned.match(/(\d{2,7})\s*円/);
+      // 仅采集日元价格；RMB 等本地化货币不写入 currentPrice，避免与日元史低混比
+      if (/rmb|usd|eur/i.test(cleaned)) continue;
+      const matched = cleaned.match(/(\d{1,8}(?:\.\d{1,2})?)\s*(円|jpy)/i);
       if (matched) return Number(matched[1]);
     }
 
@@ -711,7 +760,7 @@
     const rjCode = pathMatch ? pathMatch[1].toUpperCase() : extractRjCodeFromUrl(location.href);
     if (!rjCode) return;
 
-    const host = findProductPriceHost();
+    const host = findProductRenderHost();
     if (!host) return;
 
     renderLoadingCard(host);
@@ -900,7 +949,7 @@
 
   function waitForElement(url) {
     const checker = isProductPage(url)
-      ? () => !!findProductPriceHost()
+      ? () => hasProductContainer()
       : isFavoritePage(url)
         ? () => hasWishlistContainer()
         : null;
@@ -988,6 +1037,10 @@
   margin-top: 6px;
 }
 
+.dltracker-mobile-product-host {
+  margin: 10px 0;
+}
+
 .dltracker-import-box {
   margin: 10px 0 14px;
   padding: 10px 16px;
@@ -1060,6 +1113,10 @@
     border-radius: 8px;
   }
 
+  .dltracker-mobile-product-host {
+    margin: 8px 0;
+  }
+
   .dltracker-import-box button {
     flex: 1 1 auto;
     min-width: 92px;
@@ -1110,7 +1167,7 @@
       domDebounceTimer = setTimeout(() => {
         domDebounceTimer = null;
         if (!isProductPage(location.href)) return;
-        const host = findProductPriceHost();
+        const host = findProductRenderHost();
         if (host && !host.querySelector(`.${UI_CLASSNAME}`)) {
           void bootstrap();
         }
