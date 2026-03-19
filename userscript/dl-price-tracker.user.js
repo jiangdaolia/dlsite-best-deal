@@ -100,6 +100,10 @@
     return /\/(favorites?|wishlist)(?:[/?#]|$)/i.test(url);
   }
 
+  function isTouchPath(url) {
+    return /-touch\//i.test(url);
+  }
+
   function firstElementBySelectors(selectors, root) {
     for (const selector of selectors) {
       const found = root.querySelector(selector);
@@ -124,39 +128,39 @@
   }
 
   function ensureMobileProductRenderHost() {
-    const purchaseInner = document.querySelector('.c-purchaseBox__inner');
-    if (!purchaseInner) return null;
+    if (!isTouchPath(location.href)) return null;
 
-    const allHosts = document.querySelectorAll('.dltracker-mobile-product-host');
-    let host = null;
-    for (const node of allHosts) {
-      if (purchaseInner.contains(node)) {
-        host = node;
-        break;
-      }
-    }
+    const purchaseBox = document.querySelector('.c-purchaseBox');
+    if (!purchaseBox) return null;
+    if (!purchaseBox.parentElement) return null;
+
+    const parent = purchaseBox.parentElement;
+    const beforeSibling = purchaseBox.previousElementSibling;
+
+    let host =
+      (beforeSibling && beforeSibling.classList?.contains('dltracker-mobile-product-host') ? beforeSibling : null) ||
+      purchaseBox.querySelector('.dltracker-mobile-product-host');
 
     if (!host) {
       host = document.createElement('div');
       host.className = 'dltracker-mobile-product-host';
     }
 
-    const subNode = [...purchaseInner.children].find((el) => el.classList?.contains('c-purchaseBox__sub')) ||
-      purchaseInner.querySelector('.c-purchaseBox__sub');
+    if (host.parentElement !== parent || host.nextElementSibling !== purchaseBox) {
+      parent.insertBefore(host, purchaseBox);
+    }
 
-    if (subNode && subNode.parentElement === purchaseInner) {
-      if (host.parentElement !== purchaseInner || host.previousElementSibling !== subNode) {
-        subNode.insertAdjacentElement('afterend', host);
-      }
-    } else if (host.parentElement !== purchaseInner) {
-      purchaseInner.appendChild(host);
+    // 清理旧位置残留，避免 SPA 场景出现多个容器。
+    const allHosts = document.querySelectorAll('.dltracker-mobile-product-host');
+    for (const node of allHosts) {
+      if (node !== host) node.remove();
     }
 
     return host;
   }
 
   function findProductRenderHost() {
-    // 移动端优先：插在 c-purchaseBox__inner 和 c-purchaseBox__purchase 之间
+    // 移动端优先：插在整个 c-purchaseBox 前面，独占一行。
     const mobileHost = ensureMobileProductRenderHost();
     if (mobileHost) return mobileHost;
     return findProductPriceHost();
@@ -1043,7 +1047,9 @@
 }
 
 .dltracker-mobile-product-host {
-  margin: 10px 0;
+  margin: 0 0 10px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .dltracker-import-box {
@@ -1119,7 +1125,7 @@
   }
 
   .dltracker-mobile-product-host {
-    margin: 8px 0;
+    margin: 0 0 8px;
   }
 
   .dltracker-import-box button {
