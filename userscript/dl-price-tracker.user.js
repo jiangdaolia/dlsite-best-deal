@@ -124,27 +124,32 @@
   }
 
   function ensureMobileProductRenderHost() {
-    const purchaseBox = document.querySelector('.c-purchaseBox');
-    if (!purchaseBox) return null;
+    const purchaseInner = document.querySelector('.c-purchaseBox__inner');
+    if (!purchaseInner) return null;
 
-    const purchaseNode = purchaseBox.querySelector(':scope > .c-purchaseBox__purchase') ||
-      purchaseBox.querySelector('.c-purchaseBox__purchase');
-
-    const existed = purchaseBox.querySelector('.dltracker-mobile-product-host');
-    if (existed) {
-      if (purchaseNode && existed.nextSibling !== purchaseNode) {
-        purchaseBox.insertBefore(existed, purchaseNode);
+    const allHosts = document.querySelectorAll('.dltracker-mobile-product-host');
+    let host = null;
+    for (const node of allHosts) {
+      if (purchaseInner.contains(node)) {
+        host = node;
+        break;
       }
-      return existed;
     }
 
-    const host = document.createElement('div');
-    host.className = 'dltracker-mobile-product-host';
+    if (!host) {
+      host = document.createElement('div');
+      host.className = 'dltracker-mobile-product-host';
+    }
 
-    if (purchaseNode) {
-      purchaseBox.insertBefore(host, purchaseNode);
-    } else {
-      purchaseBox.appendChild(host);
+    const subNode = [...purchaseInner.children].find((el) => el.classList?.contains('c-purchaseBox__sub')) ||
+      purchaseInner.querySelector('.c-purchaseBox__sub');
+
+    if (subNode && subNode.parentElement === purchaseInner) {
+      if (host.parentElement !== purchaseInner || host.previousElementSibling !== subNode) {
+        subNode.insertAdjacentElement('afterend', host);
+      }
+    } else if (host.parentElement !== purchaseInner) {
+      purchaseInner.appendChild(host);
     }
 
     return host;
