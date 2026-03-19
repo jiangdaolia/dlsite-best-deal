@@ -35,6 +35,25 @@
   const STORE_PRICES = 'prices';
   const STORE_FAVORITES = 'favorites';
 
+  const PRODUCT_PRICE_HOST_SELECTORS = [
+    '#work_price .work_buy_container',
+    '#work_price',
+    '#work_buy',
+    '.work_buy_container',
+    '.work_buy_content',
+    '.work_price_wrap',
+    '[data-testid*="price"]',
+  ];
+
+  const WISHLIST_CARD_SELECTORS = [
+    '#wishlist_work article',
+    '#wishlist_work li',
+    '[id*="wishlist"] article',
+    '[id*="wishlist"] li',
+    '.wishlist_work article',
+    '.wishlist_work li',
+  ];
+
   let dbPromise = null;
 
   function nowIso() {
@@ -79,16 +98,138 @@
     return /\/(favorites?|wishlist)(?:[/?#]|$)/i.test(url);
   }
 
+  function firstElementBySelectors(selectors, root) {
+    for (const selector of selectors) {
+      const found = root.querySelector(selector);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function findProductPriceHost() {
+    const direct = firstElementBySelectors(PRODUCT_PRICE_HOST_SELECTORS, document);
+    if (direct) return direct;
+
+    const fuzzyCandidates = document.querySelectorAll('[id*="price"], [class*="price"]');
+    for (const el of fuzzyCandidates) {
+      const text = (el.textContent || '').replace(/\s+/g, ' ');
+      if (/円/.test(text)) {
+        return el;
+      }
+    }
+
+    return null;
+  }
+
+  function getWishlistCards() {
+    for (const selector of WISHLIST_CARD_SELECTORS) {
+      const nodes = document.querySelectorAll(selector);
+      if (nodes.length > 0) return [...nodes];
+    }
+
+    // 移动端兜底：按作品链接回溯到卡片容器。
+    const links = document.querySelectorAll('a[href*="product_id/"]');
+    if (!links.length) return [];
+
+    const seen = new Set();
+    const cards = [];
+    for (const link of links) {
+      const card = link.closest('article, li, .item, .product-item, .work');
+      if (!card) continue;
+      if (seen.has(card)) continue;
+      seen.add(card);
+      cards.push(card);
+    }
+
+    if (cards.length > 0) return cards;
+    return [];
+  }
+
+  function findWishlistPriceHost(card) {
+    const selectors = [
+      'div.primary dl dd.work_price_wrap',
+      'dd.work_price_wrap',
+      '.work_price_wrap',
+      '[class*="price"]',
+      'dd',
+      'dl',
+    ];
+
+    for (const selector of selectors) {
+      const node = card.querySelector(selector);
+      if (node) return node;
+    }
+
+    const productLink = card.querySelector('a[href*="product_id/"]');
+    if (productLink) {
+      const fallbackHost = document.createElement('div');
+      fallbackHost.className = 'dltracker-inline-host';
+      productLink.insertAdjacentElement('afterend', fallbackHost);
+      return fallbackHost;
+    }
+
+    return card;
+  }
+
+  function findFavoritePanelAnchor() {
+    const wishlistRoot = firstElementBySelectors(
+      ['#wishlist_work', '[id*="wishlist_work"]', '[id*="wishlist"]', '.wishlist_work'],
+      document,
+    );
+    if (wishlistRoot) {
+      return {
+        parent: wishlistRoot.parentElement || document.body,
+        before: wishlistRoot,
+      };
+    }
+
+    const mainInner = document.querySelector('#main_inner');
+    if (mainInner) {
+      return {
+        parent: mainInner,
+        before: mainInner.firstChild,
+      };
+    }
+
+    const main = document.querySelector('main');
+    if (main) {
+      return {
+        parent: main,
+        before: main.firstChild,
+      };
+    }
+
+    return {
+      parent: document.body,
+      before: document.body.firstChild,
+    };
+  }
+
+  function hasWishlistContainer() {
+    return getWishlistCards().length > 0 || !!firstElementBySelectors(['#wishlist_work', '[id*="wishlist"]'], document);
+  }
+
   function parseCurrentPrice() {
-    const target = document.querySelector('#work_price')?.textContent;
-    if (!target) return undefined;
-    const cleaned = target.replace(/,/g, '');
-    const matched = cleaned.match(/(\d{2,6})\s*円/);
-    return matched ? Number(matched[1]) : undefined;
+    const candidates = [
+      findProductPriceHost(),
+      document.querySelector('.work_price_wrap'),
+      document.querySelector('[class*="work_price"]'),
+    ].filter(Boolean);
+
+    for (const target of candidates) {
+      const cleaned = (target.textContent || '').replace(/,/g, '');
+      const matched = cleaned.match(/(\d{2,7})\s*円/);
+      if (matched) return Number(matched[1]);
+    }
+
+    return undefined;
   }
 
   function parseTitle() {
-    const h1 = document.querySelector('h1')?.textContent?.trim();
+    const h1 =
+      document.querySelector('h1')?.textContent?.trim() ||
+      document.querySelector('.work_name')?.textContent?.trim() ||
+      document.querySelector('[class*="title"]')?.textContent?.trim();
     return h1 || document.title;
   }
 
@@ -570,7 +711,7 @@
     const rjCode = pathMatch ? pathMatch[1].toUpperCase() : extractRjCodeFromUrl(location.href);
     if (!rjCode) return;
 
-    const host = document.querySelector('#work_price .work_buy_container') || document.querySelector('#work_price');
+    const host = findProductPriceHost();
     if (!host) return;
 
     renderLoadingCard(host);
@@ -624,13 +765,13 @@
   function injectFavoriteImportBox() {
     if (document.querySelector('.dltracker-import-box')) return;
 
-    const baseTitle = document.querySelector('#main_inner > div.base_title');
-    const anchor = baseTitle?.parentElement || document.body;
+    const anchorInfo = findFavoritePanelAnchor();
 
     const box = document.createElement('div');
     box.className = 'dltracker-import-box';
 
     const text = document.createElement('span');
+    text.className = 'dltracker-import-title';
     text.textContent = `${APP_NAME}：可导入收藏并抓取史低价`;
 
     const importBtn = createActionButton('导入收藏');
@@ -714,21 +855,19 @@
     box.appendChild(exportBtn);
     box.appendChild(status);
 
-    if (baseTitle && baseTitle.nextSibling) {
-      anchor.insertBefore(box, baseTitle.nextSibling);
-    } else if (baseTitle) {
-      anchor.appendChild(box);
+    if (anchorInfo.before) {
+      anchorInfo.parent.insertBefore(box, anchorInfo.before);
     } else {
-      anchor.prepend(box);
+      anchorInfo.parent.prepend(box);
     }
   }
 
   async function enhanceWishlistCards() {
-    const cards = document.querySelectorAll('#wishlist_work article');
+    const cards = getWishlistCards();
     if (!cards.length) return;
 
     for (const card of cards) {
-      const priceHost = card.querySelector('div.primary dl dd.work_price_wrap');
+      const priceHost = findWishlistPriceHost(card);
       if (!priceHost) continue;
       if (priceHost.querySelector(`.${UI_CLASSNAME}`)) continue;
 
@@ -760,17 +899,21 @@
   }
 
   function waitForElement(url) {
-    const selector = isProductPage(url) ? '#work_price' : isFavoritePage(url) ? '#wishlist_work' : null;
-    if (!selector) return Promise.resolve();
+    const checker = isProductPage(url)
+      ? () => !!findProductPriceHost()
+      : isFavoritePage(url)
+        ? () => hasWishlistContainer()
+        : null;
+    if (!checker) return Promise.resolve();
 
     return new Promise((resolve) => {
-      if (document.querySelector(selector)) {
+      if (checker()) {
         resolve();
         return;
       }
 
       const observer = new MutationObserver(() => {
-        if (document.querySelector(selector)) {
+        if (checker()) {
           observer.disconnect();
           resolve();
         }
@@ -806,32 +949,43 @@
   flex-direction: column;
   gap: 6px;
   font-size: 13px;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .${UI_CLASSNAME} .dltracker-chip {
   display: inline-flex;
   align-items: center;
   width: fit-content;
+  max-width: 100%;
   padding: 4px 8px;
   border-radius: 6px;
   color: #fff;
   background: #1f8f4e;
   font-weight: 700;
+  box-sizing: border-box;
+  word-break: break-word;
 }
 
 .${UI_CLASSNAME} .dltracker-btn {
   display: inline-flex;
   width: fit-content;
+  max-width: 100%;
   padding: 4px 8px;
   border-radius: 6px;
   border: none;
   color: #fff;
   background: #2463eb;
   cursor: pointer;
+  box-sizing: border-box;
 }
 
 .${UI_CLASSNAME} .dltracker-error {
   background: #cb2f2f;
+}
+
+.dltracker-inline-host {
+  margin-top: 6px;
 }
 
 .dltracker-import-box {
@@ -846,6 +1000,15 @@
   gap: 10px;
   font-size: 13px;
   color: #3d6e2a;
+  width: 100%;
+  box-sizing: border-box;
+  overflow: visible;
+}
+
+.dltracker-import-box .dltracker-import-title {
+  flex: 1 1 100%;
+  width: 100%;
+  line-height: 1.4;
 }
 
 .dltracker-import-box button {
@@ -870,8 +1033,44 @@
 }
 
 .dltracker-import-box .dltracker-import-status {
+  flex: 1 1 100%;
+  width: 100%;
+  margin-top: 2px;
   color: #666;
   font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  .${UI_CLASSNAME} {
+    margin-top: 6px;
+    gap: 5px;
+    font-size: 12px;
+  }
+
+  .${UI_CLASSNAME} .dltracker-chip,
+  .${UI_CLASSNAME} .dltracker-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .dltracker-import-box {
+    margin: 8px 0 10px;
+    padding: 8px 10px;
+    gap: 8px;
+    border-radius: 8px;
+  }
+
+  .dltracker-import-box button {
+    flex: 1 1 auto;
+    min-width: 92px;
+    padding: 8px 10px;
+    font-size: 14px;
+  }
+
+  .dltracker-import-box .dltracker-import-title,
+  .dltracker-import-box .dltracker-import-status {
+    font-size: 12px;
+  }
 }
 `;
     document.head.appendChild(style);
@@ -911,7 +1110,7 @@
       domDebounceTimer = setTimeout(() => {
         domDebounceTimer = null;
         if (!isProductPage(location.href)) return;
-        const host = document.querySelector('#work_price .work_buy_container') || document.querySelector('#work_price');
+        const host = findProductPriceHost();
         if (host && !host.querySelector(`.${UI_CLASSNAME}`)) {
           void bootstrap();
         }
