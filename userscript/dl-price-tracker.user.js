@@ -903,6 +903,13 @@
     if (isProductPage(location.href)) {
       card.classList.add("dltracker-product-wide");
     }
+    if (
+      isFavoritePage(location.href) &&
+      !isTouchPath(location.href) &&
+      !isNarrowViewport()
+    ) {
+      card.classList.add("dltracker-wishlist-inline");
+    }
 
     const chip = document.createElement("span");
     chip.className = "dltracker-chip";
@@ -927,7 +934,7 @@
     if (typeof compareCurrent === "number" && !isAtLowest) {
       const currentChip = document.createElement("span");
       currentChip.className = "dltracker-chip dltracker-chip-current";
-      currentChip.textContent = `当前价格: ${toYen(compareCurrent)}`;
+      currentChip.textContent = `当前价格 ${toYen(compareCurrent)}`;
       card.appendChild(currentChip);
     }
 
@@ -939,7 +946,7 @@
     text.className = "dltracker-chip-text";
     text.textContent = isAtLowest
       ? `新史低 ${toYen(record.lowestPrice)}`
-      : `史低: ${toYen(record.lowestPrice)}`;
+      : `史低 ${toYen(record.lowestPrice)}`;
     chip.appendChild(text);
 
     if (typeof record.discountRate === "number" && record.discountRate > 0) {
@@ -1259,6 +1266,20 @@
   box-sizing: border-box;
 }
 
+.${UI_CLASSNAME}.dltracker-wishlist-inline {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: nowrap;
+  margin-top: -10px;
+  margin-bottom: 10px;
+}
+
+.${UI_CLASSNAME}.dltracker-wishlist-inline .dltracker-chip,
+.${UI_CLASSNAME}.dltracker-wishlist-inline .dltracker-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .${UI_CLASSNAME} .dltracker-chip {
   display: inline-flex;
   align-items: center;
@@ -1269,7 +1290,6 @@
   border-radius: 6px;
   color: #fff;
   background: #2f7e49;
-  font-weight: 700;
   box-sizing: border-box;
   word-break: break-word;
 }
