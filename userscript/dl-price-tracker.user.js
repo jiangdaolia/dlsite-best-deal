@@ -25,6 +25,7 @@
   const REQUEST_TIMEOUT_MS = 10000;
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   const MAX_FAVORITES = 500;
+  const ENABLE_WISHLIST_ACTION_PANEL = false;
 
   const RJ_CODE_REGEX = /\b([RB]J\d{6,})\b/i;
   const UI_CLASSNAME = "dltracker-lowest-price-card";
@@ -875,14 +876,15 @@
     URL.revokeObjectURL(url);
   }
 
-  function renderPriceCard(record, host, options) {
-    const isProductContext = Boolean(options?.isProductContext);
-
+  function renderPriceCard(record, host) {
     const existed = host.querySelector(`.${UI_CLASSNAME}`);
     if (existed) existed.remove();
 
     const card = document.createElement("div");
     card.className = UI_CLASSNAME;
+    if (isProductPage(location.href) && !isTouchPath(location.href)) {
+      card.classList.add("dltracker-product-wide");
+    }
 
     const chip = document.createElement("span");
     chip.className = "dltracker-chip";
@@ -895,39 +897,31 @@
       return;
     }
 
-    if (isProductContext) {
-      const compareCurrent =
-        typeof record.dlwatcherCurrentPrice === "number"
-          ? record.dlwatcherCurrentPrice
-          : record.currentPrice;
-      const isAtLowest =
-        typeof compareCurrent === "number" &&
-        typeof record.lowestPrice === "number" &&
-        Math.abs(compareCurrent - record.lowestPrice) < 0.01;
+    const compareCurrent =
+      typeof record.dlwatcherCurrentPrice === "number"
+        ? record.dlwatcherCurrentPrice
+        : record.currentPrice;
+    const isAtLowest =
+      typeof compareCurrent === "number" &&
+      typeof record.lowestPrice === "number" &&
+      Math.abs(compareCurrent - record.lowestPrice) < 0.01;
 
-      chip.classList.add(
-        isAtLowest ? "dltracker-chip-hot" : "dltracker-chip-normal",
-      );
+    chip.classList.add(
+      isAtLowest ? "dltracker-chip-hot" : "dltracker-chip-normal",
+    );
 
-      const text = document.createElement("span");
-      text.className = "dltracker-chip-text";
-      text.textContent = isAtLowest
-        ? `新史低 ${toYen(record.lowestPrice)}`
-        : `史低: ${toYen(record.lowestPrice)}`;
-      chip.appendChild(text);
+    const text = document.createElement("span");
+    text.className = "dltracker-chip-text";
+    text.textContent = isAtLowest
+      ? `新史低 ${toYen(record.lowestPrice)}`
+      : `史低: ${toYen(record.lowestPrice)}`;
+    chip.appendChild(text);
 
-      if (typeof record.discountRate === "number" && record.discountRate > 0) {
-        const offBadge = document.createElement("span");
-        offBadge.className = "dltracker-off-badge";
-        offBadge.textContent = `${Math.round(record.discountRate)}OFF`;
-        chip.appendChild(offBadge);
-      }
-    } else {
-      const discountText =
-        typeof record.discountRate === "number"
-          ? ` (${record.discountRate.toFixed(1)}%OFF)`
-          : "";
-      chip.textContent = `史低：${toYen(record.lowestPrice)}${discountText}`;
+    if (typeof record.discountRate === "number" && record.discountRate > 0) {
+      const offBadge = document.createElement("span");
+      offBadge.className = "dltracker-off-badge";
+      offBadge.textContent = `${Math.round(record.discountRate)}OFF`;
+      chip.appendChild(offBadge);
     }
 
     const button = document.createElement("a");
@@ -976,7 +970,7 @@
       currentPrice: parseCurrentPrice(),
       forceFetch: false,
     });
-    renderPriceCard(record, host, { isProductContext: true });
+    renderPriceCard(record, host);
   }
 
   async function fetchFavoriteCodesFromApi() {
@@ -1014,6 +1008,11 @@
     button.type = "button";
     button.textContent = text;
     return button;
+  }
+
+  function removeFavoriteImportBox() {
+    const panel = document.querySelector(".dltracker-import-box");
+    if (panel) panel.remove();
   }
 
   function injectFavoriteImportBox() {
@@ -1142,9 +1141,7 @@
         rjCode,
         title,
         forceFetch: false,
-      }).then((record) =>
-        renderPriceCard(record, renderHost, { isProductContext: false }),
-      );
+      }).then((record) => renderPriceCard(record, renderHost));
     }
   }
 
@@ -1191,7 +1188,11 @@
       await enhanceProductPage();
     }
     if (isFavoritePage(url)) {
-      injectFavoriteImportBox();
+      if (ENABLE_WISHLIST_ACTION_PANEL) {
+        injectFavoriteImportBox();
+      } else {
+        removeFavoriteImportBox();
+      }
       await enhanceWishlistCards();
     }
   }
@@ -1209,6 +1210,19 @@
   gap: 6px;
   font-size: 13px;
   max-width: 100%;
+  box-sizing: border-box;
+}
+
+.${UI_CLASSNAME}.dltracker-product-wide {
+  width: 100%;
+  align-items: stretch;
+}
+
+.${UI_CLASSNAME}.dltracker-product-wide .dltracker-chip,
+.${UI_CLASSNAME}.dltracker-product-wide .dltracker-btn {
+  width: 100%;
+  justify-content: center;
+  text-align: center;
   box-sizing: border-box;
 }
 
