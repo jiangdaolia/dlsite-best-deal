@@ -25,6 +25,9 @@
   const BATCH_SIZE = 10;
   const BATCH_INTERVAL_MS = 1000;
   const REQUEST_TIMEOUT_MS = 10000;
+  const CART_RENDER_CONCURRENCY = 4;
+  const RETRYABLE_FETCH_ATTEMPTS = 1;
+  const RETRY_BASE_DELAY_MS = 450;
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   const MAX_FAVORITES = 500;
   const ENABLE_WISHLIST_ACTION_PANEL = false;
@@ -59,7 +62,22 @@
     ".wishlist_work li",
   ];
 
+  const CART_ITEM_SELECTORS = [
+    "li.cart_list_item._cart_items",
+    "li.cart_list_item[id^='buy_now_']",
+    "li.cart_list_item[id^='buy_later_']",
+    "li.cart_list_item[data-workno]",
+    "li.n_work_list_item._cart_item",
+    "li.n_work_list_item[id^='buy_now_']",
+    "li.n_work_list_item[id^='buy_later_']",
+    "li.n_work_list_item[data-workno]",
+    ".__buy_now_target",
+    ".__buy_later_target",
+  ];
+
   let dbPromise = null;
+  const recordInFlight = new Map();
+  const canonicalRjCache = new Map();
 
   function nowIso() {
     return new Date().toISOString();
@@ -67,6 +85,21 @@
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function mapWithConcurrency(items, limit, worker) {
+    if (!Array.isArray(items) || !items.length) return;
+    const concurrency = Math.max(1, Math.min(limit || 1, items.length));
+    let cursor = 0;
+
+    const run = async () => {
+      while (cursor < items.length) {
+        const index = cursor++;
+        await worker(items[index], index);
+      }
+    };
+
+    await Promise.all(Array.from({ length: concurrency }, () => run()));
   }
 
   function toYen(value) {
@@ -78,6 +111,23 @@
     return typeof value === "number" && Number.isFinite(value)
       ? value
       : undefined;
+  }
+
+  function hasEffectiveDiscount(record) {
+    const discountRate = safeNumber(record?.discountRate);
+    if (typeof discountRate === "number" && discountRate > 0) return true;
+
+    const regularPrice = safeNumber(record?.regularPrice);
+    const lowestPrice = safeNumber(record?.lowestPrice);
+    if (
+      typeof regularPrice === "number" &&
+      typeof lowestPrice === "number" &&
+      regularPrice - lowestPrice > 0.01
+    ) {
+      return true;
+    }
+
+    return false;
   }
 
   function parseNumberish(value) {
@@ -121,6 +171,10 @@
 
   function isFavoritePage(url) {
     return /\/(favorites?|wishlist)(?:[/?#]|$)/i.test(url);
+  }
+
+  function isCartPage(url) {
+    return /\/cart(?:[/?#]|$)/i.test(url);
   }
 
   function isTouchPath(url) {
@@ -354,6 +408,183 @@
     );
   }
 
+  function getCartItems() {
+    const items = [];
+    const seen = new Set();
+    const selectors = [...CART_ITEM_SELECTORS, "li.cart_list_item"];
+    const listItemSelector = "li.cart_list_item, li.n_work_list_item";
+    const cartTargetSelector = ".__buy_now_target, .__buy_later_target";
+
+    for (const selector of selectors) {
+      const nodes = document.querySelectorAll(selector);
+      for (const node of nodes) {
+        const item =
+          node.closest(listItemSelector) ||
+          node.closest(cartTargetSelector) ||
+          node;
+        if (seen.has(item)) continue;
+        seen.add(item);
+        items.push(item);
+      }
+    }
+
+    return items;
+  }
+
+  function hasCartContainer() {
+    return getCartItems().some((item) => isRenderableCartItem(item));
+  }
+
+  function findCartPriceHost(item) {
+    const selectors = [
+      ".__buy_now_target .n_work_price_wrap",
+      ".__buy_later_target .n_work_price_wrap",
+      ".n_work_price_wrap",
+      ".__buy_now_target .work_price",
+      ".__buy_later_target .work_price",
+      ".work_price",
+    ];
+    for (const selector of selectors) {
+      const node = item.querySelector(selector);
+      if (node) return node;
+    }
+    return null;
+  }
+
+  function ensureCartRenderHost(item) {
+    const existed = item.querySelector(".dltracker-cart-host");
+    let priceHost = findCartPriceHost(item);
+    if (priceHost?.tagName === "SPAN" && priceHost.parentElement) {
+      priceHost = priceHost.parentElement;
+    }
+    if (existed) {
+      if (priceHost && existed.parentElement !== priceHost) {
+        priceHost.appendChild(existed);
+      }
+      return existed;
+    }
+
+    const host = document.createElement("div");
+    host.className = "dltracker-cart-host";
+
+    if (priceHost?.parentElement) {
+      // 放在 work_price 内，和价格同一列纵向排列，避免横向挤压布局。
+      priceHost.appendChild(host);
+      return host;
+    }
+
+    const inner =
+      item.querySelector(".__buy_now_target .cart_list_item_inner") ||
+      item.querySelector(".__buy_later_target .cart_list_item_inner") ||
+      item.querySelector(".cart_list_item_inner");
+    if (inner) {
+      inner.appendChild(host);
+      return host;
+    }
+
+    item.appendChild(host);
+    return host;
+  }
+
+  function extractRjCodeFromCartItem(item) {
+    const fromData =
+      item.getAttribute("data-workno") ||
+      item.getAttribute("data-product-id") ||
+      item.getAttribute("data-pack-parent-id");
+    if (fromData && isValidRjCode(fromData)) return fromData.toUpperCase();
+
+    const link = item.querySelector('a[href*="product_id/"]');
+    const href = link?.getAttribute("href") || "";
+    const matched = href.match(/product_id\/([RB]J\d{6,})/i);
+    return matched ? matched[1].toUpperCase() : null;
+  }
+
+  function parseTranslationInfo(raw) {
+    if (typeof raw !== "string" || !raw.trim()) return null;
+    const normalized = raw.replace(/&quot;/g, '"');
+    try {
+      return JSON.parse(normalized);
+    } catch {
+      return null;
+    }
+  }
+
+  function extractFallbackRjCodesFromCartItem(item, primaryRjCode) {
+    const result = [];
+    const seen = new Set([String(primaryRjCode || "").toUpperCase()]);
+    const add = (value) => {
+      if (!isValidRjCode(value)) return;
+      const code = String(value).toUpperCase();
+      if (seen.has(code)) return;
+      seen.add(code);
+      result.push(code);
+    };
+
+    const info = parseTranslationInfo(
+      item.getAttribute("data-translation_info"),
+    );
+    add(info?.parent_workno);
+    add(info?.original_workno);
+
+    const fromData = [
+      item.getAttribute("data-pack-parent-id"),
+      item.getAttribute("data-product-id"),
+      item.getAttribute("data-workno"),
+    ];
+    for (const code of fromData) add(code);
+
+    const productLink = item.querySelector('a[href*="product_id/"]');
+    if (productLink) {
+      const href = productLink.getAttribute("href") || "";
+      add(extractRjCodeFromUrl(href));
+      try {
+        const url = new URL(href, location.origin);
+        add(url.searchParams.get("translation"));
+      } catch {
+        // noop
+      }
+    }
+
+    return result;
+  }
+
+  async function resolveCanonicalRjCodeFromProductHref(productHref) {
+    if (typeof productHref !== "string" || !productHref.trim()) return null;
+    const href = productHref.trim();
+    if (canonicalRjCache.has(href)) {
+      return canonicalRjCache.get(href) || null;
+    }
+
+    try {
+      const response = await fetch(href, {
+        method: "GET",
+        credentials: "include",
+        redirect: "follow",
+      });
+      const resolved = extractRjCodeFromUrl(response.url || href);
+      const code = isValidRjCode(resolved) ? resolved : null;
+      canonicalRjCache.set(href, code);
+      return code;
+    } catch (error) {
+      console.warn(`[${APP_NAME}] resolve canonical RJ failed:`, error);
+      canonicalRjCache.set(href, null);
+      return null;
+    }
+  }
+
+  function isRenderableCartItem(item) {
+    if (!item) return false;
+    const ownerItem =
+      item.closest("li.cart_list_item, li.n_work_list_item") || item;
+    if (ownerItem.classList?.contains("_removed")) return false;
+    if (ownerItem.getAttribute("style")?.includes("display:none")) return false;
+    const hasCartTarget =
+      ownerItem.matches?.(".__buy_now_target, .__buy_later_target") ||
+      !!ownerItem.querySelector(".__buy_now_target, .__buy_later_target");
+    if (!hasCartTarget) return false;
+    return true;
+  }
+
   function parseCurrentPrice() {
     const candidates = [
       document.querySelector(".c-purchaseBox__priceInfo .app-price"),
@@ -390,6 +621,19 @@
     if (!record?.lastChecked) return false;
     const checkedAt = new Date(record.lastChecked).getTime();
     return Number.isFinite(checkedAt) && Date.now() - checkedAt < CACHE_TTL_MS;
+  }
+
+  function hasUsableLowestPrice(record) {
+    return typeof record?.lowestPrice === "number";
+  }
+
+  async function getReusablePriceRecord(rjCode) {
+    if (!isValidRjCode(rjCode)) return null;
+    const record = await getPriceRecord(String(rjCode).toUpperCase());
+    if (!record) return null;
+    const reusable = record.isFavorite || isCacheFresh(record);
+    if (!reusable || !hasUsableLowestPrice(record)) return null;
+    return record;
   }
 
   function openDb() {
@@ -594,6 +838,12 @@
     return undefined;
   }
 
+  function isRetryableFetchError(error) {
+    const message =
+      error instanceof Error ? error.message : String(error ?? "");
+    return /timeout|failed|HTTP 429|HTTP 5\d{2}/i.test(message);
+  }
+
   function gmRequestJson(url, timeoutMs) {
     return new Promise((resolve, reject) => {
       if (typeof GM_xmlhttpRequest !== "function") {
@@ -628,28 +878,51 @@
   }
 
   async function fetchPriceFromDlwatcher(rjCode) {
-    try {
-      const json = await gmRequestJson(buildApiUrl(rjCode), REQUEST_TIMEOUT_MS);
-      const lowestPrice =
-        safeNumber(json?.lowestPrice?.priceInfo?.price) ?? null;
-      return {
-        rjCode,
-        title:
-          typeof json?.productName === "string" ? json.productName : undefined,
-        dlwatcherCurrentPrice: extractDlwatcherCurrentPrice(json),
-        lowestPrice,
-        regularPrice: safeNumber(json?.lowestPrice?.priceInfo?.regularPrice),
-        discountRate: safeNumber(json?.lowestPrice?.priceInfo?.discountRate),
-        dlwatcherUrl: buildDlwatcherPageUrl(rjCode),
-      };
-    } catch (error) {
-      console.warn(`[${APP_NAME}] fetch ${rjCode} failed:`, error);
-      return {
-        rjCode,
-        lowestPrice: null,
-        dlwatcherUrl: buildDlwatcherPageUrl(rjCode),
-      };
+    let attempt = 0;
+    while (attempt <= RETRYABLE_FETCH_ATTEMPTS) {
+      try {
+        const json = await gmRequestJson(
+          buildApiUrl(rjCode),
+          REQUEST_TIMEOUT_MS,
+        );
+        const lowestPrice =
+          safeNumber(json?.lowestPrice?.priceInfo?.price) ?? null;
+        return {
+          rjCode,
+          title:
+            typeof json?.productName === "string"
+              ? json.productName
+              : undefined,
+          dlwatcherCurrentPrice: extractDlwatcherCurrentPrice(json),
+          lowestPrice,
+          regularPrice: safeNumber(json?.lowestPrice?.priceInfo?.regularPrice),
+          discountRate: safeNumber(json?.lowestPrice?.priceInfo?.discountRate),
+          dlwatcherUrl: buildDlwatcherPageUrl(rjCode),
+        };
+      } catch (error) {
+        if (
+          attempt < RETRYABLE_FETCH_ATTEMPTS &&
+          isRetryableFetchError(error)
+        ) {
+          attempt += 1;
+          await sleep(RETRY_BASE_DELAY_MS * attempt);
+          continue;
+        }
+
+        console.warn(`[${APP_NAME}] fetch ${rjCode} failed:`, error);
+        return {
+          rjCode,
+          lowestPrice: null,
+          dlwatcherUrl: buildDlwatcherPageUrl(rjCode),
+        };
+      }
     }
+
+    return {
+      rjCode,
+      lowestPrice: null,
+      dlwatcherUrl: buildDlwatcherPageUrl(rjCode),
+    };
   }
 
   async function batchFetchPrices(rjCodes) {
@@ -682,9 +955,72 @@
     currentPrice,
     existing,
     forcePersist,
+    fallbackRjCodes = [],
+    resolveFallbackRjCode,
   ) {
-    const fetched = await fetchPriceFromDlwatcher(rjCode);
-    if (fetched.lowestPrice === null) {
+    const queryCodes = [];
+    const pushCode = (value) => {
+      if (!isValidRjCode(value)) return;
+      const code = String(value).toUpperCase();
+      if (queryCodes.includes(code)) return;
+      queryCodes.push(code);
+    };
+    pushCode(rjCode);
+    for (const code of fallbackRjCodes) pushCode(code);
+
+    let fetched = null;
+    let resolvedRjCode = rjCode;
+
+    for (const code of queryCodes) {
+      const cached = await getReusablePriceRecord(code);
+      if (cached) {
+        fetched = {
+          rjCode: code,
+          title: cached.title,
+          dlwatcherCurrentPrice: cached.dlwatcherCurrentPrice,
+          lowestPrice: cached.lowestPrice,
+          regularPrice: cached.regularPrice,
+          discountRate: cached.discountRate,
+          dlwatcherUrl: cached.dlwatcherUrl || buildDlwatcherPageUrl(code),
+        };
+        resolvedRjCode = code;
+        break;
+      }
+
+      const item = await fetchPriceFromDlwatcher(code);
+      if (item.lowestPrice === null) continue;
+      fetched = item;
+      resolvedRjCode = code;
+      break;
+    }
+
+    if (!fetched && typeof resolveFallbackRjCode === "function") {
+      const resolved = await resolveFallbackRjCode();
+      if (isValidRjCode(resolved) && !queryCodes.includes(resolved)) {
+        const cached = await getReusablePriceRecord(resolved);
+        if (cached) {
+          fetched = {
+            rjCode: resolved,
+            title: cached.title,
+            dlwatcherCurrentPrice: cached.dlwatcherCurrentPrice,
+            lowestPrice: cached.lowestPrice,
+            regularPrice: cached.regularPrice,
+            discountRate: cached.discountRate,
+            dlwatcherUrl:
+              cached.dlwatcherUrl || buildDlwatcherPageUrl(resolved),
+          };
+          resolvedRjCode = resolved;
+        } else {
+          const item = await fetchPriceFromDlwatcher(resolved);
+          if (item.lowestPrice !== null) {
+            fetched = item;
+            resolvedRjCode = resolved;
+          }
+        }
+      }
+    }
+
+    if (!fetched) {
       if (existing) {
         const next = {
           ...existing,
@@ -710,6 +1046,7 @@
       lowestPrice: existing
         ? Math.min(existing.lowestPrice, fetched.lowestPrice)
         : fetched.lowestPrice,
+      sourceRjCode: resolvedRjCode,
       regularPrice: fetched.regularPrice,
       discountRate: fetched.discountRate,
       lastChecked: nowIso(),
@@ -730,42 +1067,61 @@
   }
 
   async function buildOrUpdateRecord(params) {
-    const {
-      rjCode,
-      title = rjCode,
-      currentPrice,
-      forceFetch = false,
-      forcePersist = false,
-    } = params;
+    const normalizedRjCode = String(params?.rjCode || "").toUpperCase();
+    if (!isValidRjCode(normalizedRjCode)) return null;
 
-    const existing = await getPriceRecord(rjCode);
-    if (forceFetch) {
+    const inFlight = recordInFlight.get(normalizedRjCode);
+    if (inFlight) return inFlight;
+
+    const task = (async () => {
+      const {
+        title = normalizedRjCode,
+        currentPrice,
+        forceFetch = false,
+        forcePersist = false,
+        fallbackRjCodes = [],
+        resolveFallbackRjCode,
+      } = params;
+
+      const existing = await getPriceRecord(normalizedRjCode);
+      if (forceFetch) {
+        return fetchRemoteAndPersist(
+          normalizedRjCode,
+          title,
+          currentPrice,
+          existing,
+          forcePersist,
+          fallbackRjCodes,
+          resolveFallbackRjCode,
+        );
+      }
+
+      if (existing) {
+        const cacheReusable = existing.isFavorite || isCacheFresh(existing);
+        if (cacheReusable && hasUsableLowestPrice(existing)) {
+          return syncCurrentPrice(existing, currentPrice);
+        }
+      }
+
       return fetchRemoteAndPersist(
-        rjCode,
+        normalizedRjCode,
         title,
         currentPrice,
         existing,
         forcePersist,
+        fallbackRjCodes,
+        resolveFallbackRjCode,
       );
-    }
+    })();
 
-    if (existing) {
-      const hasDlwatcherCurrent =
-        typeof existing.dlwatcherCurrentPrice === "number";
-      if (existing.isFavorite || isCacheFresh(existing)) {
-        if (hasDlwatcherCurrent) {
-          return syncCurrentPrice(existing, currentPrice);
-        }
+    recordInFlight.set(normalizedRjCode, task);
+    try {
+      return await task;
+    } finally {
+      if (recordInFlight.get(normalizedRjCode) === task) {
+        recordInFlight.delete(normalizedRjCode);
       }
     }
-
-    return fetchRemoteAndPersist(
-      rjCode,
-      title,
-      currentPrice,
-      existing,
-      forcePersist,
-    );
   }
 
   async function handleImportFavorites(rjCodes, skipCache) {
@@ -912,6 +1268,13 @@
     ) {
       card.classList.add("dltracker-wishlist-inline");
     }
+    if (
+      isCartPage(location.href) &&
+      !isTouchPath(location.href) &&
+      !isNarrowViewport()
+    ) {
+      card.classList.add("dltracker-cart-inline");
+    }
 
     const chip = document.createElement("span");
     chip.className = "dltracker-chip";
@@ -936,38 +1299,63 @@
     if (typeof compareCurrent === "number" && !isAtLowest) {
       const currentChip = document.createElement("span");
       currentChip.className = "dltracker-chip dltracker-chip-current";
-      currentChip.textContent = `当前价格 ${toYen(compareCurrent)}`;
+      currentChip.textContent = `当前 ${toYen(compareCurrent)}`;
       card.appendChild(currentChip);
     }
 
-    chip.classList.add(
-      isAtLowest ? "dltracker-chip-hot" : "dltracker-chip-normal",
-    );
-
     const text = document.createElement("span");
     text.className = "dltracker-chip-text";
-    text.textContent = isAtLowest
-      ? `新史低 ${toYen(record.lowestPrice)}`
-      : `史低 ${toYen(record.lowestPrice)}`;
+    const discounted = hasEffectiveDiscount(record);
+    chip.classList.add(
+      discounted
+        ? isAtLowest
+          ? "dltracker-chip-hot"
+          : "dltracker-chip-normal"
+        : "dltracker-chip-current",
+    );
+    text.textContent = discounted
+      ? isAtLowest
+        ? `新史低 ${toYen(record.lowestPrice)}`
+        : `史低 ${toYen(record.lowestPrice)}`
+      : `无折扣记录`;
     chip.appendChild(text);
 
-    if (typeof record.discountRate === "number" && record.discountRate > 0) {
+    const isCartContext = isCartPage(location.href);
+    const isMobileCartContext =
+      isCartContext && (isTouchPath(location.href) || isNarrowViewport());
+    const derivedDiscountRate =
+      typeof record.discountRate === "number"
+        ? record.discountRate
+        : typeof record.regularPrice === "number" &&
+            typeof record.lowestPrice === "number" &&
+            record.regularPrice > 0
+          ? (1 - record.lowestPrice / record.regularPrice) * 100
+          : undefined;
+    const showOffBadge =
+      discounted &&
+      (!isCartContext || isAtLowest || isMobileCartContext);
+    if (
+      showOffBadge &&
+      typeof derivedDiscountRate === "number" &&
+      derivedDiscountRate > 0
+    ) {
       const offBadge = document.createElement("span");
       offBadge.className = "dltracker-off-badge";
-      offBadge.textContent = `${Math.round(record.discountRate)}OFF`;
+      offBadge.textContent = `${Math.round(derivedDiscountRate)}OFF`;
       chip.appendChild(offBadge);
     }
 
-    const button = document.createElement("a");
-    button.className = "dltracker-btn";
-    button.textContent = "查看价格趋势";
-    button.href = record.dlwatcherUrl;
-    button.target = "_blank";
-    button.rel = "noopener noreferrer";
-    button.addEventListener("click", (event) => event.stopPropagation());
-
     card.appendChild(chip);
-    card.appendChild(button);
+    if (discounted) {
+      const button = document.createElement("a");
+      button.className = "dltracker-btn";
+      button.textContent = "查看价格趋势";
+      button.href = record.dlwatcherUrl;
+      button.target = "_blank";
+      button.rel = "noopener noreferrer";
+      button.addEventListener("click", (event) => event.stopPropagation());
+      card.appendChild(button);
+    }
     host.appendChild(card);
   }
 
@@ -1187,6 +1575,99 @@
     }
   }
 
+  async function enhanceCartItems() {
+    const items = getCartItems();
+    if (!items.length) return;
+
+    const tasks = [];
+    for (const item of items) {
+      if (!isRenderableCartItem(item)) continue;
+      const renderHost = ensureCartRenderHost(item);
+      if (!renderHost) continue;
+      const existedCard = renderHost.querySelector(`.${UI_CLASSNAME}`);
+      if (existedCard && !existedCard.querySelector(".dltracker-error")) {
+        continue;
+      }
+
+      const rjCode = extractRjCodeFromCartItem(item);
+      if (!rjCode) continue;
+
+      const title =
+        item.querySelector(".work_name a")?.textContent?.trim() ||
+        item.querySelector(".n_work_name a")?.textContent?.trim() ||
+        item.querySelector('a[href*="product_id/"]')?.textContent?.trim() ||
+        rjCode;
+      const productHref =
+        item.querySelector('a[href*="product_id/"]')?.getAttribute("href") ||
+        "";
+      const fallbackRjCodes = extractFallbackRjCodesFromCartItem(item, rjCode);
+
+      renderLoadingCard(renderHost);
+      tasks.push({
+        rjCode,
+        title,
+        renderHost,
+        fallbackRjCodes,
+        productHref,
+      });
+    }
+
+    if (!tasks.length) return;
+
+    await mapWithConcurrency(tasks, CART_RENDER_CONCURRENCY, async (task) => {
+      try {
+        const record = await buildOrUpdateRecord({
+          rjCode: task.rjCode,
+          title: task.title,
+          forceFetch: false,
+          fallbackRjCodes: task.fallbackRjCodes,
+          resolveFallbackRjCode: () =>
+            resolveCanonicalRjCodeFromProductHref(task.productHref),
+        });
+        renderPriceCard(record, task.renderHost);
+      } catch (error) {
+        console.warn(`[${APP_NAME}] cart render failed:`, error);
+        renderPriceCard(null, task.renderHost);
+      }
+    });
+  }
+
+  function queueCartBootstrap() {
+    let timer = null;
+    return () => {
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        void bootstrap();
+      }, 120);
+    };
+  }
+
+  const scheduleCartBootstrap = queueCartBootstrap();
+
+  function maybeBootstrapForCartMutation(currentUrl) {
+    if (!isCartPage(currentUrl)) return false;
+    const items = getCartItems();
+    if (
+      items.some(
+        (item) =>
+          isRenderableCartItem(item) && !item.querySelector(`.${UI_CLASSNAME}`),
+      )
+    ) {
+      scheduleCartBootstrap();
+    }
+    return true;
+  }
+
+  function maybeBootstrapForWishlistMutation(currentUrl) {
+    if (!isFavoritePage(currentUrl)) return false;
+    const cards = getWishlistCards();
+    if (cards.some((card) => !card.querySelector(`.${UI_CLASSNAME}`))) {
+      void bootstrap();
+    }
+    return true;
+  }
+
   async function cleanExpiredCache() {
     const nonFavorites = await listNonFavoriteRecords();
     for (const record of nonFavorites) {
@@ -1201,7 +1682,9 @@
       ? () => hasProductContainer()
       : isFavoritePage(url)
         ? () => hasWishlistContainer()
-        : null;
+        : isCartPage(url)
+          ? () => hasCartContainer()
+          : null;
     if (!checker) return Promise.resolve();
 
     return new Promise((resolve) => {
@@ -1236,6 +1719,9 @@
         removeFavoriteImportBox();
       }
       await enhanceWishlistCards();
+    }
+    if (isCartPage(url)) {
+      await enhanceCartItems();
     }
   }
 
@@ -1282,13 +1768,65 @@
   white-space: nowrap;
 }
 
+.${UI_CLASSNAME}.dltracker-cart-inline {
+  flex-direction: column;
+  align-items: flex-start;
+  flex-wrap: nowrap;
+  margin-top: 6px;
+}
+
+.${UI_CLASSNAME}.dltracker-cart-inline .dltracker-chip,
+.${UI_CLASSNAME}.dltracker-cart-inline .dltracker-btn {
+  flex: 0 0 auto;
+  width: fit-content;
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.${UI_CLASSNAME}.dltracker-cart-inline .dltracker-chip-current {
+  width: 100%;
+  align-self: stretch;
+  justify-content: center;
+  text-align: center;
+}
+
+.${UI_CLASSNAME}.dltracker-cart-inline .dltracker-chip-normal,
+.${UI_CLASSNAME}.dltracker-cart-inline .dltracker-chip-hot {
+  width: 100%;
+  align-self: stretch;
+  box-sizing: border-box;
+}
+
+.${UI_CLASSNAME}.dltracker-cart-inline .dltracker-chip-normal {
+  justify-content: center;
+  text-align: center;
+}
+
+.${UI_CLASSNAME}.dltracker-cart-inline .dltracker-chip-hot {
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 4px;
+}
+
+.${UI_CLASSNAME}.dltracker-cart-inline .dltracker-chip-normal .dltracker-chip-text,
+.${UI_CLASSNAME}.dltracker-cart-inline .dltracker-chip-hot .dltracker-chip-text {
+  width: 100%;
+  text-align: center;
+}
+
+.${UI_CLASSNAME}.dltracker-cart-inline .dltracker-off-badge {
+  margin-top: 0;
+}
+
 .${UI_CLASSNAME} .dltracker-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   width: fit-content;
   max-width: 100%;
-  padding: 4px 8px;
+  padding: 4px 4px 4px 2px;
   border-radius: 6px;
   color: #fff;
   background: #2f7e49;
@@ -1351,6 +1889,12 @@
   width: 100%;
   box-sizing: border-box;
   clear: both;
+}
+
+.dltracker-cart-host {
+  margin-top: 6px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .dltracker-mobile-product-host {
@@ -1431,6 +1975,29 @@
     justify-content: center;
   }
 
+  .dltracker-cart-host .${UI_CLASSNAME} .dltracker-chip,
+  .dltracker-cart-host .${UI_CLASSNAME} .dltracker-btn {
+    width: 100%;
+    justify-content: center;
+    text-align: center;
+    box-sizing: border-box;
+  }
+
+  .dltracker-cart-host .${UI_CLASSNAME} .dltracker-chip-current {
+    width: 100%;
+    align-self: stretch;
+  }
+
+  .dltracker-cart-host .${UI_CLASSNAME} .dltracker-chip-text {
+    width: auto;
+    flex: 0 0 auto;
+    text-align: center;
+  }
+
+  .dltracker-cart-host .${UI_CLASSNAME} .dltracker-off-badge {
+    flex: 0 0 auto;
+  }
+
   .dltracker-import-box {
     margin: 8px 0 10px;
     padding: 8px 10px;
@@ -1439,6 +2006,10 @@
   }
 
   .dltracker-wishlist-host {
+    margin-top: 8px;
+  }
+
+  .dltracker-cart-host {
     margin-top: 8px;
   }
 
@@ -1495,10 +2066,21 @@
       if (domDebounceTimer) return;
       domDebounceTimer = setTimeout(() => {
         domDebounceTimer = null;
-        if (!isProductPage(location.href)) return;
-        const host = findProductRenderHost();
-        if (host && !host.querySelector(`.${UI_CLASSNAME}`)) {
-          void bootstrap();
+        const currentUrl = location.href;
+
+        if (isProductPage(currentUrl)) {
+          const host = findProductRenderHost();
+          if (host && !host.querySelector(`.${UI_CLASSNAME}`)) {
+            void bootstrap();
+          }
+          return;
+        }
+
+        if (maybeBootstrapForWishlistMutation(currentUrl)) return;
+        if (maybeBootstrapForCartMutation(currentUrl)) return;
+
+        if (hasCartContainer() || hasWishlistContainer()) {
+          scheduleCartBootstrap();
         }
       }, 300);
     });
