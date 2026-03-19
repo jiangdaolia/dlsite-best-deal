@@ -12,13 +12,13 @@
 // ==/UserScript==
 
 (function () {
-  'use strict';
+  "use strict";
 
-  const APP_NAME = 'DL Price Tracker';
-  const APP_VERSION = '0.1.1-us';
+  const APP_NAME = "DL Price Tracker";
+  const APP_VERSION = "0.1.1-us";
 
-  const DLWATCHER_BASE = 'https://dlwatcher.com/product';
-  const FAVORITE_API_PATH = '/girls/load/favorite/product';
+  const DLWATCHER_BASE = "https://dlwatcher.com/product";
+  const FAVORITE_API_PATH = "/girls/load/favorite/product";
 
   const BATCH_SIZE = 10;
   const BATCH_INTERVAL_MS = 1000;
@@ -27,33 +27,33 @@
   const MAX_FAVORITES = 500;
 
   const RJ_CODE_REGEX = /\b([RB]J\d{6,})\b/i;
-  const UI_CLASSNAME = 'dltracker-lowest-price-card';
-  const STYLE_ID = 'dltracker-userscript-style';
+  const UI_CLASSNAME = "dltracker-lowest-price-card";
+  const STYLE_ID = "dltracker-userscript-style";
 
-  const DB_NAME = 'dltracker-userscript';
+  const DB_NAME = "dltracker-userscript";
   const DB_VERSION = 1;
-  const STORE_PRICES = 'prices';
-  const STORE_FAVORITES = 'favorites';
+  const STORE_PRICES = "prices";
+  const STORE_FAVORITES = "favorites";
 
   const PRODUCT_PRICE_HOST_SELECTORS = [
-    '#work_price .work_buy_container',
-    '#work_price',
-    '#work_buy',
-    '.c-purchaseBox__priceInfo',
-    '.c-purchaseBox__value',
-    '.work_buy_container',
-    '.work_buy_content',
-    '.work_price_wrap',
+    "#work_price .work_buy_container",
+    "#work_price",
+    "#work_buy",
+    ".c-purchaseBox__priceInfo",
+    ".c-purchaseBox__value",
+    ".work_buy_container",
+    ".work_buy_content",
+    ".work_price_wrap",
     '[data-testid*="price"]',
   ];
 
   const WISHLIST_CARD_SELECTORS = [
-    '#wishlist_work article',
-    '#wishlist_work li',
+    "#wishlist_work article",
+    "#wishlist_work li",
     '[id*="wishlist"] article',
     '[id*="wishlist"] li',
-    '.wishlist_work article',
-    '.wishlist_work li',
+    ".wishlist_work article",
+    ".wishlist_work li",
   ];
 
   let dbPromise = null;
@@ -67,19 +67,39 @@
   }
 
   function toYen(value) {
-    if (typeof value !== 'number' || Number.isNaN(value)) return '-';
-    return `${Math.round(value).toLocaleString('ja-JP')}円`;
+    if (typeof value !== "number" || Number.isNaN(value)) return "-";
+    return `${Math.round(value).toLocaleString("ja-JP")}円`;
   }
 
   function safeNumber(value) {
-    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+    return typeof value === "number" && Number.isFinite(value)
+      ? value
+      : undefined;
+  }
+
+  function parseNumberish(value) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string") {
+      const cleaned = value.replace(/,/g, "").trim();
+      if (!cleaned) return undefined;
+      const parsed = Number(cleaned);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    }
+    return undefined;
   }
 
   function toCsvCell(raw) {
-    if (raw === undefined || raw === null) return '';
+    if (raw === undefined || raw === null) return "";
     const value = String(raw);
-    const formulaPrefix = /^[=+\-@\t\r]/.test(value) ? "'" : '';
-    if (formulaPrefix || value.includes(',') || value.includes('"') || value.includes('\n')) {
+    const formulaPrefix = /^[=+\-@\t\r]/.test(value) ? "'" : "";
+    if (
+      formulaPrefix ||
+      value.includes(",") ||
+      value.includes('"') ||
+      value.includes("\n")
+    ) {
       return `"${formulaPrefix}${value.replace(/"/g, '""')}"`;
     }
     return value;
@@ -113,12 +133,17 @@
   }
 
   function findProductPriceHost() {
-    const direct = firstElementBySelectors(PRODUCT_PRICE_HOST_SELECTORS, document);
+    const direct = firstElementBySelectors(
+      PRODUCT_PRICE_HOST_SELECTORS,
+      document,
+    );
     if (direct) return direct;
 
-    const fuzzyCandidates = document.querySelectorAll('[id*="price"], [class*="price"]');
+    const fuzzyCandidates = document.querySelectorAll(
+      '[id*="price"], [class*="price"]',
+    );
     for (const el of fuzzyCandidates) {
-      const text = (el.textContent || '').replace(/\s+/g, ' ');
+      const text = (el.textContent || "").replace(/\s+/g, " ");
       if (/円|jpy|rmb/i.test(text)) {
         return el;
       }
@@ -130,30 +155,42 @@
   function ensureMobileProductRenderHost() {
     if (!isTouchPath(location.href)) return null;
 
-    const purchaseInner = document.querySelector('.c-purchaseBox__inner');
+    const purchaseInner = document.querySelector(".c-purchaseBox__inner");
     if (!purchaseInner) return null;
 
     // 清理旧版本可能插在 c-purchaseBox 外层的容器，避免结构污染。
-    const purchaseBox = document.querySelector('.c-purchaseBox');
-    if (purchaseBox?.previousElementSibling?.classList?.contains('dltracker-mobile-product-host')) {
+    const purchaseBox = document.querySelector(".c-purchaseBox");
+    if (
+      purchaseBox?.previousElementSibling?.classList?.contains(
+        "dltracker-mobile-product-host",
+      )
+    ) {
       purchaseBox.previousElementSibling.remove();
     }
 
-    const purchaseSection = purchaseInner.querySelector(':scope > .c-purchaseBox__purchase') ||
-      purchaseInner.querySelector('.c-purchaseBox__purchase');
+    const purchaseSection =
+      purchaseInner.querySelector(":scope > .c-purchaseBox__purchase") ||
+      purchaseInner.querySelector(".c-purchaseBox__purchase");
     if (!purchaseSection) return null;
 
-    const allHosts = document.querySelectorAll('.dltracker-mobile-product-host');
-    let host = purchaseSection.querySelector(':scope > .dltracker-mobile-product-host') ||
-      purchaseSection.querySelector('.dltracker-mobile-product-host');
+    const allHosts = document.querySelectorAll(
+      ".dltracker-mobile-product-host",
+    );
+    let host =
+      purchaseSection.querySelector(
+        ":scope > .dltracker-mobile-product-host",
+      ) || purchaseSection.querySelector(".dltracker-mobile-product-host");
 
     if (!host) {
-      host = document.createElement('div');
-      host.className = 'dltracker-mobile-product-host';
+      host = document.createElement("div");
+      host.className = "dltracker-mobile-product-host";
     }
 
     // 固定插在购买模块顶部（优惠券区前），确保单独一行且不影响上方价格/评分布局。
-    if (host.parentElement !== purchaseSection || host !== purchaseSection.firstElementChild) {
+    if (
+      host.parentElement !== purchaseSection ||
+      host !== purchaseSection.firstElementChild
+    ) {
       purchaseSection.prepend(host);
     }
 
@@ -175,9 +212,9 @@
   function hasProductContainer() {
     return !!(
       findProductPriceHost() ||
-      document.querySelector('.c-purchaseBox') ||
-      document.querySelector('.c-purchaseBox__inner') ||
-      document.querySelector('.c-purchaseBox__purchase')
+      document.querySelector(".c-purchaseBox") ||
+      document.querySelector(".c-purchaseBox__inner") ||
+      document.querySelector(".c-purchaseBox__purchase")
     );
   }
 
@@ -194,7 +231,7 @@
     const seen = new Set();
     const cards = [];
     for (const link of links) {
-      const card = link.closest('article, li, .item, .product-item, .work');
+      const card = link.closest("article, li, .item, .product-item, .work");
       if (!card) continue;
       if (seen.has(card)) continue;
       seen.add(card);
@@ -207,12 +244,12 @@
 
   function findWishlistPriceHost(card) {
     const selectors = [
-      'div.primary dl dd.work_price_wrap',
-      'dd.work_price_wrap',
-      '.work_price_wrap',
+      "div.primary dl dd.work_price_wrap",
+      "dd.work_price_wrap",
+      ".work_price_wrap",
       '[class*="price"]',
-      'dd',
-      'dl',
+      "dd",
+      "dl",
     ];
 
     for (const selector of selectors) {
@@ -222,9 +259,9 @@
 
     const productLink = card.querySelector('a[href*="product_id/"]');
     if (productLink) {
-      const fallbackHost = document.createElement('div');
-      fallbackHost.className = 'dltracker-inline-host';
-      productLink.insertAdjacentElement('afterend', fallbackHost);
+      const fallbackHost = document.createElement("div");
+      fallbackHost.className = "dltracker-inline-host";
+      productLink.insertAdjacentElement("afterend", fallbackHost);
       return fallbackHost;
     }
 
@@ -237,14 +274,19 @@
       if (legacyCard) legacyCard.remove();
     }
 
-    const existed = card.querySelector('.dltracker-wishlist-host');
+    const existed = card.querySelector(".dltracker-wishlist-host");
     if (existed) return existed;
 
-    const host = document.createElement('div');
-    host.className = 'dltracker-wishlist-host';
+    const host = document.createElement("div");
+    host.className = "dltracker-wishlist-host";
 
-    if (priceHost && priceHost !== card && priceHost.parentElement && card.contains(priceHost)) {
-      priceHost.insertAdjacentElement('afterend', host);
+    if (
+      priceHost &&
+      priceHost !== card &&
+      priceHost.parentElement &&
+      card.contains(priceHost)
+    ) {
+      priceHost.insertAdjacentElement("afterend", host);
     } else {
       card.appendChild(host);
     }
@@ -254,7 +296,12 @@
 
   function findFavoritePanelAnchor() {
     const wishlistRoot = firstElementBySelectors(
-      ['#wishlist_work', '[id*="wishlist_work"]', '[id*="wishlist"]', '.wishlist_work'],
+      [
+        "#wishlist_work",
+        '[id*="wishlist_work"]',
+        '[id*="wishlist"]',
+        ".wishlist_work",
+      ],
       document,
     );
     if (wishlistRoot) {
@@ -264,7 +311,7 @@
       };
     }
 
-    const mainInner = document.querySelector('#main_inner');
+    const mainInner = document.querySelector("#main_inner");
     if (mainInner) {
       return {
         parent: mainInner,
@@ -272,7 +319,7 @@
       };
     }
 
-    const main = document.querySelector('main');
+    const main = document.querySelector("main");
     if (main) {
       return {
         parent: main,
@@ -287,20 +334,26 @@
   }
 
   function hasWishlistContainer() {
-    return getWishlistCards().length > 0 || !!firstElementBySelectors(['#wishlist_work', '[id*="wishlist"]'], document);
+    return (
+      getWishlistCards().length > 0 ||
+      !!firstElementBySelectors(
+        ["#wishlist_work", '[id*="wishlist"]'],
+        document,
+      )
+    );
   }
 
   function parseCurrentPrice() {
     const candidates = [
-      document.querySelector('.c-purchaseBox__priceInfo .app-price'),
-      document.querySelector('.c-purchaseBox__priceInfo .c-purchaseBox__value'),
+      document.querySelector(".c-purchaseBox__priceInfo .app-price"),
+      document.querySelector(".c-purchaseBox__priceInfo .c-purchaseBox__value"),
       findProductPriceHost(),
-      document.querySelector('.work_price_wrap'),
+      document.querySelector(".work_price_wrap"),
       document.querySelector('[class*="work_price"]'),
     ].filter(Boolean);
 
     for (const target of candidates) {
-      const cleaned = (target.textContent || '').replace(/,/g, '');
+      const cleaned = (target.textContent || "").replace(/,/g, "");
       // 仅采集日元价格；RMB 等本地化货币不写入 currentPrice，避免与日元史低混比
       if (/rmb|usd|eur/i.test(cleaned)) continue;
       const matched = cleaned.match(/(\d{1,8}(?:\.\d{1,2})?)\s*(円|jpy)/i);
@@ -312,14 +365,14 @@
 
   function parseTitle() {
     const h1 =
-      document.querySelector('h1')?.textContent?.trim() ||
-      document.querySelector('.work_name')?.textContent?.trim() ||
+      document.querySelector("h1")?.textContent?.trim() ||
+      document.querySelector(".work_name")?.textContent?.trim() ||
       document.querySelector('[class*="title"]')?.textContent?.trim();
     return h1 || document.title;
   }
 
   function isValidRjCode(code) {
-    return typeof code === 'string' && /^[RB]J\d{6,}$/i.test(code);
+    return typeof code === "string" && /^[RB]J\d{6,}$/i.test(code);
   }
 
   function isCacheFresh(record) {
@@ -337,15 +390,16 @@
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains(STORE_PRICES)) {
-          db.createObjectStore(STORE_PRICES, { keyPath: 'rjCode' });
+          db.createObjectStore(STORE_PRICES, { keyPath: "rjCode" });
         }
         if (!db.objectStoreNames.contains(STORE_FAVORITES)) {
-          db.createObjectStore(STORE_FAVORITES, { keyPath: 'rjCode' });
+          db.createObjectStore(STORE_FAVORITES, { keyPath: "rjCode" });
         }
       };
 
       request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error || new Error('IndexedDB open failed'));
+      request.onerror = () =>
+        reject(request.error || new Error("IndexedDB open failed"));
     });
 
     return dbPromise;
@@ -354,53 +408,61 @@
   async function storeGet(storeName, key) {
     const db = await openDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(storeName, 'readonly');
+      const tx = db.transaction(storeName, "readonly");
       const request = tx.objectStore(storeName).get(key);
       request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error || new Error(`IDB get failed: ${storeName}`));
+      request.onerror = () =>
+        reject(request.error || new Error(`IDB get failed: ${storeName}`));
     });
   }
 
   async function storePut(storeName, value) {
     const db = await openDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(storeName, 'readwrite');
+      const tx = db.transaction(storeName, "readwrite");
       tx.objectStore(storeName).put(value);
       tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error || new Error(`IDB put failed: ${storeName}`));
+      tx.onerror = () =>
+        reject(tx.error || new Error(`IDB put failed: ${storeName}`));
     });
   }
 
   async function storeDelete(storeName, key) {
     const db = await openDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(storeName, 'readwrite');
+      const tx = db.transaction(storeName, "readwrite");
       tx.objectStore(storeName).delete(key);
       tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error || new Error(`IDB delete failed: ${storeName}`));
+      tx.onerror = () =>
+        reject(tx.error || new Error(`IDB delete failed: ${storeName}`));
     });
   }
 
   async function storeGetAll(storeName) {
     const db = await openDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(storeName, 'readonly');
+      const tx = db.transaction(storeName, "readonly");
       const request = tx.objectStore(storeName).getAll();
-      request.onsuccess = () => resolve(Array.isArray(request.result) ? request.result : []);
-      request.onerror = () => reject(request.error || new Error(`IDB getAll failed: ${storeName}`));
+      request.onsuccess = () =>
+        resolve(Array.isArray(request.result) ? request.result : []);
+      request.onerror = () =>
+        reject(request.error || new Error(`IDB getAll failed: ${storeName}`));
     });
   }
 
   async function storeGetAllKeys(storeName) {
     const db = await openDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(storeName, 'readonly');
+      const tx = db.transaction(storeName, "readonly");
       const request = tx.objectStore(storeName).getAllKeys();
       request.onsuccess = () => {
         const keys = Array.isArray(request.result) ? request.result : [];
         resolve(keys.map((x) => String(x)));
       };
-      request.onerror = () => reject(request.error || new Error(`IDB getAllKeys failed: ${storeName}`));
+      request.onerror = () =>
+        reject(
+          request.error || new Error(`IDB getAllKeys failed: ${storeName}`),
+        );
     });
   }
 
@@ -422,7 +484,10 @@
 
     let merged;
     if (existing) {
-      const safeLowest = typeof input.lowestPrice === 'number' ? input.lowestPrice : existing.lowestPrice;
+      const safeLowest =
+        typeof input.lowestPrice === "number"
+          ? input.lowestPrice
+          : existing.lowestPrice;
       merged = {
         ...existing,
         ...input,
@@ -461,7 +526,11 @@
     const now = nowIso();
     for (const record of all) {
       if (record.isFavorite && !nextFavoriteSet.has(record.rjCode)) {
-        await upsertPriceRecord({ ...record, isFavorite: false, updatedAt: now });
+        await upsertPriceRecord({
+          ...record,
+          isFavorite: false,
+          updatedAt: now,
+        });
       }
     }
 
@@ -490,19 +559,37 @@
     return `${DLWATCHER_BASE}/${rjCode}/`;
   }
 
+  function extractDlwatcherCurrentPrice(json) {
+    const candidates = [
+      json?.currentPrice?.priceInfo?.price,
+      json?.currentPrice?.price,
+      json?.currentPrice,
+      json?.priceInfo?.price,
+      json?.price?.current,
+      json?.price?.price,
+      json?.price,
+    ];
+
+    for (const item of candidates) {
+      const parsed = parseNumberish(item);
+      if (typeof parsed === "number") return parsed;
+    }
+    return undefined;
+  }
+
   function gmRequestJson(url, timeoutMs) {
     return new Promise((resolve, reject) => {
-      if (typeof GM_xmlhttpRequest !== 'function') {
-        reject(new Error('GM_xmlhttpRequest is unavailable'));
+      if (typeof GM_xmlhttpRequest !== "function") {
+        reject(new Error("GM_xmlhttpRequest is unavailable"));
         return;
       }
 
       GM_xmlhttpRequest({
-        method: 'GET',
+        method: "GET",
         url,
         timeout: timeoutMs,
         headers: {
-          Accept: 'application/json',
+          Accept: "application/json",
         },
         onload: (response) => {
           if (response.status < 200 || response.status >= 300) {
@@ -512,11 +599,13 @@
           try {
             resolve(JSON.parse(response.responseText));
           } catch (error) {
-            reject(error instanceof Error ? error : new Error('JSON parse failed'));
+            reject(
+              error instanceof Error ? error : new Error("JSON parse failed"),
+            );
           }
         },
-        ontimeout: () => reject(new Error('Request timeout')),
-        onerror: () => reject(new Error('Request failed')),
+        ontimeout: () => reject(new Error("Request timeout")),
+        onerror: () => reject(new Error("Request failed")),
       });
     });
   }
@@ -524,10 +613,13 @@
   async function fetchPriceFromDlwatcher(rjCode) {
     try {
       const json = await gmRequestJson(buildApiUrl(rjCode), REQUEST_TIMEOUT_MS);
-      const lowestPrice = safeNumber(json?.lowestPrice?.priceInfo?.price) ?? null;
+      const lowestPrice =
+        safeNumber(json?.lowestPrice?.priceInfo?.price) ?? null;
       return {
         rjCode,
-        title: typeof json?.productName === 'string' ? json.productName : undefined,
+        title:
+          typeof json?.productName === "string" ? json.productName : undefined,
+        dlwatcherCurrentPrice: extractDlwatcherCurrentPrice(json),
         lowestPrice,
         regularPrice: safeNumber(json?.lowestPrice?.priceInfo?.regularPrice),
         discountRate: safeNumber(json?.lowestPrice?.priceInfo?.discountRate),
@@ -547,7 +639,9 @@
     const result = new Map();
     for (let i = 0; i < rjCodes.length; i += BATCH_SIZE) {
       const batch = rjCodes.slice(i, i + BATCH_SIZE);
-      const prices = await Promise.all(batch.map((code) => fetchPriceFromDlwatcher(code)));
+      const prices = await Promise.all(
+        batch.map((code) => fetchPriceFromDlwatcher(code)),
+      );
       for (const item of prices) result.set(item.rjCode, item);
       if (i + BATCH_SIZE < rjCodes.length) {
         await sleep(BATCH_INTERVAL_MS);
@@ -557,7 +651,7 @@
   }
 
   async function syncCurrentPrice(existing, currentPrice) {
-    if (typeof currentPrice !== 'number') return existing;
+    if (typeof currentPrice !== "number") return existing;
     if (currentPrice === existing.currentPrice) return existing;
 
     const next = { ...existing, currentPrice, updatedAt: nowIso() };
@@ -565,11 +659,21 @@
     return next;
   }
 
-  async function fetchRemoteAndPersist(rjCode, title, currentPrice, existing, forcePersist) {
+  async function fetchRemoteAndPersist(
+    rjCode,
+    title,
+    currentPrice,
+    existing,
+    forcePersist,
+  ) {
     const fetched = await fetchPriceFromDlwatcher(rjCode);
     if (fetched.lowestPrice === null) {
       if (existing) {
-        const next = { ...existing, lastChecked: nowIso(), updatedAt: nowIso() };
+        const next = {
+          ...existing,
+          lastChecked: nowIso(),
+          updatedAt: nowIso(),
+        };
         await upsertPriceRecord(next);
         return next;
       }
@@ -579,9 +683,16 @@
     const favoriteSet = new Set(await listFavoriteCodes());
     const record = {
       rjCode,
-      title: existing?.title && existing.title !== rjCode ? existing.title : fetched.title || title || rjCode,
+      title:
+        existing?.title && existing.title !== rjCode
+          ? existing.title
+          : fetched.title || title || rjCode,
       currentPrice,
-      lowestPrice: existing ? Math.min(existing.lowestPrice, fetched.lowestPrice) : fetched.lowestPrice,
+      dlwatcherCurrentPrice:
+        fetched.dlwatcherCurrentPrice ?? existing?.dlwatcherCurrentPrice,
+      lowestPrice: existing
+        ? Math.min(existing.lowestPrice, fetched.lowestPrice)
+        : fetched.lowestPrice,
       regularPrice: fetched.regularPrice,
       discountRate: fetched.discountRate,
       lastChecked: nowIso(),
@@ -612,7 +723,13 @@
 
     const existing = await getPriceRecord(rjCode);
     if (forceFetch) {
-      return fetchRemoteAndPersist(rjCode, title, currentPrice, existing, forcePersist);
+      return fetchRemoteAndPersist(
+        rjCode,
+        title,
+        currentPrice,
+        existing,
+        forcePersist,
+      );
     }
 
     if (existing) {
@@ -621,7 +738,13 @@
       }
     }
 
-    return fetchRemoteAndPersist(rjCode, title, currentPrice, existing, forcePersist);
+    return fetchRemoteAndPersist(
+      rjCode,
+      title,
+      currentPrice,
+      existing,
+      forcePersist,
+    );
   }
 
   async function handleImportFavorites(rjCodes, skipCache) {
@@ -664,7 +787,11 @@
       if (!fetched || fetched.lowestPrice === null) {
         const rec = await getPriceRecord(rjCode);
         if (rec) {
-          await upsertPriceRecord({ ...rec, lastChecked: nowIso(), updatedAt: nowIso() });
+          await upsertPriceRecord({
+            ...rec,
+            lastChecked: nowIso(),
+            updatedAt: nowIso(),
+          });
         }
         continue;
       }
@@ -672,9 +799,16 @@
       const existing = await getPriceRecord(rjCode);
       const record = {
         rjCode,
-        title: existing?.title && existing.title !== rjCode ? existing.title : fetched.title || rjCode,
+        title:
+          existing?.title && existing.title !== rjCode
+            ? existing.title
+            : fetched.title || rjCode,
         currentPrice: existing?.currentPrice,
-        lowestPrice: existing ? Math.min(existing.lowestPrice, fetched.lowestPrice) : fetched.lowestPrice,
+        dlwatcherCurrentPrice:
+          fetched.dlwatcherCurrentPrice ?? existing?.dlwatcherCurrentPrice,
+        lowestPrice: existing
+          ? Math.min(existing.lowestPrice, fetched.lowestPrice)
+          : fetched.lowestPrice,
         regularPrice: fetched.regularPrice,
         discountRate: fetched.discountRate,
         lastChecked: nowIso(),
@@ -695,81 +829,114 @@
 
   function recordsToCsv(records) {
     const header = [
-      'RJ/BJ',
-      'Title',
-      'CurrentPrice',
-      'LowestPrice',
-      'RegularPrice',
-      'DiscountRate',
-      'LastChecked',
-      'DlwatcherUrl',
-      'IsFavorite',
-      'FavoriteAddedAt',
-      'UpdatedAt',
+      "RJ/BJ",
+      "Title",
+      "CurrentPrice",
+      "LowestPrice",
+      "RegularPrice",
+      "DiscountRate",
+      "LastChecked",
+      "DlwatcherUrl",
+      "IsFavorite",
+      "FavoriteAddedAt",
+      "UpdatedAt",
     ];
 
-    const lines = [header.map(toCsvCell).join(',')];
+    const lines = [header.map(toCsvCell).join(",")];
     for (const record of records) {
       lines.push(
         [
           record.rjCode,
-          record.title || '',
+          record.title || "",
           record.currentPrice,
           record.lowestPrice,
           record.regularPrice,
           record.discountRate,
-          record.lastChecked || '',
-          record.dlwatcherUrl || '',
-          record.isFavorite ? '1' : '0',
-          record.favoriteAddedAt || '',
-          record.updatedAt || '',
+          record.lastChecked || "",
+          record.dlwatcherUrl || "",
+          record.isFavorite ? "1" : "0",
+          record.favoriteAddedAt || "",
+          record.updatedAt || "",
         ]
           .map(toCsvCell)
-          .join(','),
+          .join(","),
       );
     }
-    return lines.join('\n');
+    return lines.join("\n");
   }
 
   function downloadText(filename, content, mimeType) {
     const blob = new Blob([content], { type: mimeType });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
+    const a = document.createElement("a");
     a.href = url;
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
   }
 
-  function renderPriceCard(record, host) {
+  function renderPriceCard(record, host, options) {
+    const isProductContext = Boolean(options?.isProductContext);
+
     const existed = host.querySelector(`.${UI_CLASSNAME}`);
     if (existed) existed.remove();
 
-    const card = document.createElement('div');
+    const card = document.createElement("div");
     card.className = UI_CLASSNAME;
 
-    const chip = document.createElement('span');
-    chip.className = 'dltracker-chip';
+    const chip = document.createElement("span");
+    chip.className = "dltracker-chip";
 
     if (!record) {
-      chip.classList.add('dltracker-error');
-      chip.textContent = '史低获取失败';
+      chip.classList.add("dltracker-error");
+      chip.textContent = "史低获取失败";
       card.appendChild(chip);
       host.appendChild(card);
       return;
     }
 
-    const discountText =
-      typeof record.discountRate === 'number' ? ` (${record.discountRate.toFixed(1)}%OFF)` : '';
-    chip.textContent = `史低：${toYen(record.lowestPrice)}${discountText}`;
+    if (isProductContext) {
+      const compareCurrent =
+        typeof record.dlwatcherCurrentPrice === "number"
+          ? record.dlwatcherCurrentPrice
+          : record.currentPrice;
+      const isAtLowest =
+        typeof compareCurrent === "number" &&
+        typeof record.lowestPrice === "number" &&
+        Math.abs(compareCurrent - record.lowestPrice) < 0.01;
 
-    const button = document.createElement('a');
-    button.className = 'dltracker-btn';
-    button.textContent = '查看价格趋势';
+      chip.classList.add(
+        isAtLowest ? "dltracker-chip-hot" : "dltracker-chip-normal",
+      );
+
+      const text = document.createElement("span");
+      text.className = "dltracker-chip-text";
+      text.textContent = isAtLowest
+        ? `新史低 ${toYen(record.lowestPrice)}`
+        : `史低: ${toYen(record.lowestPrice)}`;
+      chip.appendChild(text);
+
+      if (typeof record.discountRate === "number" && record.discountRate > 0) {
+        const offBadge = document.createElement("span");
+        offBadge.className = "dltracker-off-badge";
+        offBadge.textContent = `${Math.round(record.discountRate)}OFF`;
+        chip.appendChild(offBadge);
+      }
+    } else {
+      const discountText =
+        typeof record.discountRate === "number"
+          ? ` (${record.discountRate.toFixed(1)}%OFF)`
+          : "";
+      chip.textContent = `史低：${toYen(record.lowestPrice)}${discountText}`;
+    }
+
+    const button = document.createElement("a");
+    button.className = "dltracker-btn";
+    button.textContent = "查看价格趋势";
     button.href = record.dlwatcherUrl;
-    button.target = '_blank';
-    button.rel = 'noopener noreferrer';
-    button.addEventListener('click', (event) => event.stopPropagation());
+    button.target = "_blank";
+    button.rel = "noopener noreferrer";
+    button.addEventListener("click", (event) => event.stopPropagation());
 
     card.appendChild(chip);
     card.appendChild(button);
@@ -780,12 +947,12 @@
     const existed = host.querySelector(`.${UI_CLASSNAME}`);
     if (existed) existed.remove();
 
-    const card = document.createElement('div');
+    const card = document.createElement("div");
     card.className = UI_CLASSNAME;
 
-    const chip = document.createElement('span');
-    chip.className = 'dltracker-chip';
-    chip.textContent = '史低获取中...';
+    const chip = document.createElement("span");
+    chip.className = "dltracker-chip";
+    chip.textContent = "史低获取中...";
 
     card.appendChild(chip);
     host.appendChild(card);
@@ -793,7 +960,9 @@
 
   async function enhanceProductPage() {
     const pathMatch = location.pathname.match(/product_id\/([RB]J\d{6,})/i);
-    const rjCode = pathMatch ? pathMatch[1].toUpperCase() : extractRjCodeFromUrl(location.href);
+    const rjCode = pathMatch
+      ? pathMatch[1].toUpperCase()
+      : extractRjCodeFromUrl(location.href);
     if (!rjCode) return;
 
     const host = findProductRenderHost();
@@ -807,15 +976,15 @@
       currentPrice: parseCurrentPrice(),
       forceFetch: false,
     });
-    renderPriceCard(record, host);
+    renderPriceCard(record, host, { isProductContext: true });
   }
 
   async function fetchFavoriteCodesFromApi() {
     const url = `${location.origin}${FAVORITE_API_PATH}?_=${Date.now()}`;
     const response = await fetch(url, {
-      method: 'GET',
-      credentials: 'include',
-      headers: { Accept: 'application/json' },
+      method: "GET",
+      credentials: "include",
+      headers: { Accept: "application/json" },
     });
 
     if (!response.ok) {
@@ -825,7 +994,7 @@
     const data = await response.json();
     const favorites = Array.isArray(data?.favorites) ? data.favorites : [];
     return favorites
-      .map((x) => (typeof x === 'string' ? x.toUpperCase() : ''))
+      .map((x) => (typeof x === "string" ? x.toUpperCase() : ""))
       .filter((x) => RJ_CODE_REGEX.test(x));
   }
 
@@ -833,7 +1002,7 @@
     const links = document.querySelectorAll('a[href*="product_id/"]');
     const codeSet = new Set();
     for (const link of links) {
-      const href = link.getAttribute('href') || '';
+      const href = link.getAttribute("href") || "";
       const matched = href.match(/product_id\/([RB]J\d{6,})/i);
       if (matched) codeSet.add(matched[1].toUpperCase());
     }
@@ -841,34 +1010,34 @@
   }
 
   function createActionButton(text) {
-    const button = document.createElement('button');
-    button.type = 'button';
+    const button = document.createElement("button");
+    button.type = "button";
     button.textContent = text;
     return button;
   }
 
   function injectFavoriteImportBox() {
-    if (document.querySelector('.dltracker-import-box')) return;
+    if (document.querySelector(".dltracker-import-box")) return;
 
     const anchorInfo = findFavoritePanelAnchor();
 
-    const box = document.createElement('div');
-    box.className = 'dltracker-import-box';
+    const box = document.createElement("div");
+    box.className = "dltracker-import-box";
 
-    const text = document.createElement('span');
-    text.className = 'dltracker-import-title';
+    const text = document.createElement("span");
+    text.className = "dltracker-import-title";
     text.textContent = `${APP_NAME}：可导入收藏并抓取史低价`;
 
-    const importBtn = createActionButton('导入收藏');
-    const updateBtn = createActionButton('更新收藏价');
-    const exportBtn = createActionButton('导出CSV');
+    const importBtn = createActionButton("导入收藏");
+    const updateBtn = createActionButton("更新收藏价");
+    const exportBtn = createActionButton("导出CSV");
 
-    const status = document.createElement('span');
-    status.className = 'dltracker-import-status';
+    const status = document.createElement("span");
+    status.className = "dltracker-import-status";
 
-    importBtn.addEventListener('click', async () => {
+    importBtn.addEventListener("click", async () => {
       importBtn.disabled = true;
-      status.textContent = '正在获取收藏列表...';
+      status.textContent = "正在获取收藏列表...";
 
       try {
         let codes = parseFavoriteCodesFromDom();
@@ -877,7 +1046,7 @@
         }
 
         if (!codes.length) {
-          status.textContent = '未获取到收藏作品';
+          status.textContent = "未获取到收藏作品";
           return;
         }
 
@@ -885,49 +1054,51 @@
         const result = await handleImportFavorites(codes, false);
         status.textContent = `导入完成：成功同步 ${result.imported} 条`;
       } catch (error) {
-        const message = error instanceof Error ? error.message : '未知错误';
+        const message = error instanceof Error ? error.message : "未知错误";
         status.textContent = `导入失败：${message}`;
       } finally {
         importBtn.disabled = false;
       }
     });
 
-    updateBtn.addEventListener('click', async () => {
+    updateBtn.addEventListener("click", async () => {
       updateBtn.disabled = true;
-      status.textContent = '正在更新全部收藏...';
+      status.textContent = "正在更新全部收藏...";
 
       try {
         const favoriteCodes = await listFavoriteCodes();
         if (!favoriteCodes.length) {
-          status.textContent = '本地暂无收藏记录，请先导入收藏';
+          status.textContent = "本地暂无收藏记录，请先导入收藏";
           return;
         }
 
         const result = await handleImportFavorites(favoriteCodes, true);
         status.textContent = `更新完成：成功同步 ${result.imported} 条`;
       } catch (error) {
-        const message = error instanceof Error ? error.message : '未知错误';
+        const message = error instanceof Error ? error.message : "未知错误";
         status.textContent = `更新失败：${message}`;
       } finally {
         updateBtn.disabled = false;
       }
     });
 
-    exportBtn.addEventListener('click', async () => {
+    exportBtn.addEventListener("click", async () => {
       exportBtn.disabled = true;
-      status.textContent = '正在导出 CSV...';
+      status.textContent = "正在导出 CSV...";
 
       try {
         const records = (await listPriceRecords())
           .filter((record) => record.isFavorite)
-          .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+          .sort((a, b) =>
+            String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")),
+          );
 
         const csv = recordsToCsv(records);
         const fileName = `dltracker-userscript-${new Date().toISOString().slice(0, 10)}.csv`;
-        downloadText(fileName, csv, 'text/csv;charset=utf-8;');
+        downloadText(fileName, csv, "text/csv;charset=utf-8;");
         status.textContent = `CSV 导出完成：${records.length} 条`;
       } catch (error) {
-        const message = error instanceof Error ? error.message : '未知错误';
+        const message = error instanceof Error ? error.message : "未知错误";
         status.textContent = `导出失败：${message}`;
       } finally {
         exportBtn.disabled = false;
@@ -958,7 +1129,7 @@
       if (renderHost.querySelector(`.${UI_CLASSNAME}`)) continue;
 
       const link = card.querySelector('a[href*="product_id/"]');
-      const href = link?.getAttribute('href') || '';
+      const href = link?.getAttribute("href") || "";
       const matched = href.match(/product_id\/([RB]J\d{6,})/i);
       if (!matched) continue;
 
@@ -971,7 +1142,9 @@
         rjCode,
         title,
         forceFetch: false,
-      }).then((record) => renderPriceCard(record, renderHost));
+      }).then((record) =>
+        renderPriceCard(record, renderHost, { isProductContext: false }),
+      );
     }
   }
 
@@ -1026,7 +1199,7 @@
   function injectStyle() {
     if (document.getElementById(STYLE_ID)) return;
 
-    const style = document.createElement('style');
+    const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
 .${UI_CLASSNAME} {
@@ -1042,15 +1215,41 @@
 .${UI_CLASSNAME} .dltracker-chip {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
   width: fit-content;
   max-width: 100%;
   padding: 4px 8px;
   border-radius: 6px;
   color: #fff;
-  background: #1f8f4e;
+  background: #2f7e49;
   font-weight: 700;
   box-sizing: border-box;
   word-break: break-word;
+}
+
+.${UI_CLASSNAME} .dltracker-chip-hot {
+  background: #d4571a;
+}
+
+.${UI_CLASSNAME} .dltracker-chip-normal {
+  background: #2f7e49;
+}
+
+.${UI_CLASSNAME} .dltracker-chip-text {
+  line-height: 1.25;
+}
+
+.${UI_CLASSNAME} .dltracker-off-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+  font-size: 11px;
+  letter-spacing: 0.2px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .${UI_CLASSNAME} .dltracker-btn {
@@ -1215,7 +1414,7 @@
       onUrlChange();
     };
 
-    window.addEventListener('popstate', () => onUrlChange());
+    window.addEventListener("popstate", () => onUrlChange());
     setInterval(() => onUrlChange(), 500);
 
     let domDebounceTimer = null;
