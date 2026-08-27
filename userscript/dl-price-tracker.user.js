@@ -1,23 +1,26 @@
 // ==UserScript==
-// @name         DL Price Tracker
-// @namespace    https://github.com/syoius/dlTracker4TamperMonkey
-// @version      0.1.1.2
-// @description  在 DLsite 页面显示史低价格，并支持导入收藏进行本地追踪
+// @name         DLsite 最优买法 + 史低
+// @namespace    https://github.com/jiangdaolia/dlsite-best-deal
+// @version      0.3.0
+// @description  在 DLsite 页面显示史低价格，自动读取优惠券并计算最优拆单方案
 // @author       Syoius & Cassandra-fox
+// @license      MIT
 // @match        https://www.dlsite.com/*
 // @run-at       document-idle
 // @noframes
 // @grant        GM_xmlhttpRequest
 // @connect      dlwatcher.com
-// @updateURL    https://github.com/syoius/dlTracker4TamperMonkey/raw/refs/heads/main/userscript/dl-price-tracker.user.js
-// @downloadURL  https://github.com/syoius/dlTracker4TamperMonkey/raw/refs/heads/main/userscript/dl-price-tracker.user.js
+// @homepageURL  https://github.com/jiangdaolia/dlsite-best-deal
+// @supportURL   https://github.com/jiangdaolia/dlsite-best-deal/issues
+// @updateURL    https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/main/userscript/dl-price-tracker.user.js
+// @downloadURL  https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/main/userscript/dl-price-tracker.user.js
 // ==/UserScript==
 
 (function () {
   "use strict";
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.1.1.2";
+  const APP_VERSION = "0.3.0";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -36,7 +39,23 @@
   const BUY_LATER_SORT_MODE_PRICE = "price";
   const BUY_LATER_SORT_MODE_DISCOUNT = "discount";
   const UPDATE_NOTICE_SEEN_VERSION_KEY = "dltracker-update-notice-seen-version";
+  const DEAL_PLANNER_STORAGE_KEY = "dltracker-deal-planner-v1";
+  const DEAL_PLANNER_MAX_ITEMS = 12;
+  const DEAL_PLANNER_MAX_COUPONS = 8;
+  const DLSITE_COUPON_API_PATH = "/books/mypage/coupon/list/ajax";
+  const DLSITE_PRODUCT_INFO_PATH = "/maniax/product/info/ajax";
+  const COUPON_IMPORT_TTL_MS = 5 * 60 * 1000;
   const RELEASE_NOTES = {
+    "0.3.0": [
+      "打开 DLsite 优惠券页时自动导入可用优惠券",
+      "自动解析指定作品、类型和站点等适用范围",
+      "支持期限内可重复使用的优惠券参与多次拆单",
+    ],
+    "0.2.0": [
+      "购物车新增最优买法面板",
+      "支持仅限指定 RJ/BJ 作品的百分比券与满减券",
+      "支持三件折扣、优惠互斥和多张券拆单计算",
+    ],
     "0.1.1.2": [
       "支持购物车页面显示提示标签",
       "新增【稍后再买】列表的智能排序（史低优先）开关+次级排序模式设置（低价优先/折扣优先）",
@@ -90,6 +109,8 @@
   let dbPromise = null;
   const recordInFlight = new Map();
   const canonicalRjCache = new Map();
+  let couponImportInFlight = null;
+  let importedCouponPageUrl = "";
 
   function nowIso() {
     return new Date().toISOString();
@@ -123,7 +144,7 @@
       ...notes.map((x) => `- ${x}`),
     ].join("\n");
 
-    alert(message);
+    console.info(message);
     setSeenUpdateVersion(APP_VERSION);
   }
 
@@ -187,6 +208,316 @@
     return undefined;
   }
 
+  // <deal-optimizer-core>
+  function plannerYen(value, fallback = 0) {
+    const parsed = parseNumberish(value);
+    if (typeof parsed !== "number" || parsed < 0) return fallback;
+    return Math.round(parsed);
+  }
+
+  function normalizePlannerItems(rawItems) {
+    const seen = new Set();
+    return (Array.isArray(rawItems) ? rawItems : []).map((raw, index) => {
+      const id = String(raw?.id || `ITEM-${index + 1}`).toUpperCase();
+      if (seen.has(id)) throw new Error(`作品编号重复：${id}`);
+      seen.add(id);
+      const regularPrice = plannerYen(raw?.regularPrice);
+      const parsedSetPrice = parseNumberish(raw?.setPrice);
+      const setPrice =
+        typeof parsedSetPrice === "number" && parsedSetPrice >= 0
+          ? Math.round(parsedSetPrice)
+          : null;
+      return {
+        id,
+        title: String(raw?.title || id),
+        regularPrice,
+        setPrice,
+        setGroup: String(raw?.setGroup || "").trim(),
+        setMinCount: Math.max(2, plannerYen(raw?.setMinCount, 3)),
+      };
+    });
+  }
+
+  function normalizePlannerCoupons(rawCoupons, itemIds) {
+    const allItemIds = new Set(itemIds);
+    return (Array.isArray(rawCoupons) ? rawCoupons : []).map((raw, index) => {
+      const eligibleIds = Array.isArray(raw?.eligibleIds)
+        ? raw.eligibleIds
+            .map((id) => String(id).toUpperCase())
+            .filter((id) => allItemIds.has(id))
+        : [];
+      return {
+        id: String(raw?.id || `COUPON-${index + 1}`),
+        name: String(raw?.name || `优惠券 ${index + 1}`),
+        type: raw?.type === "fixed" ? "fixed" : "percent",
+        value: plannerYen(raw?.value),
+        minSpend: plannerYen(raw?.minSpend),
+        maxDiscount: plannerYen(raw?.maxDiscount),
+        scope: raw?.scope === "one" ? "one" : "all",
+        minSpendScope:
+          raw?.minSpendScope === "eligible" ? "eligible" : "order",
+        stackMode: ["after", "replace-target", "exclude-target"].includes(
+          raw?.stackMode,
+        )
+          ? raw.stackMode
+          : "after",
+        allEligible:
+          raw?.allEligible === true ||
+          (raw?.allEligible === undefined && eligibleIds.length === 0),
+        repeatable: raw?.repeatable === true,
+        eligibleIds,
+      };
+    });
+  }
+
+  function selectedPlannerIndexes(mask, count) {
+    const indexes = [];
+    for (let index = 0; index < count; index += 1) {
+      if (mask & (1 << index)) indexes.push(index);
+    }
+    return indexes;
+  }
+
+  function quotePlannerOrder(items, mask, coupon = null) {
+    const selected = selectedPlannerIndexes(mask, items.length);
+    if (!selected.length) return null;
+
+    const eligible = coupon
+      ? selected.filter(
+          (index) =>
+            coupon.allEligible ||
+            coupon.eligibleIds.includes(items[index].id),
+        )
+      : [];
+    if (coupon && !eligible.length) return null;
+
+    const targetSets = !coupon
+      ? [[]]
+      : coupon.scope === "one"
+        ? eligible.map((index) => [index])
+        : [eligible];
+    let best = null;
+
+    for (const targets of targetSets) {
+      const targetSet = new Set(targets);
+      const groupCounts = new Map();
+      for (const index of selected) {
+        const item = items[index];
+        const excluded =
+          coupon?.stackMode === "exclude-target" && targetSet.has(index);
+        if (!item.setGroup || excluded) continue;
+        groupCounts.set(item.setGroup, (groupCounts.get(item.setGroup) || 0) + 1);
+      }
+
+      const lines = selected.map((index) => {
+        const item = items[index];
+        const dealApplied = Boolean(
+          item.setGroup &&
+            item.setPrice !== null &&
+            item.setPrice < item.regularPrice &&
+            (groupCounts.get(item.setGroup) || 0) >= item.setMinCount,
+        );
+        let price = dealApplied ? item.setPrice : item.regularPrice;
+        if (
+          targetSet.has(index) &&
+          coupon &&
+          coupon.stackMode !== "after"
+        ) {
+          price = item.regularPrice;
+        }
+        return {
+          id: item.id,
+          title: item.title,
+          price,
+          dealApplied:
+            dealApplied &&
+            !(targetSet.has(index) && coupon?.stackMode !== "after"),
+          couponTarget: targetSet.has(index),
+        };
+      });
+      const subtotal = lines.reduce((sum, line) => sum + line.price, 0);
+      const couponBase = lines
+        .filter((line) => line.couponTarget)
+        .reduce((sum, line) => sum + line.price, 0);
+      const thresholdBase =
+        coupon?.minSpendScope === "eligible" ? couponBase : subtotal;
+      if (coupon && thresholdBase < coupon.minSpend) continue;
+
+      let discount = 0;
+      if (coupon) {
+        discount =
+          coupon.type === "fixed"
+            ? Math.min(coupon.value, couponBase)
+            : Math.floor((couponBase * coupon.value) / 100);
+        if (coupon.maxDiscount > 0) {
+          discount = Math.min(discount, coupon.maxDiscount);
+        }
+        discount = Math.max(0, Math.min(discount, subtotal));
+      }
+      const quote = {
+        mask,
+        subtotal,
+        discount,
+        total: subtotal - discount,
+        couponId: coupon?.id || null,
+        couponName: coupon?.name || null,
+        targetIds: lines
+          .filter((line) => line.couponTarget)
+          .map((line) => line.id),
+        lines,
+      };
+      if (
+        !best ||
+        quote.total < best.total ||
+        (quote.total === best.total && quote.discount > best.discount)
+      ) {
+        best = quote;
+      }
+    }
+
+    return best;
+  }
+
+  function betterPlannerPlan(candidate, current) {
+    if (!current) return true;
+    if (candidate.total !== current.total) return candidate.total < current.total;
+    if (candidate.orders.length !== current.orders.length) {
+      return candidate.orders.length < current.orders.length;
+    }
+    return candidate.discount > current.discount;
+  }
+
+  function optimizeDealPlan(rawItems, rawCoupons) {
+    const items = normalizePlannerItems(rawItems);
+    if (!items.length) throw new Error("购物车中没有可计算的作品");
+    if (items.length > DEAL_PLANNER_MAX_ITEMS) {
+      throw new Error(
+        `精确计算最多支持 ${DEAL_PLANNER_MAX_ITEMS} 部作品，请先减少购物车作品`,
+      );
+    }
+    const coupons = normalizePlannerCoupons(
+      rawCoupons,
+      items.map((item) => item.id),
+    );
+    if (coupons.length > DEAL_PLANNER_MAX_COUPONS) {
+      throw new Error(
+        `精确计算最多支持 ${DEAL_PLANNER_MAX_COUPONS} 张券，请删除暂时不用的券`,
+      );
+    }
+
+    const fullMask = (1 << items.length) - 1;
+    const baseQuotes = new Map();
+    const couponQuotes = coupons.map(() => new Map());
+    const getBaseQuote = (mask) => {
+      if (!mask) return null;
+      if (!baseQuotes.has(mask)) {
+        baseQuotes.set(mask, quotePlannerOrder(items, mask));
+      }
+      return baseQuotes.get(mask);
+    };
+    const getCouponQuote = (couponIndex, mask) => {
+      const cache = couponQuotes[couponIndex];
+      if (!cache.has(mask)) {
+        cache.set(
+          mask,
+          quotePlannerOrder(items, mask, coupons[couponIndex]),
+        );
+      }
+      return cache.get(mask);
+    };
+
+    const oneTimeIndexes = [];
+    const repeatableIndexes = [];
+    coupons.forEach((coupon, index) => {
+      (coupon.repeatable ? repeatableIndexes : oneTimeIndexes).push(index);
+    });
+
+    // 可重复券可以用于不同订单，但每次报价仍只包含一张券。
+    // minimumPosition 强制券序非递减，去掉等价的拆单排列。
+    const repeatableMemo = new Map();
+    const solveRepeatable = (minimumPosition, remainingMask) => {
+      const key = `${minimumPosition}:${remainingMask}`;
+      if (repeatableMemo.has(key)) return repeatableMemo.get(key);
+      const base = getBaseQuote(remainingMask);
+      let best = {
+        total: base?.total || 0,
+        discount: 0,
+        orders: base ? [base] : [],
+      };
+      for (
+        let position = minimumPosition;
+        position < repeatableIndexes.length;
+        position += 1
+      ) {
+        const couponIndex = repeatableIndexes[position];
+        for (
+          let orderMask = remainingMask;
+          orderMask > 0;
+          orderMask = (orderMask - 1) & remainingMask
+        ) {
+          const quote = getCouponQuote(couponIndex, orderMask);
+          if (!quote || quote.discount <= 0) continue;
+          const rest = solveRepeatable(
+            position,
+            remainingMask ^ orderMask,
+          );
+          const candidate = {
+            total: quote.total + rest.total,
+            discount: quote.discount + rest.discount,
+            orders: [quote, ...rest.orders],
+          };
+          if (betterPlannerPlan(candidate, best)) best = candidate;
+        }
+      }
+      repeatableMemo.set(key, best);
+      return best;
+    };
+
+    const memo = new Map();
+    const solve = (couponPosition, remainingMask) => {
+      const key = `${couponPosition}:${remainingMask}`;
+      if (memo.has(key)) return memo.get(key);
+      if (couponPosition >= oneTimeIndexes.length) {
+        const result = solveRepeatable(0, remainingMask);
+        memo.set(key, result);
+        return result;
+      }
+
+      const couponIndex = oneTimeIndexes[couponPosition];
+      let best = solve(couponPosition + 1, remainingMask);
+      for (
+        let orderMask = remainingMask;
+        orderMask > 0;
+        orderMask = (orderMask - 1) & remainingMask
+      ) {
+        const quote = getCouponQuote(couponIndex, orderMask);
+        if (!quote || quote.discount <= 0) continue;
+        const rest = solve(couponPosition + 1, remainingMask ^ orderMask);
+        const candidate = {
+          total: quote.total + rest.total,
+          discount: quote.discount + rest.discount,
+          orders: [quote, ...rest.orders],
+        };
+        if (betterPlannerPlan(candidate, best)) best = candidate;
+      }
+      memo.set(key, best);
+      return best;
+    };
+
+    const baselineQuote = getBaseQuote(fullMask);
+    const best = solve(0, fullMask);
+    return {
+      items,
+      coupons,
+      baseline: baselineQuote.total,
+      total: best.total,
+      savings: baselineQuote.total - best.total,
+      discount: best.discount,
+      orders: best.orders,
+    };
+  }
+  // </deal-optimizer-core>
+
   function toCsvCell(raw) {
     if (raw === undefined || raw === null) return "";
     const value = String(raw);
@@ -219,6 +550,10 @@
 
   function isCartPage(url) {
     return /\/cart(?:[/?#]|$)/i.test(url);
+  }
+
+  function isCouponPage(url) {
+    return /\/mypage\/coupon(?:\/|[?#]|$)/i.test(url);
   }
 
   function isTouchPath(url) {
@@ -627,6 +962,920 @@
       !!ownerItem.querySelector(".__buy_now_target, .__buy_later_target");
     if (!hasCartTarget) return false;
     return true;
+  }
+
+  function getPlannerState() {
+    try {
+      const parsed = JSON.parse(
+        localStorage.getItem(DEAL_PLANNER_STORAGE_KEY) || "null",
+      );
+      return {
+        coupons: Array.isArray(parsed?.coupons) ? parsed.coupons : [],
+        itemOverrides:
+          parsed?.itemOverrides && typeof parsed.itemOverrides === "object"
+            ? parsed.itemOverrides
+            : {},
+        lastCouponImport:
+          parsed?.lastCouponImport && typeof parsed.lastCouponImport === "object"
+            ? parsed.lastCouponImport
+            : null,
+      };
+    } catch {
+      return { coupons: [], itemOverrides: {}, lastCouponImport: null };
+    }
+  }
+
+  function savePlannerState(state) {
+    try {
+      localStorage.setItem(DEAL_PLANNER_STORAGE_KEY, JSON.stringify(state));
+    } catch (error) {
+      console.warn(`[${APP_NAME}] save deal planner state failed:`, error);
+    }
+  }
+
+  // <coupon-import-core>
+  function firstNumberish(objects, keys, fallback = 0) {
+    for (const object of objects) {
+      if (!object || typeof object !== "object") continue;
+      for (const key of keys) {
+        const parsed = parseNumberish(object[key]);
+        if (typeof parsed === "number") return parsed;
+      }
+    }
+    return fallback;
+  }
+
+  function conditionTokens(value) {
+    if (value === null || value === undefined) return [];
+    if (Array.isArray(value)) return value.flatMap(conditionTokens);
+    if (typeof value === "object") {
+      return Object.values(value).flatMap(conditionTokens);
+    }
+    return [String(value)];
+  }
+
+  function inferRepeatableCoupon(raw, combinedText) {
+    const booleanFields = [
+      "unlimited",
+      "is_unlimited",
+      "repeatable",
+      "repeat_flg",
+      "reuse_flg",
+      "use_unlimited_flg",
+    ];
+    for (const field of booleanFields) {
+      if (!(field in raw)) continue;
+      const value = raw[field];
+      if (value === true || value === 1 || value === "1") return true;
+      if (value === false || value === 0 || value === "0") return false;
+    }
+    if (
+      /期[間间]中.{0,8}何度でも|何度でも利用|回数制限なし|無制限|不限次数|无限使用/i.test(
+        combinedText,
+      )
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function normalizeDlsiteCoupon(raw, index) {
+    const conditions =
+      raw?.conditions && typeof raw.conditions === "object"
+        ? raw.conditions
+        : {};
+    const conditionType = String(raw?.condition_type || "").toLowerCase();
+    const combinedText = [
+      raw?.coupon_name,
+      raw?.description,
+      raw?.info,
+      raw?.condition_info,
+      raw?.notes,
+      JSON.stringify(raw),
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const discountType = String(raw?.discount_type || "").toLowerCase();
+    if (!['rate', 'price'].includes(discountType)) return null;
+
+    const textThreshold = combinedText.match(/([\d,]+)\s*円以上/i);
+    const textMaximum = combinedText.match(/(?:最大|上限)\s*([\d,]+)\s*円/i);
+    const minSpend = firstNumberish(
+      [raw, conditions],
+      [
+        "minimum_applicable_price",
+        "minimum_order_amount",
+        "minimum_price",
+        "min_price",
+        "lower_limit_price",
+      ],
+      textThreshold ? Number(textThreshold[1].replace(/,/g, "")) : 0,
+    );
+    const maxDiscount = firstNumberish(
+      [raw, conditions],
+      ["maximum_discount_price", "max_discount", "discount_limit"],
+      textMaximum ? Number(textMaximum[1].replace(/,/g, "")) : 0,
+    );
+    const eligibleIds = conditionType === "id_all"
+      ? conditionTokens(conditions.product_all)
+          .map((id) => String(id).toUpperCase())
+          .filter((id) => RJ_CODE_REGEX.test(id))
+      : [];
+    const unrestricted = ["", "all", "all_product", "product_all"].includes(
+      conditionType,
+    );
+    const repeatable = inferRepeatableCoupon(raw, combinedText);
+    const warnings = [];
+    if (
+      !unrestricted &&
+      !["id_all", "custom_genre", "site_ids", "worktype"].includes(
+        conditionType,
+      )
+    ) {
+      warnings.push(`暂不认识适用条件 ${conditionType || "（空）"}`);
+    }
+    if (
+      !repeatable &&
+      !/(?:1回|一回|一度|一枚|一次のみ|一度のみ)/i.test(combinedText)
+    ) {
+      warnings.push("未发现明确的使用次数字段，暂按一次性券计算");
+    }
+
+    const expiresNumber = parseNumberish(raw?.limit_date);
+    const expiresAt = typeof expiresNumber === "number"
+      ? new Date(expiresNumber > 1e12 ? expiresNumber : expiresNumber * 1000).toISOString()
+      : null;
+    return {
+      id: `dlsite-${String(raw?.coupon_id || index + 1)}`,
+      source: "dlsite",
+      sourceCouponId: String(raw?.coupon_id || ""),
+      sourceConditionType: conditionType,
+      sourceConditions: conditions,
+      name: String(raw?.coupon_name || `DLsite 优惠券 ${index + 1}`),
+      type: discountType === "price" ? "fixed" : "percent",
+      value: plannerYen(raw?.discount),
+      minSpend: plannerYen(minSpend),
+      maxDiscount: plannerYen(maxDiscount),
+      scope:
+        /(?:1作品|1本|1点|一作品|一商品)/i.test(combinedText)
+          ? "one"
+          : "all",
+      minSpendScope: "order",
+      stackMode: "after",
+      repeatable,
+      allEligible: unrestricted,
+      eligibleIds: [...new Set(eligibleIds)],
+      expiresAt,
+      autoWarnings: warnings,
+    };
+  }
+
+  function couponArrayFromPayload(payload) {
+    if (Array.isArray(payload)) return payload;
+    for (const key of ["coupons", "items", "data", "values"]) {
+      if (Array.isArray(payload?.[key])) return payload[key];
+    }
+    return [];
+  }
+  // </coupon-import-core>
+
+  function renderCouponImportStatus(status, isError = false) {
+    let box = document.querySelector(".dltracker-coupon-import-status");
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "dltracker-coupon-import-status";
+      (document.querySelector("#main_inner, main") || document.body).prepend(box);
+    }
+    box.classList.toggle("is-error", isError);
+    box.textContent = status;
+  }
+
+  async function importDlsiteCoupons() {
+    if (couponImportInFlight) return couponImportInFlight;
+    couponImportInFlight = (async () => {
+      renderCouponImportStatus("最优买法：正在从当前账号读取优惠券…");
+      const response = await fetch(
+        new URL(DLSITE_COUPON_API_PATH, location.origin),
+        { credentials: "include", headers: { Accept: "application/json" } },
+      );
+      if (!response.ok) {
+        throw new Error(`优惠券接口返回 HTTP ${response.status}`);
+      }
+      const payload = await response.json();
+      const now = Date.now();
+      const imported = couponArrayFromPayload(payload)
+        .map(normalizeDlsiteCoupon)
+        .filter(Boolean)
+        .filter((coupon) => !coupon.expiresAt || Date.parse(coupon.expiresAt) > now);
+      const state = getPlannerState();
+      const manual = state.coupons.filter((coupon) => coupon?.source !== "dlsite");
+      state.coupons = [...manual, ...imported];
+      state.lastCouponImport = {
+        at: nowIso(),
+        count: imported.length,
+        repeatableCount: imported.filter((coupon) => coupon.repeatable).length,
+      };
+      savePlannerState(state);
+      renderCouponImportStatus(
+        `最优买法：已自动导入 ${imported.length} 张有效优惠券` +
+          (state.lastCouponImport.repeatableCount
+            ? `，其中 ${state.lastCouponImport.repeatableCount} 张期限内可重复使用`
+            : "") +
+          "。无需打开“适用作品”长列表。",
+      );
+      return imported;
+    })().catch((error) => {
+      console.warn(`[${APP_NAME}] import coupons failed:`, error);
+      renderCouponImportStatus(
+        `最优买法：自动读取失败（${error instanceof Error ? error.message : String(error)}）。请确认已登录后刷新本页。`,
+        true,
+      );
+      return [];
+    }).finally(() => {
+      couponImportInFlight = null;
+    });
+    return couponImportInFlight;
+  }
+
+  async function ensureDlsiteCoupons(force = false) {
+    const lastImport = getPlannerState().lastCouponImport;
+    const importedAt = Date.parse(lastImport?.at || "");
+    if (
+      !force &&
+      Number.isFinite(importedAt) &&
+      Date.now() - importedAt < COUPON_IMPORT_TTL_MS
+    ) {
+      return getPlannerState().coupons.filter(
+        (coupon) => coupon?.source === "dlsite",
+      );
+    }
+    return importDlsiteCoupons();
+  }
+
+  async function enhanceCouponPage() {
+    if (!isCouponPage(location.href)) return;
+    if (importedCouponPageUrl === location.href) return;
+    importedCouponPageUrl = location.href;
+    await ensureDlsiteCoupons(true);
+  }
+
+  function productRecordsFromPayload(payload) {
+    const rawRecords = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.products)
+        ? payload.products
+        : payload?.products && typeof payload.products === "object"
+          ? Object.entries(payload.products).map(([id, value]) => ({
+              ...(value || {}),
+              product_id: value?.product_id || id,
+            }))
+          : payload && typeof payload === "object"
+            ? Object.entries(payload).map(([id, value]) => ({
+                ...(value || {}),
+                product_id: value?.product_id || id,
+              }))
+            : [];
+    const records = new Map();
+    for (const record of rawRecords) {
+      const id = String(
+        record?.product_id || record?.workno || record?.id || "",
+      ).toUpperCase();
+      if (id) records.set(id, record);
+    }
+    return records;
+  }
+
+  async function fetchCartProductMetadata(items) {
+    const url = new URL(DLSITE_PRODUCT_INFO_PATH, location.origin);
+    url.searchParams.set("product_id", items.map((item) => item.id).join(","));
+    const response = await fetch(url, {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) throw new Error(`作品条件接口返回 HTTP ${response.status}`);
+    return productRecordsFromPayload(await response.json());
+  }
+
+  function couponMatchesProduct(coupon, item, metadata) {
+    const type = coupon.sourceConditionType;
+    const conditions = coupon.sourceConditions || {};
+    const maximumPrice = firstNumberish(
+      [conditions],
+      ["maximum_applicable_price", "maximum_price", "max_price"],
+      0,
+    );
+    const productPrice =
+      parseNumberish(metadata?.price) ?? item.regularPrice;
+    if (maximumPrice > 0 && productPrice > maximumPrice) return false;
+    if (type === "custom_genre") {
+      const allowed = new Set(conditionTokens(conditions.custom_genre));
+      return conditionTokens(metadata?.custom_genres).some((id) => allowed.has(id));
+    }
+    if (type === "site_ids") {
+      const allowed = new Set(conditionTokens(conditions.site_ids));
+      return conditionTokens(metadata?.site_id).some((id) => allowed.has(id));
+    }
+    if (type === "worktype") {
+      const allowed = new Set(conditionTokens(conditions.worktype));
+      return conditionTokens(metadata?.work_type).some((id) => allowed.has(id));
+    }
+    return false;
+  }
+
+  async function resolveImportedCouponEligibility(items, coupons) {
+    const dynamicTypes = new Set(["custom_genre", "site_ids", "worktype"]);
+    const needsMetadata = coupons.some(
+      (coupon) =>
+        coupon?.source === "dlsite" &&
+        dynamicTypes.has(coupon.sourceConditionType),
+    );
+    const metadata = needsMetadata
+      ? await fetchCartProductMetadata(items)
+      : new Map();
+    return coupons.map((coupon) => {
+      if (coupon?.source !== "dlsite") return coupon;
+      if (!dynamicTypes.has(coupon.sourceConditionType)) return coupon;
+      return {
+        ...coupon,
+        allEligible: false,
+        eligibleIds: items
+          .filter((item) =>
+            couponMatchesProduct(coupon, item, metadata.get(item.id)),
+          )
+          .map((item) => item.id),
+      };
+    });
+  }
+
+  function cartItemAttribute(item, names) {
+    for (const name of names) {
+      const direct = item.getAttribute(name);
+      if (direct !== null && direct !== "") return direct;
+      const nested = item.querySelector(`[${name}]`)?.getAttribute(name);
+      if (nested !== null && nested !== undefined && nested !== "") {
+        return nested;
+      }
+    }
+    return null;
+  }
+
+  function parseYenFromCartText(item) {
+    const candidates = [
+      item.querySelector(".n_work_price_wrap"),
+      item.querySelector(".work_price"),
+      item.querySelector('[class*="price"]'),
+    ].filter(Boolean);
+    for (const candidate of candidates) {
+      const text = (candidate.textContent || "").replace(/,/g, "");
+      const matched = text.match(/(\d{1,8})\s*(?:円|JPY)/i);
+      if (matched) return Number(matched[1]);
+    }
+    return 0;
+  }
+
+  function extractPlannerItemsFromCart(itemOverrides = {}) {
+    const result = [];
+    const seen = new Set();
+    for (const rawItem of getCartItems()) {
+      const item =
+        rawItem.closest("li.cart_list_item, li.n_work_list_item") || rawItem;
+      if (!isRenderableCartItem(item) || isBuyLaterCartItem(item)) continue;
+      if (seen.has(item)) continue;
+      seen.add(item);
+      const id = extractRjCodeFromCartItem(item);
+      if (!id) continue;
+
+      const title =
+        item.querySelector(".work_name a")?.textContent?.trim() ||
+        item.querySelector(".n_work_name a")?.textContent?.trim() ||
+        item.querySelector('a[href*="product_id/"]')?.textContent?.trim() ||
+        id;
+      const originPrice = parseNumberish(
+        cartItemAttribute(item, [
+          "data-bulkbuy_origin_price",
+          "data-origin-price",
+          "data-price",
+        ]),
+      );
+      const detectedSetPrice = parseNumberish(
+        cartItemAttribute(item, [
+          "data-bulkbuy_price",
+          "data-bulk-price",
+        ]),
+      );
+      const detected = {
+        id,
+        title,
+        regularPrice:
+          typeof originPrice === "number" ? originPrice : parseYenFromCartText(item),
+        setPrice:
+          typeof detectedSetPrice === "number" ? detectedSetPrice : null,
+        setGroup:
+          cartItemAttribute(item, ["data-bulkbuy_key", "data-bulkbuy-key"]) ||
+          "",
+        setMinCount: 3,
+      };
+      const override = itemOverrides[id];
+      result.push(override ? { ...detected, ...override, id, title } : detected);
+    }
+    return result;
+  }
+
+  function plannerInput(type, value, onInput, options = {}) {
+    const input = document.createElement("input");
+    input.type = type;
+    input.value = value ?? "";
+    input.className = "dltracker-planner-input";
+    if (options.min !== undefined) input.min = String(options.min);
+    if (options.max !== undefined) input.max = String(options.max);
+    if (options.placeholder) input.placeholder = options.placeholder;
+    input.addEventListener("input", () => onInput(input.value));
+    return input;
+  }
+
+  function plannerSelect(value, entries, onChange) {
+    const select = document.createElement("select");
+    select.className = "dltracker-planner-input";
+    for (const [entryValue, label] of entries) {
+      const option = document.createElement("option");
+      option.value = entryValue;
+      option.textContent = label;
+      option.selected = entryValue === value;
+      select.appendChild(option);
+    }
+    select.addEventListener("change", () => onChange(select.value));
+    return select;
+  }
+
+  function plannerField(label, control) {
+    const wrapper = document.createElement("label");
+    wrapper.className = "dltracker-planner-field";
+    const title = document.createElement("span");
+    title.textContent = label;
+    wrapper.appendChild(title);
+    wrapper.appendChild(control);
+    return wrapper;
+  }
+
+  function renderPlannerItems(container, items, state, rerender) {
+    const heading = document.createElement("div");
+    heading.className = "dltracker-planner-section-title";
+    heading.textContent = `购物车作品（${items.length}/${DEAL_PLANNER_MAX_ITEMS}）`;
+    container.appendChild(heading);
+
+    if (!items.length) {
+      const empty = document.createElement("p");
+      empty.className = "dltracker-planner-muted";
+      empty.textContent = "没有读到购物车作品。请确认作品在“现在购买”列表并刷新页面。";
+      container.appendChild(empty);
+      return;
+    }
+
+    for (const item of items) {
+      const row = document.createElement("div");
+      row.className = "dltracker-planner-item";
+      const name = document.createElement("div");
+      name.className = "dltracker-planner-item-name";
+      name.textContent = `${item.id} · ${item.title}`;
+      row.appendChild(name);
+      const grid = document.createElement("div");
+      grid.className = "dltracker-planner-grid";
+      const update = (field, value) => {
+        state.itemOverrides[item.id] = {
+          ...(state.itemOverrides[item.id] || {}),
+          [field]: ["regularPrice", "setPrice", "setMinCount"].includes(field)
+            ? value === ""
+              ? field === "setPrice"
+                ? null
+                : 0
+              : Number(value)
+            : value,
+        };
+        savePlannerState(state);
+      };
+      grid.appendChild(
+        plannerField(
+          "普通/当前价",
+          plannerInput("number", item.regularPrice, (value) =>
+            update("regularPrice", value),
+          { min: 0 }),
+        ),
+      );
+      grid.appendChild(
+        plannerField(
+          "三件折后价",
+          plannerInput(
+            "number",
+            item.setPrice ?? "",
+            (value) => update("setPrice", value),
+            { min: 0, placeholder: "不参加则留空" },
+          ),
+        ),
+      );
+      grid.appendChild(
+        plannerField(
+          "同组标识",
+          plannerInput("text", item.setGroup, (value) =>
+            update("setGroup", value),
+          { placeholder: "例如 3x60" }),
+        ),
+      );
+      grid.appendChild(
+        plannerField(
+          "成组数量",
+          plannerInput("number", item.setMinCount, (value) =>
+            update("setMinCount", value),
+          { min: 2, max: 20 }),
+        ),
+      );
+      row.appendChild(grid);
+
+      if (state.itemOverrides[item.id]) {
+        const reset = document.createElement("button");
+        reset.type = "button";
+        reset.className = "dltracker-planner-link-button";
+        reset.textContent = "恢复页面识别值";
+        reset.addEventListener("click", () => {
+          delete state.itemOverrides[item.id];
+          savePlannerState(state);
+          rerender();
+        });
+        row.appendChild(reset);
+      }
+      container.appendChild(row);
+    }
+  }
+
+  function newPlannerCoupon(items, index) {
+    return {
+      id: `coupon-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      name: `优惠券 ${index + 1}`,
+      type: "percent",
+      value: 20,
+      minSpend: 0,
+      maxDiscount: 0,
+      scope: "all",
+      minSpendScope: "order",
+      stackMode: "after",
+      repeatable: false,
+      allEligible: false,
+      eligibleIds: items.map((item) => item.id),
+    };
+  }
+
+  function renderPlannerCoupons(container, items, state, rerender) {
+    const titleRow = document.createElement("div");
+    titleRow.className = "dltracker-planner-title-row";
+    const heading = document.createElement("div");
+    heading.className = "dltracker-planner-section-title";
+    heading.textContent = `优惠券（${state.coupons.length}/${DEAL_PLANNER_MAX_COUPONS}）`;
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "dltracker-planner-secondary";
+    add.textContent = "添加优惠券";
+    add.disabled = !items.length || state.coupons.length >= DEAL_PLANNER_MAX_COUPONS;
+    add.addEventListener("click", () => {
+      state.coupons.push(newPlannerCoupon(items, state.coupons.length));
+      savePlannerState(state);
+      rerender();
+    });
+    titleRow.appendChild(heading);
+    titleRow.appendChild(add);
+    container.appendChild(titleRow);
+
+    for (const coupon of state.coupons) {
+      if (!Array.isArray(coupon.eligibleIds)) coupon.eligibleIds = [];
+      const card = document.createElement("div");
+      card.className = "dltracker-planner-coupon";
+      const header = document.createElement("div");
+      header.className = "dltracker-planner-title-row";
+      const nameWrap = document.createElement("div");
+      nameWrap.className = "dltracker-planner-coupon-name-wrap";
+      const name = plannerInput("text", coupon.name, (value) => {
+        coupon.name = value;
+        savePlannerState(state);
+      });
+      name.classList.add("dltracker-planner-coupon-name");
+      nameWrap.appendChild(name);
+      if (coupon.source === "dlsite") {
+        const badge = document.createElement("span");
+        badge.className = "dltracker-planner-source-badge";
+        badge.textContent = "DLsite 自动导入";
+        nameWrap.appendChild(badge);
+      }
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "dltracker-planner-danger";
+      remove.textContent = "删除";
+      remove.addEventListener("click", () => {
+        state.coupons = state.coupons.filter((item) => item.id !== coupon.id);
+        savePlannerState(state);
+        rerender();
+      });
+      header.appendChild(nameWrap);
+      header.appendChild(remove);
+      card.appendChild(header);
+
+      const update = (field, value) => {
+        coupon[field] = value;
+        savePlannerState(state);
+      };
+      const grid = document.createElement("div");
+      grid.className = "dltracker-planner-grid";
+      grid.appendChild(
+        plannerField(
+          "优惠类型",
+          plannerSelect(
+            coupon.type,
+            [
+              ["percent", "百分比券"],
+              ["fixed", "固定金额/满减券"],
+            ],
+            (value) => update("type", value),
+          ),
+        ),
+      );
+      grid.appendChild(
+        plannerField(
+          "优惠值",
+          plannerInput("number", coupon.value, (value) =>
+            update("value", Number(value)),
+          { min: 0 }),
+        ),
+      );
+      grid.appendChild(
+        plannerField(
+          "最低消费",
+          plannerInput("number", coupon.minSpend, (value) =>
+            update("minSpend", Number(value)),
+          { min: 0 }),
+        ),
+      );
+      grid.appendChild(
+        plannerField(
+          "减免上限（0=无）",
+          plannerInput("number", coupon.maxDiscount, (value) =>
+            update("maxDiscount", Number(value)),
+          { min: 0 }),
+        ),
+      );
+      grid.appendChild(
+        plannerField(
+          "优惠几部",
+          plannerSelect(
+            coupon.scope,
+            [
+              ["all", "订单内全部适用作品"],
+              ["one", "仅一部适用作品"],
+            ],
+            (value) => update("scope", value),
+          ),
+        ),
+      );
+      grid.appendChild(
+        plannerField(
+          "门槛计算范围",
+          plannerSelect(
+            coupon.minSpendScope,
+            [
+              ["order", "整单金额"],
+              ["eligible", "适用作品金额"],
+            ],
+            (value) => update("minSpendScope", value),
+          ),
+        ),
+      );
+      grid.appendChild(
+        plannerField(
+          "与三件折扣关系",
+          plannerSelect(
+            coupon.stackMode,
+            [
+              ["after", "折后继续用券"],
+              ["replace-target", "用券作品恢复普通价，但仍计入三件"],
+              ["exclude-target", "用券作品恢复普通价且不计入三件"],
+            ],
+            (value) => update("stackMode", value),
+          ),
+        ),
+      );
+      grid.appendChild(
+        plannerField(
+          "使用次数",
+          plannerSelect(
+            coupon.repeatable ? "repeatable" : "once",
+            [
+              ["once", "整次购买中使用一次"],
+              ["repeatable", "期限内可在不同订单重复"],
+            ],
+            (value) => update("repeatable", value === "repeatable"),
+          ),
+        ),
+      );
+      grid.appendChild(
+        plannerField(
+          "适用范围",
+          plannerSelect(
+            coupon.allEligible ? "all" : "selected",
+            [
+              ["all", "购物车全部作品"],
+              ["selected", "仅下方勾选作品"],
+            ],
+            (value) => {
+              update("allEligible", value === "all");
+              rerender();
+            },
+          ),
+        ),
+      );
+      card.appendChild(grid);
+
+      const eligibilityTitle = document.createElement("div");
+      eligibilityTitle.className = "dltracker-planner-eligibility-title";
+      eligibilityTitle.textContent = coupon.source === "dlsite"
+        ? "当前购物车中的适用作品（类型/站点条件会在计算时自动解析）"
+        : "当前购物车中的适用作品";
+      card.appendChild(eligibilityTitle);
+      const eligibility = document.createElement("div");
+      eligibility.className = "dltracker-planner-checkboxes";
+      for (const item of items) {
+        const label = document.createElement("label");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = coupon.eligibleIds.includes(item.id);
+        checkbox.addEventListener("change", () => {
+          const next = new Set(coupon.eligibleIds);
+          if (checkbox.checked) next.add(item.id);
+          else next.delete(item.id);
+          coupon.eligibleIds = [...next];
+          coupon.allEligible = false;
+          savePlannerState(state);
+        });
+        const text = document.createElement("span");
+        text.textContent = `${item.id} ${item.title}`;
+        label.appendChild(checkbox);
+        label.appendChild(text);
+        eligibility.appendChild(label);
+      }
+      card.appendChild(eligibility);
+      if (coupon.expiresAt || coupon.repeatable || coupon.autoWarnings?.length) {
+        const meta = document.createElement("p");
+        meta.className = "dltracker-planner-muted";
+        const parts = [];
+        if (coupon.expiresAt) {
+          parts.push(`有效期至 ${new Date(coupon.expiresAt).toLocaleString("zh-CN")}`);
+        }
+        if (coupon.repeatable) parts.push("期限内可重复使用");
+        if (coupon.autoWarnings?.length) {
+          parts.push(`注意：${coupon.autoWarnings.join("；")}`);
+        }
+        meta.textContent = parts.join(" · ");
+        card.appendChild(meta);
+      }
+      container.appendChild(card);
+    }
+  }
+
+  function renderPlannerResult(container, result) {
+    container.replaceChildren();
+    const summary = document.createElement("div");
+    summary.className = "dltracker-planner-result-summary";
+    summary.textContent = `不使用优惠券 ${toYen(result.baseline)} → 推荐付款 ${toYen(result.total)}，节省 ${toYen(result.savings)}`;
+    container.appendChild(summary);
+
+    result.orders.forEach((order, index) => {
+      const card = document.createElement("div");
+      card.className = "dltracker-planner-order";
+      const title = document.createElement("strong");
+      title.textContent = order.couponName
+        ? `第 ${index + 1} 单：使用「${order.couponName}」`
+        : `第 ${index + 1} 单：不使用优惠券`;
+      card.appendChild(title);
+      const list = document.createElement("ul");
+      for (const line of order.lines) {
+        const item = document.createElement("li");
+        const tags = [];
+        if (line.dealApplied) tags.push("三件折扣");
+        if (line.couponTarget) tags.push("用券");
+        item.textContent = `${line.id} ${line.title}：${toYen(line.price)}${tags.length ? `（${tags.join("、")}）` : ""}`;
+        list.appendChild(item);
+      }
+      card.appendChild(list);
+      const total = document.createElement("div");
+      total.className = "dltracker-planner-order-total";
+      total.textContent = `小计 ${toYen(order.subtotal)} − 优惠 ${toYen(order.discount)} = ${toYen(order.total)}`;
+      card.appendChild(total);
+      container.appendChild(card);
+    });
+
+    const note = document.createElement("p");
+    note.className = "dltracker-planner-warning";
+    note.textContent =
+      "这是按所填规则得到的估算值。DLsite 可能采用不同的计税、取整或互斥规则，请在付款确认页核对最终金额。脚本不会自动改购物车或下单。";
+    container.appendChild(note);
+  }
+
+  function renderDealPlanner(root) {
+    const panel = root.querySelector(".dltracker-planner-panel");
+    const body = root.querySelector(".dltracker-planner-body");
+    const resultBox = root.querySelector(".dltracker-planner-result");
+    if (!panel || !body || !resultBox) return;
+    const state = getPlannerState();
+    const items = extractPlannerItemsFromCart(state.itemOverrides);
+    body.replaceChildren();
+    resultBox.replaceChildren();
+    const rerender = () => renderDealPlanner(root);
+    renderPlannerItems(body, items, state, rerender);
+    renderPlannerCoupons(body, items, state, rerender);
+
+    const calculate = document.createElement("button");
+    calculate.type = "button";
+    calculate.className = "dltracker-planner-primary";
+    calculate.textContent = "计算最优拆单方案";
+    calculate.disabled = !items.length;
+    calculate.addEventListener("click", async () => {
+      calculate.disabled = true;
+      const oldText = calculate.textContent;
+      calculate.textContent = "正在解析优惠券条件…";
+      try {
+        const freshState = getPlannerState();
+        const freshItems = extractPlannerItemsFromCart(
+          freshState.itemOverrides,
+        );
+        const resolvedCoupons = await resolveImportedCouponEligibility(
+          freshItems,
+          freshState.coupons,
+        );
+        const activeCoupons = resolvedCoupons.filter((coupon) => {
+          if (coupon.expiresAt && Date.parse(coupon.expiresAt) <= Date.now()) {
+            return false;
+          }
+          return coupon.allEligible || coupon.eligibleIds?.length;
+        });
+        renderPlannerResult(
+          resultBox,
+          optimizeDealPlan(freshItems, activeCoupons),
+        );
+      } catch (error) {
+        resultBox.replaceChildren();
+        const message = document.createElement("p");
+        message.className = "dltracker-planner-warning";
+        message.textContent = error instanceof Error ? error.message : String(error);
+        resultBox.appendChild(message);
+      } finally {
+        calculate.disabled = !extractPlannerItemsFromCart(
+          getPlannerState().itemOverrides,
+        ).length;
+        calculate.textContent = oldText;
+      }
+    });
+    body.appendChild(calculate);
+  }
+
+  function injectDealPlanner() {
+    if (!isCartPage(location.href)) return;
+    if (document.querySelector(".dltracker-deal-planner")) return;
+    const root = document.createElement("div");
+    root.className = "dltracker-deal-planner";
+    const launcher = document.createElement("button");
+    launcher.type = "button";
+    launcher.className = "dltracker-planner-launcher";
+    launcher.textContent = "最优买法";
+    const panel = document.createElement("section");
+    panel.className = "dltracker-planner-panel";
+    panel.hidden = true;
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    title.textContent = "DLsite 最优买法（本地计算）";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "dltracker-planner-close";
+    close.textContent = "×";
+    close.addEventListener("click", () => {
+      panel.hidden = true;
+    });
+    header.appendChild(title);
+    header.appendChild(close);
+    const body = document.createElement("div");
+    body.className = "dltracker-planner-body";
+    const result = document.createElement("div");
+    result.className = "dltracker-planner-result";
+    panel.appendChild(header);
+    panel.appendChild(body);
+    panel.appendChild(result);
+    launcher.addEventListener("click", async () => {
+      panel.hidden = false;
+      launcher.disabled = true;
+      const oldText = launcher.textContent;
+      launcher.textContent = "正在读取优惠券…";
+      await ensureDlsiteCoupons();
+      renderDealPlanner(root);
+      launcher.disabled = false;
+      launcher.textContent = oldText;
+    });
+    root.appendChild(launcher);
+    root.appendChild(panel);
+    document.body.appendChild(root);
   }
 
   function isBuyLaterSortEnabled() {
@@ -1974,6 +3223,7 @@
   }
 
   async function enhanceCartItems() {
+    injectDealPlanner();
     injectBuyLaterSortToggle();
 
     const items = getCartItems();
@@ -2114,6 +3364,9 @@
 
   async function bootstrap() {
     const url = location.href;
+    if (!isCartPage(url)) {
+      document.querySelector(".dltracker-deal-planner")?.remove();
+    }
     if (isProductPage(url)) {
       await enhanceProductPage();
     }
@@ -2127,6 +3380,9 @@
     }
     if (isCartPage(url)) {
       await enhanceCartItems();
+    }
+    if (isCouponPage(url)) {
+      await enhanceCouponPage();
     }
   }
 
@@ -2446,6 +3702,283 @@
   font-size: 12px;
 }
 
+.dltracker-coupon-import-status {
+  margin: 12px 0;
+  padding: 10px 13px;
+  border: 1px solid #9ae6b4;
+  border-radius: 8px;
+  background: #f0fff4;
+  color: #22543d;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.dltracker-coupon-import-status.is-error {
+  border-color: #feb2b2;
+  background: #fff5f5;
+  color: #9b2c2c;
+}
+
+.dltracker-deal-planner {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 2147483000;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #2d3748;
+}
+
+.dltracker-planner-launcher,
+.dltracker-planner-primary,
+.dltracker-planner-secondary,
+.dltracker-planner-danger,
+.dltracker-planner-close,
+.dltracker-planner-link-button {
+  cursor: pointer;
+}
+
+.dltracker-planner-launcher {
+  float: right;
+  border: none;
+  border-radius: 999px;
+  padding: 11px 19px;
+  background: #2f855a;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: 0 7px 24px rgba(0, 0, 0, 0.2);
+}
+
+.dltracker-planner-panel[hidden] {
+  display: none !important;
+}
+
+.dltracker-planner-panel {
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(820px, calc(100vh - 90px));
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #cbd5e0;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+}
+
+.dltracker-planner-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 16px;
+  background: #276749;
+  color: #fff;
+  font-size: 15px;
+}
+
+.dltracker-planner-close {
+  border: 0;
+  padding: 0 4px;
+  background: transparent;
+  color: #fff;
+  font-size: 25px;
+  line-height: 1;
+}
+
+.dltracker-planner-body,
+.dltracker-planner-result {
+  padding: 14px 16px;
+  overflow-y: auto;
+}
+
+.dltracker-planner-body {
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.dltracker-planner-result:empty {
+  display: none;
+}
+
+.dltracker-planner-section-title {
+  margin: 5px 0 9px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.dltracker-planner-item,
+.dltracker-planner-coupon,
+.dltracker-planner-order {
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+
+.dltracker-planner-item-name {
+  margin-bottom: 7px;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dltracker-planner-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dltracker-planner-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  font-size: 11px;
+  color: #4a5568;
+}
+
+.dltracker-planner-input {
+  width: 100%;
+  min-width: 0;
+  height: 31px;
+  box-sizing: border-box;
+  border: 1px solid #cbd5e0;
+  border-radius: 5px;
+  padding: 4px 7px;
+  background: #fff;
+  color: #1a202c;
+  font-size: 12px;
+}
+
+.dltracker-planner-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dltracker-planner-coupon-name {
+  flex: 1;
+  margin-bottom: 8px;
+  font-weight: 650;
+}
+
+.dltracker-planner-coupon-name-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.dltracker-planner-source-badge {
+  display: inline-block;
+  margin: 0 0 8px 7px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #bee3f8;
+  color: #2c5282;
+  font-size: 10px;
+  vertical-align: middle;
+}
+
+.dltracker-planner-secondary,
+.dltracker-planner-danger,
+.dltracker-planner-primary {
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 12px;
+  color: #fff;
+  font-size: 12px;
+}
+
+.dltracker-planner-secondary {
+  background: #4a5568;
+}
+
+.dltracker-planner-danger {
+  align-self: flex-start;
+  background: #c53030;
+}
+
+.dltracker-planner-primary {
+  width: 100%;
+  margin-top: 5px;
+  padding: 10px;
+  background: #2f855a;
+  font-weight: 700;
+}
+
+.dltracker-planner-primary:disabled,
+.dltracker-planner-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.dltracker-planner-link-button {
+  margin-top: 6px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #2b6cb0;
+  font-size: 11px;
+}
+
+.dltracker-planner-eligibility-title {
+  margin: 9px 0 5px;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.dltracker-planner-checkboxes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 10px;
+}
+
+.dltracker-planner-checkboxes label {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.dltracker-planner-checkboxes span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dltracker-planner-result-summary {
+  margin-bottom: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  background: #c6f6d5;
+  color: #22543d;
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.dltracker-planner-order ul {
+  margin: 7px 0;
+  padding-left: 20px;
+  font-size: 11px;
+}
+
+.dltracker-planner-order-total {
+  text-align: right;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dltracker-planner-warning,
+.dltracker-planner-muted {
+  margin: 8px 0;
+  color: #975a16;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 @media (max-width: 768px) {
   .${UI_CLASSNAME} {
     margin-top: 6px;
@@ -2527,6 +4060,21 @@
   .dltracker-import-box .dltracker-import-title,
   .dltracker-import-box .dltracker-import-status {
     font-size: 12px;
+  }
+
+  .dltracker-deal-planner {
+    right: 10px;
+    bottom: 10px;
+  }
+
+  .dltracker-planner-panel {
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 70px);
+  }
+
+  .dltracker-planner-grid,
+  .dltracker-planner-checkboxes {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 `;
