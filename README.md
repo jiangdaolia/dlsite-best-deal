@@ -1,6 +1,6 @@
 # DL Price Tracker + 最优买法（Tampermonkey）
 
-基于 [Cassandra-fox/dlTracker](https://github.com/Cassandra-fox/dlTracker) 的工作进行改写，当前仓库仅维护油猴脚本版本。
+本项目直接基于 [syoius/dlTracker4TamperMonkey](https://github.com/syoius/dlTracker4TamperMonkey) 修改；该项目又基于 [Cassandra-fox/dlTracker](https://github.com/Cassandra-fox/dlTracker) 改写。因此，`syoius/dlTracker4TamperMonkey` 是本项目的直接来源，`Cassandra-fox/dlTracker` 是间接上游。代码继续遵循仓库中的 MIT 许可证并保留原作者署名。
 
 > 史低/当前价格数据来源：[DLwatcher](https://dlwatcher.com/)
 
@@ -21,11 +21,11 @@
 
 ## 一键安装
 
-安装 Tampermonkey 后，直接点击下面的链接。Tampermonkey 会自动显示安装页，只需确认一次，不需要新建脚本或复制代码：
+直接打开下面的 `.user.js` 链接即可：Via 等带有内置用户脚本功能的手机浏览器可以直接使用，不要求另外安装 Tampermonkey；在桌面浏览器中，也可以由 Tampermonkey、Violentmonkey 等兼容管理器接管安装。
 
 **[安装 DLsite 最优买法](https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/main/userscript/dl-price-tracker.user.js)**
 
-脚本包含 `@updateURL` 和 `@downloadURL`，以后发布更高版本时 Tampermonkey 会根据版本号自动更新。
+脚本包含标准 userscript 元数据以及 `@updateURL`、`@downloadURL`。是否自动弹出安装页和检查更新，由当前浏览器内置的用户脚本功能或所使用的脚本管理器决定。
 
 ## 最优买法使用方法
 

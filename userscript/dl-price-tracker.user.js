@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.3.0
+// @version      0.3.1
 // @description  在 DLsite 页面显示史低价格，自动读取优惠券并计算最优拆单方案
-// @author       Syoius & Cassandra-fox
+// @author       Syoius & Cassandra-fox; deal planner maintained by jiangdaolia
 // @license      MIT
 // @match        https://www.dlsite.com/*
 // @run-at       document-idle
@@ -19,8 +19,11 @@
 (function () {
   "use strict";
 
+  // Directly derived from syoius/dlTracker4TamperMonkey, which is itself
+  // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
+
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.3.0";
+  const APP_VERSION = "0.3.1";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -46,6 +49,11 @@
   const DLSITE_PRODUCT_INFO_PATH = "/maniax/product/info/ajax";
   const COUPON_IMPORT_TTL_MS = 5 * 60 * 1000;
   const RELEASE_NOTES = {
+    "0.3.1": [
+      "安装说明不再把 Tampermonkey 作为唯一运行方式",
+      "补充 Via 等内置用户脚本浏览器的安装入口",
+      "明确直接来源与间接上游的署名关系",
+    ],
     "0.3.0": [
       "打开 DLsite 优惠券页时自动导入可用优惠券",
       "自动解析指定作品、类型和站点等适用范围",
