@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.4.2
+// @version      0.4.3
 // @description  在 DLsite 页面显示史低价格，自动读取优惠券并计算最优拆单方案
 // @author       Syoius & Cassandra-fox; deal planner maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.4.2";
+  const APP_VERSION = "0.4.3";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -55,6 +55,9 @@
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.4.3": [
+      "详情页强制将“本次可到”与史低拆成上下两个独立框",
+    ],
     "0.4.2": [
       "作品详情页将“本次可到”独立放在史低标签下方",
       "多张可用优惠券改为每种单独一行显示",
@@ -580,14 +583,6 @@
 
   function isProductPage(url) {
     return /\/product_id\/[RBV]J\d+/i.test(url);
-  }
-
-  function isMainProductHistoryCard(productId) {
-    const matched = location.pathname.match(/product_id\/([RBV]J\d{6,})/i);
-    return (
-      Boolean(matched) &&
-      String(productId || "").toUpperCase() === matched[1].toUpperCase()
-    );
   }
 
   function isFavoritePage(url) {
@@ -2261,11 +2256,11 @@
     )) {
       card.querySelector(".dltracker-best-reach-badge")?.remove();
       if (!insight?.bestReach?.totalRate) continue;
-      const badge = document.createElement("span");
+      const badge = document.createElement("div");
       badge.className = "dltracker-best-reach-badge";
       badge.textContent = `本次可到${Math.round(insight.bestReach.totalRate)}% OFF`;
       const chip = card.querySelector(".dltracker-history-chip");
-      if (isMainProductHistoryCard(id)) {
+      if (card.classList.contains("dltracker-product-wide")) {
         chip?.insertAdjacentElement("afterend", badge);
       } else {
         chip?.appendChild(badge);
@@ -4101,8 +4096,8 @@
     const card = document.createElement("div");
     card.className = UI_CLASSNAME;
     if (record?.rjCode) card.dataset.productId = record.rjCode;
-    const isMainProductDetail = isMainProductHistoryCard(record?.rjCode);
-    if (isMainProductDetail) {
+    const isProductDetailPage = isProductPage(location.href);
+    if (isProductDetailPage) {
       card.classList.add("dltracker-product-wide");
     }
     if (
@@ -4192,10 +4187,10 @@
       ? dealInsightById.get(String(record.rjCode).toUpperCase())
       : null;
     if (insight?.bestReach?.totalRate > 0) {
-      const reachBadge = document.createElement("span");
+      const reachBadge = document.createElement("div");
       reachBadge.className = "dltracker-best-reach-badge";
       reachBadge.textContent = `本次可到${Math.round(insight.bestReach.totalRate)}% OFF`;
-      if (isMainProductDetail) {
+      if (isProductDetailPage) {
         card.appendChild(reachBadge);
       } else {
         chip.appendChild(reachBadge);
