@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.5.0
+// @version      0.5.1
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.5.0";
+  const APP_VERSION = "0.5.1";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -55,6 +55,11 @@
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.5.1": [
+      "本次可到价不高于史低时用金黄色，高于史低时用蓝灰色",
+      "移入、移出、删除或移到稍后再买后立即重算门槛",
+      "进一步隔离稍后再买与立即购买的金额和件数",
+    ],
     "0.5.0": [
       "“本次可到”改为价格加圆形 OFF 标签，与史低同格式",
       "满1200减400和三件活动的门槛不再计入稍后再买作品",
@@ -151,6 +156,22 @@
     ".__buy_now_target",
     ".__buy_later_target",
   ];
+  const BUY_LATER_AREA_SELECTOR = [
+    ".__buy_later_target",
+    ".buy_later",
+    ".cart_hold",
+    "[id^='buy_later_']",
+    "[data-cart-area='later']",
+    "[data-area='later']",
+  ].join(",");
+  const BUY_NOW_AREA_SELECTOR = [
+    ".__buy_now_target",
+    "li.buy_now",
+    "section.buy_now",
+    "li[id^='buy_now_']",
+    "[data-cart-area='active']",
+    "[data-area='active']",
+  ].join(",");
 
   let dbPromise = null;
   const recordInFlight = new Map();
@@ -165,6 +186,7 @@
   let pendingCartAdd = null;
   let cartRefreshInFlight = null;
   let dealToastTimer = null;
+  let lastActiveCartFingerprint = "";
 
   function nowIso() {
     return new Date().toISOString();
@@ -1503,6 +1525,18 @@
     }
     return a.order - b.order;
   }
+
+  function activeCartFingerprint(products) {
+    return JSON.stringify(
+      (Array.isArray(products) ? products : [])
+        .map((item) => [
+          String(item?.id || "").toUpperCase(),
+          Math.max(0, dealNumber(item?.price)),
+          String(item?.bulkbuyKey || ""),
+        ])
+        .sort((a, b) => a[0].localeCompare(b[0])),
+    );
+  }
   // </deal-insight-core>
 
   function emptyDealCache() {
@@ -1791,9 +1825,11 @@
     ].join(","));
     const products = [];
     const seen = new Set();
+    const hasExplicitBuyNowArea = Boolean(root.querySelector(BUY_NOW_AREA_SELECTOR));
     for (const node of nodes) {
       if (isBuyLaterCartItem(node) ||
         /buy_later|later/i.test(`${node.id} ${node.className}`)) continue;
+      if (hasExplicitBuyNowArea && !isBuyNowCartItem(node)) continue;
       const dataId = node.getAttribute("data-workno") ||
         node.getAttribute("data-product-id") || "";
       const href = node.querySelector('a[href*="product_id/"]')?.getAttribute("href") || "";
@@ -2182,6 +2218,13 @@
         : "";
     return `${compactOff(option.equivalentRate, "券")}${condition ? `·${condition}` : ""}`;
   }
+
+  function bestReachColorClass(bestPrice, lowestPrice) {
+    return Number.isFinite(bestPrice) &&
+      Number.isFinite(lowestPrice) && bestPrice <= lowestPrice
+      ? "dltracker-best-reach-gold"
+      : "dltracker-best-reach-bluegray";
+  }
   // </deal-insight-format-core>
 
   function renderCompactInsight(host, insight) {
@@ -2275,10 +2318,14 @@
     host.appendChild(box);
   }
 
-  function createBestReachBadge(insight) {
+  function createBestReachBadge(insight, lowestPrice) {
     const badge = document.createElement("div");
-    badge.className = "dltracker-chip dltracker-chip-hot dltracker-best-reach-badge";
     const price = calculateHypotheticalPrice(insight?.product, insight?.bestReach);
+    badge.className = [
+      "dltracker-chip",
+      "dltracker-best-reach-badge",
+      bestReachColorClass(price, lowestPrice),
+    ].join(" ");
     const text = document.createElement("span");
     text.className = "dltracker-chip-text";
     text.textContent = Number.isFinite(price)
@@ -2298,7 +2345,11 @@
     )) {
       card.querySelector(".dltracker-best-reach-badge")?.remove();
       if (!insight?.bestReach?.totalRate) continue;
-      const badge = createBestReachBadge(insight);
+      const lowestPrice = Number(card.dataset.lowestPrice);
+      const badge = createBestReachBadge(
+        insight,
+        Number.isFinite(lowestPrice) ? lowestPrice : undefined,
+      );
       const chip = card.querySelector(".dltracker-history-chip");
       if (chip) {
         chip?.insertAdjacentElement("afterend", badge);
@@ -3385,12 +3436,12 @@
 
   function isBuyLaterCartItem(item) {
     const owner = getCartOwnerItem(item);
-    const laterContainer =
-      ".__buy_later_target, section.buy_later, section.cart_hold, [id^='buy_later_']";
-    if (item?.matches?.(laterContainer) || item?.closest?.(laterContainer)) {
+    if (item?.matches?.(BUY_LATER_AREA_SELECTOR) ||
+      item?.closest?.(BUY_LATER_AREA_SELECTOR)) {
       return true;
     }
-    if (owner?.matches?.(laterContainer) || owner?.closest?.(laterContainer)) {
+    if (owner?.matches?.(BUY_LATER_AREA_SELECTOR) ||
+      owner?.closest?.(BUY_LATER_AREA_SELECTOR)) {
       return true;
     }
     const ownerId = String(owner?.id || "");
@@ -3398,6 +3449,20 @@
     if (owner?.matches?.(".__buy_later_target")) return true;
     if (owner?.querySelector?.(".__buy_later_target")) return true;
     return false;
+  }
+
+  function isBuyNowCartItem(item) {
+    const owner = getCartOwnerItem(item);
+    if (item?.matches?.(BUY_NOW_AREA_SELECTOR) ||
+      item?.closest?.(BUY_NOW_AREA_SELECTOR)) {
+      return true;
+    }
+    if (owner?.matches?.(BUY_NOW_AREA_SELECTOR) ||
+      owner?.closest?.(BUY_NOW_AREA_SELECTOR)) {
+      return true;
+    }
+    if (/^buy_now_/i.test(String(owner?.id || ""))) return true;
+    return Boolean(owner?.querySelector?.(".__buy_now_target"));
   }
 
   function getRecordCompareCurrentPrice(record) {
@@ -4145,6 +4210,9 @@
     const card = document.createElement("div");
     card.className = UI_CLASSNAME;
     if (record?.rjCode) card.dataset.productId = record.rjCode;
+    if (typeof record?.lowestPrice === "number") {
+      card.dataset.lowestPrice = String(record.lowestPrice);
+    }
     const isProductDetailPage = isProductPage(location.href);
     if (isProductDetailPage) {
       card.classList.add("dltracker-product-wide");
@@ -4236,7 +4304,7 @@
       ? dealInsightById.get(String(record.rjCode).toUpperCase())
       : null;
     if (insight?.bestReach?.totalRate > 0) {
-      const reachBadge = createBestReachBadge(insight);
+      const reachBadge = createBestReachBadge(insight, record.lowestPrice);
       card.appendChild(reachBadge);
     }
     if (discounted) {
@@ -4549,7 +4617,16 @@
 
   function maybeBootstrapForCartMutation(currentUrl) {
     if (!isCartPage(currentUrl)) return false;
-    saveCartSnapshot(cartProductsFromRoot(document));
+    const activeProducts = cartProductsFromRoot(document);
+    const nextFingerprint = activeCartFingerprint(activeProducts);
+    const thresholdChanged = Boolean(lastActiveCartFingerprint) &&
+      nextFingerprint !== lastActiveCartFingerprint;
+    lastActiveCartFingerprint = nextFingerprint;
+    saveCartSnapshot(activeProducts);
+    if (thresholdChanged) {
+      scheduleCartBootstrap();
+      return true;
+    }
     const items = getCartItems();
     if (
       items.some(
@@ -4634,6 +4711,11 @@
       await enhanceWishlistCards();
     }
     if (isCartPage(url)) {
+      if (!lastActiveCartFingerprint) {
+        lastActiveCartFingerprint = activeCartFingerprint(
+          cartProductsFromRoot(document),
+        );
+      }
       await enhanceCartItems();
     }
     await enhanceDealInsights();
@@ -4784,6 +4866,20 @@
   align-self: flex-start;
   width: fit-content;
   max-width: 100%;
+}
+
+.${UI_CLASSNAME} .dltracker-best-reach-gold {
+  background: #e4ad2f;
+  color: #4b2d00;
+}
+
+.${UI_CLASSNAME} .dltracker-best-reach-gold .dltracker-off-badge {
+  background: rgba(95, 57, 0, 0.18);
+}
+
+.${UI_CLASSNAME} .dltracker-best-reach-bluegray {
+  background: #587187;
+  color: #fff;
 }
 
 .${UI_CLASSNAME}.dltracker-wishlist-inline > .dltracker-best-reach-badge {
@@ -5510,7 +5606,12 @@
         }
       }, 300);
     });
-    domObserver.observe(document.body, { childList: true, subtree: true });
+    domObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["class", "id", "data-cart-area", "data-area", "style"],
+    });
   }
 
   async function start() {

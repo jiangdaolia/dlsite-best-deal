@@ -29,11 +29,13 @@ vm.runInNewContext(
     calculateBestReach,
     calculateHypotheticalPrice,
     compareDealSortEntries,
+    activeCartFingerprint,
     dealDateMillis,
     compactCouponCondition,
     compactCouponExpiry,
     compactCouponUsage,
     compactCouponListLabel,
+    bestReachColorClass,
   };`,
   sandbox,
 );
@@ -45,11 +47,13 @@ const {
   calculateBestReach,
   calculateHypotheticalPrice,
   compareDealSortEntries,
+  activeCartFingerprint,
   dealDateMillis,
   compactCouponCondition,
   compactCouponExpiry,
   compactCouponUsage,
   compactCouponListLabel,
+  bestReachColorClass,
 } = sandbox.dealInsightCore;
 
 const future = Math.floor(Date.parse("2026-10-01T00:00:00+08:00") / 1000);
@@ -190,6 +194,30 @@ test("低价优先使用本次可到后的假设价格", () => {
     calculateHypotheticalPrice({ officialPrice: 1000 }, { totalRate: 80 }),
     200,
   );
+});
+
+test("本次可到价不高于史低用金黄，高于史低用蓝灰", () => {
+  assert.equal(bestReachColorClass(799, 800), "dltracker-best-reach-gold");
+  assert.equal(bestReachColorClass(800, 800), "dltracker-best-reach-gold");
+  assert.equal(bestReachColorClass(801, 800), "dltracker-best-reach-bluegray");
+});
+
+test("立即购买集合的作品、价格或活动变化会改变门槛指纹", () => {
+  const first = activeCartFingerprint([
+    { id: "RJ2", price: 800, bulkbuyKey: "B" },
+    { id: "RJ1", price: 500, bulkbuyKey: "A" },
+  ]);
+  assert.equal(first, activeCartFingerprint([
+    { id: "RJ1", price: 500, bulkbuyKey: "A" },
+    { id: "RJ2", price: 800, bulkbuyKey: "B" },
+  ]));
+  assert.notEqual(first, activeCartFingerprint([
+    { id: "RJ1", price: 500, bulkbuyKey: "A" },
+  ]));
+  assert.notEqual(first, activeCartFingerprint([
+    { id: "RJ1", price: 500, bulkbuyKey: "A" },
+    { id: "RJ2", price: 700, bulkbuyKey: "B" },
+  ]));
 });
 
 test("列表与详情使用最终确认的紧凑券文案", () => {
