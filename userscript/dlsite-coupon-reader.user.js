@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DLsite 优惠券读取器（验证 A 版）
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.1.0
-// @description  在“我的优惠券”页面用一次同源请求读取结构化数据，并导出安全诊断 JSON
+// @version      0.1.1
+// @description  在“我的优惠券”页面用一次同源请求读取 JSON 或 HTML 数据，并导出安全诊断
 // @author       Syoius & Cassandra-fox; coupon reader maintained by jiangdaolia
 // @license      MIT
 // @match        https://www.dlsite.com/*/mypage/coupon*
@@ -25,7 +25,7 @@
   // Stage A intentionally contains no price-history or optimizer code.
 
   const APP_NAME = "DLsite 优惠券读取器";
-  const APP_VERSION = "0.1.0";
+  const APP_VERSION = "0.1.1";
   const ROOT_ID = "dlsite-coupon-reader-a";
   const STYLE_ID = `${ROOT_ID}-style`;
   const API_PATH = "/books/mypage/coupon/list/ajax";
@@ -287,39 +287,20 @@
           : "接口请求失败，已停止且不会自动重试";
         throw new Error(`${riskMessage}（HTTP ${response.status}）`);
       }
-      if (/text\/html/i.test(contentType) || /^\s*</.test(bodyText)) {
-        throw new Error("接口返回了网页而不是 JSON；可能已退出登录或出现验证页，已停止");
+      const trimmedBody = bodyText.trimStart();
+      if (/^(?:\{|\[)/.test(trimmedBody)) {
+        handleJsonResponse(bodyText);
+      } else if (/^</.test(trimmedBody) || /text\/html/i.test(contentType)) {
+        const blockReason = detectBlockingHtml(bodyText, response.url);
+        if (blockReason) throw new Error(`${blockReason}，已停止且不会自动重试`);
+        handleHtmlResponse(bodyText);
+      } else {
+        throw new Error("接口响应既不是 JSON 也不是可识别的 HTML，已停止且不会自动重试");
       }
 
-      let payload;
-      try {
-        payload = JSON.parse(bodyText);
-      } catch {
-        throw new Error("接口响应不是有效 JSON，已停止且不会自动重试");
-      }
-
-      const schema = buildSchema(payload);
-      const arrayCandidates = findArrayCandidates(payload);
-      const couponCandidate = chooseCouponArrayCandidate(arrayCandidates);
-      const apiCount = couponCandidate ? couponCandidate.length : null;
-      const comparison = compareCounts(apiCount, pageEvidence.resolvedCount);
-
-      diagnostic.analysis = {
-        rootType: valueType(payload),
-        apiCouponCount: apiCount,
-        chosenCouponArray: couponCandidate,
-        arrayCandidates,
-        pageCouponCount: pageEvidence.resolvedCount,
-        countComparison: comparison.code,
-        schema: schema.rows,
-        schemaTruncated: schema.truncated,
-      };
-      diagnostic.rawPayload = sanitizeForExport(payload);
       diagnostic.capturedAt = new Date().toISOString();
       diagnostic.error = null;
       lastDiagnosticText = JSON.stringify(diagnostic, null, 2);
-
-      renderSuccess(schema, couponCandidate, comparison);
       ui.downloadButton.disabled = false;
       ui.copyButton.disabled = false;
     } catch (error) {
@@ -345,7 +326,62 @@
     }
   }
 
-  function renderSuccess(schema, couponCandidate, comparison) {
+  function handleJsonResponse(bodyText) {
+    let payload;
+    try {
+      payload = JSON.parse(bodyText);
+    } catch {
+      throw new Error("接口响应看似 JSON，但解析失败");
+    }
+
+    const schema = buildSchema(payload);
+    const arrayCandidates = findArrayCandidates(payload);
+    const couponCandidate = chooseCouponArrayCandidate(arrayCandidates);
+    const apiCount = couponCandidate ? couponCandidate.length : null;
+    const comparison = compareCounts(apiCount, pageEvidence.resolvedCount);
+
+    diagnostic.analysis = {
+      responseKind: "json",
+      rootType: valueType(payload),
+      apiCouponCount: apiCount,
+      chosenCouponArray: couponCandidate,
+      arrayCandidates,
+      pageCouponCount: pageEvidence.resolvedCount,
+      countComparison: comparison.code,
+      schema: schema.rows,
+      schemaTruncated: schema.truncated,
+    };
+    diagnostic.rawPayload = sanitizeForExport(payload);
+    renderJsonSuccess(schema, couponCandidate, comparison);
+  }
+
+  function handleHtmlResponse(bodyText) {
+    const parsed = new DOMParser().parseFromString(bodyText, "text/html");
+    const htmlSummary = summarizeHtmlDocument(parsed);
+    const responseCountEvidence = collectPageCountEvidence(parsed);
+    const apiCount = responseCountEvidence.resolvedCount;
+    const comparison = compareCounts(apiCount, pageEvidence.resolvedCount);
+    const schema = buildHtmlSchema(htmlSummary);
+
+    diagnostic.analysis = {
+      responseKind: "html",
+      rootType: "html-document",
+      apiCouponCount: apiCount,
+      pageCouponCount: pageEvidence.resolvedCount,
+      countComparison: comparison.code,
+      responseCountEvidence,
+      htmlSummary,
+      schema: schema.rows,
+      schemaTruncated: schema.truncated,
+    };
+    diagnostic.rawPayload = {
+      responseKind: "html",
+      sanitizedHtml: sanitizeHtmlDocument(parsed),
+    };
+    renderHtmlSuccess(schema, apiCount, comparison);
+  }
+
+  function renderJsonSuccess(schema, couponCandidate, comparison) {
     const apiCount = couponCandidate ? couponCandidate.length : null;
     ui.apiCountFact.textContent =
       apiCount === null
@@ -369,10 +405,44 @@
       );
     }
 
-    ui.schemaMeta.textContent =
-      `记录 ${schema.rows.length} 个字段路径` +
-      (schema.truncated ? `（已达到展示上限 ${MAX_SCHEMA_ROWS}）` : "") +
-      `；结构分析只抽样数组元素，不会发起额外请求。`;
+    renderSchemaRows(
+      schema,
+      `记录 ${schema.rows.length} 个 JSON 字段路径` +
+        (schema.truncated ? `（已达到展示上限 ${MAX_SCHEMA_ROWS}）` : "") +
+        `；结构分析只抽样数组元素，不会发起额外请求。`,
+    );
+  }
+
+  function renderHtmlSuccess(schema, apiCount, comparison) {
+    ui.apiCountFact.textContent =
+      apiCount === null ? "HTML 中尚未可靠识别" : `${apiCount}（HTML）`;
+    ui.comparisonFact.textContent = comparison.label;
+    if (apiCount === null) {
+      setStatus(
+        "已确认接口返回正常 HTML 片段；A 版已在本地清理并记录其结构，请再次导出诊断 JSON。",
+        "partial",
+      );
+    } else if (comparison.code === "equal") {
+      setStatus(`读取完成：HTML 接口与页面均为 ${apiCount} 张。`, "success");
+    } else if (comparison.code === "mismatch") {
+      setStatus(
+        `读取完成但数量不一致：HTML 接口 ${apiCount} 张，页面 ${pageEvidence.resolvedCount} 张。请导出诊断 JSON。`,
+        "error",
+      );
+    } else {
+      setStatus(
+        `HTML 接口中识别到 ${apiCount} 张；页面总数仍需人工核对，请导出诊断 JSON。`,
+        "partial",
+      );
+    }
+    renderSchemaRows(
+      schema,
+      `记录 ${schema.rows.length} 个 HTML 结构项目；分析和清理全部在本地完成，不会发起额外请求。`,
+    );
+  }
+
+  function renderSchemaRows(schema, metaText) {
+    ui.schemaMeta.textContent = metaText;
     ui.tbody.replaceChildren();
     for (const row of schema.rows) {
       const tr = document.createElement("tr");
@@ -449,6 +519,187 @@
       })),
       truncated,
     };
+  }
+
+  function detectBlockingHtml(bodyText, responseUrl) {
+    const sample = String(bodyText).slice(0, 300_000);
+    if (/\b(?:g-recaptcha|hcaptcha|cf-chl|captcha)\b/i.test(sample)) {
+      return "检测到验证码或访问验证页";
+    }
+    if (/<input\b[^>]*\btype=["']?password\b/i.test(sample)) {
+      return "检测到登录页面，当前登录状态可能已失效";
+    }
+    if (/(?:不正なアクセス|アクセスが集中|机器人验证|機器人驗證|비정상적인 접근)/i.test(sample)) {
+      return "检测到访问限制页面";
+    }
+    try {
+      const path = new URL(responseUrl, location.origin).pathname;
+      if (/\/(?:login|signin|auth)(?:\/|$)/i.test(path)) {
+        return "请求被转到登录页面";
+      }
+    } catch {
+      // The response URL is diagnostic metadata only; body checks above still apply.
+    }
+    return "";
+  }
+
+  function summarizeHtmlDocument(parsed) {
+    const root = parsed.body || parsed.documentElement;
+    const elements = root ? [root, ...root.querySelectorAll("*")] : [];
+    const tagCounts = new Map();
+    const classCounts = new Map();
+    const attributeCounts = new Map();
+    const ids = [];
+
+    for (const node of elements) {
+      incrementCount(tagCounts, String(node.tagName || "unknown").toLowerCase());
+      for (const className of node.classList || []) incrementCount(classCounts, className);
+      for (const attribute of [...(node.attributes || [])]) {
+        incrementCount(attributeCounts, attribute.name);
+      }
+      if (node.id && ids.length < 500) {
+        ids.push(
+          looksPersonalDomIdentifier(node.id)
+            ? "[账号相关 DOM ID 已移除]"
+            : redactString(node.id),
+        );
+      }
+    }
+
+    const links = [];
+    for (const anchor of root?.querySelectorAll?.("a[href]") || []) {
+      if (links.length >= 500) break;
+      links.push({
+        text: redactString(normalizeWhitespace(anchor.textContent)).slice(0, 300),
+        href: sanitizeUrl(anchor.getAttribute("href") || ""),
+        className: String(anchor.className || "").slice(0, 300),
+      });
+    }
+
+    return {
+      textLength: root?.textContent?.length || 0,
+      elementCount: elements.length,
+      tagCounts: sortedCountEntries(tagCounts, 200),
+      classCounts: sortedCountEntries(classCounts, 500),
+      attributeCounts: sortedCountEntries(attributeCounts, 200),
+      ids,
+      links,
+    };
+  }
+
+  function buildHtmlSchema(summary) {
+    const rows = [
+      htmlSchemaRow("$.html", "html-document", 1, `元素 ${summary.elementCount}`),
+      htmlSchemaRow("$.html.text", "string", 1, `${summary.textLength} 字符（内容不展示）`),
+    ];
+    for (const item of summary.tagCounts) {
+      rows.push(htmlSchemaRow(`$.html.tags.${item.name}`, "element", item.count, "—"));
+    }
+    for (const item of summary.classCounts) {
+      if (rows.length >= MAX_SCHEMA_ROWS) break;
+      rows.push(htmlSchemaRow(`$.html.classes.${item.name}`, "class", item.count, "—"));
+    }
+    for (const item of summary.attributeCounts) {
+      if (rows.length >= MAX_SCHEMA_ROWS) break;
+      rows.push(htmlSchemaRow(`$.html.attributes.${item.name}`, "attribute", item.count, "值已隐藏"));
+    }
+    return { rows, truncated: rows.length >= MAX_SCHEMA_ROWS };
+  }
+
+  function htmlSchemaRow(path, type, occurrences, sample) {
+    return {
+      path,
+      types: [type],
+      occurrences,
+      arrayLengths: [],
+      samples: sample === "—" ? [] : [sample],
+    };
+  }
+
+  function sanitizeHtmlDocument(parsed) {
+    const root = parsed.body || parsed.documentElement;
+    if (!root) return "";
+
+    for (const node of parsed.querySelectorAll(
+      "script, style, noscript, iframe, object, embed, link, meta, base",
+    )) {
+      node.remove();
+    }
+
+    for (const node of [root, ...root.querySelectorAll("*")]) {
+      const fieldMarker = [
+        node.getAttribute?.("name"),
+        node.getAttribute?.("id"),
+        node.getAttribute?.("type"),
+      ]
+        .filter(Boolean)
+        .join("_");
+      const isCouponIdField = /coupon[^a-z0-9]*(?:id|no|code)/i.test(fieldMarker);
+      const isFormValueNode = /^(?:INPUT|TEXTAREA|SELECT|OPTION)$/i.test(node.tagName || "");
+      if (isFormValueNode && shouldRemoveExportField(fieldMarker, `$.html.${fieldMarker}`)) {
+        node.remove();
+        continue;
+      }
+
+      for (const attribute of [...(node.attributes || [])]) {
+        const name = String(attribute.name || "");
+        const lowerName = name.toLowerCase();
+        if (
+          lowerName.startsWith("on") ||
+          ["src", "srcset", "poster", "integrity", "nonce"].includes(lowerName) ||
+          shouldRemoveExportField(name, `$.html.attributes.${name}`)
+        ) {
+          node.removeAttribute(name);
+          continue;
+        }
+        if (lowerName === "style") {
+          node.removeAttribute(name);
+          continue;
+        }
+        if (lowerName === "id" && looksPersonalDomIdentifier(attribute.value || "")) {
+          node.setAttribute(name, "[账号相关 DOM ID 已移除]");
+          continue;
+        }
+        if (lowerName === "value" && isFormValueNode && !isCouponIdField) {
+          node.setAttribute(name, "[表单值已移除]");
+          continue;
+        }
+        if (["href", "action", "formaction"].includes(lowerName)) {
+          node.setAttribute(name, sanitizeUrl(attribute.value || ""));
+          continue;
+        }
+        const redacted = redactString(attribute.value || "");
+        if (redacted !== attribute.value) node.setAttribute(name, redacted);
+      }
+    }
+
+    const serialized = String(root.outerHTML || root.innerHTML || "").replace(
+      /<!--[\s\S]*?-->/g,
+      "",
+    );
+    return redactString(serialized);
+  }
+
+  function incrementCount(map, key) {
+    if (!key) return;
+    map.set(key, (map.get(key) || 0) + 1);
+  }
+
+  function sortedCountEntries(map, limit) {
+    return [...map.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+      .slice(0, limit);
+  }
+
+  function normalizeWhitespace(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function looksPersonalDomIdentifier(value) {
+    return /(?:^|[-_])(?:user|member|account|customer|profile)[-_]?(?:id[-_]?)?\d{2,}(?:$|[-_])/i.test(
+      String(value || ""),
+    );
   }
 
   function findArrayCandidates(root) {
@@ -561,7 +812,7 @@
       if (count) add(`选择器 ${selector}`, count);
     }
 
-    const text = (root.body?.innerText || "").slice(0, 2_000_000);
+    const text = (root.body?.innerText || root.body?.textContent || "").slice(0, 2_000_000);
     const patterns = [
       /(?:利用可能|使用可能|有効|所持|保有)[^\n\d]{0,30}(?:クーポン|coupon)[^\n\d]{0,20}(\d{1,5})\s*(?:枚|件|個)?/gi,
       /(?:可用|可使用|有效|持有)[^\n\d]{0,25}(?:优惠券|優惠券)[^\n\d]{0,20}(\d{1,5})\s*(?:张|張|个|個)?/gi,
@@ -651,17 +902,18 @@
 
   function shouldRemoveExportField(key, path) {
     const normalized = String(key).toLowerCase().replace(/[-\s]/g, "_");
-    if (/^coupon_?(id|no|code)$/.test(normalized)) return false;
+    const bare = normalized.replace(/^data_/, "");
+    if (/^coupon_?(id|no|code)$/.test(bare)) return false;
     if (
       /^(cookie|set_cookie|authorization|headers?|request_headers?|password|passwd|secret|bearer|csrf|csrf_token|xsrf|xsrf_token|access_token|refresh_token|id_token|session|session_id|login_token)$/.test(
-        normalized,
+        bare,
       )
     ) {
       return true;
     }
-    if (/(^|_)(authenticity_)?token$/.test(normalized)) return true;
-    if (/^(user|member|account|customer|profile|personal_info)$/.test(normalized)) return true;
-    if (/^(email|e_mail|mail_address|user_name|username|display_name|nickname|full_name|real_name|login_id|user_id|member_id|account_id|customer_id|phone|phone_number|mobile|mobile_number|tel|telephone|address|postal_code|zip_code|birthday|birth_date)$/.test(normalized)) {
+    if (/(^|_)(authenticity_)?token(?:_|$)/.test(bare)) return true;
+    if (/^(user|member|account|customer|profile|personal_info)$/.test(bare)) return true;
+    if (/^(email|e_mail|mail_address|user_name|username|display_name|nickname|full_name|real_name|login_id|user_id|member_id|account_id|customer_id|phone|phone_number|mobile|mobile_number|tel|telephone|address|postal_code|zip_code|birthday|birth_date)$/.test(bare)) {
       return true;
     }
     const lowerPath = path.toLowerCase();
@@ -680,6 +932,9 @@
   function sanitizeUrl(input) {
     try {
       const url = new URL(String(input), location.origin);
+      if (!["http:", "https:"].includes(url.protocol)) {
+        return "[非 HTTP(S) 链接已移除]";
+      }
       for (const key of [...url.searchParams.keys()]) {
         const value = url.searchParams.get(key) || "";
         if (

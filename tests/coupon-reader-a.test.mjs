@@ -26,6 +26,7 @@ class FakeElement {
         for (const name of names) current.add(name);
         this.className = [...current].join(" ");
       },
+      [Symbol.iterator]: function* iterator() {},
     };
   }
 
@@ -85,7 +86,12 @@ function walk(root) {
   return [root, ...root.children.flatMap(walk)];
 }
 
-function makeHarness({ status = 200, payload = [] } = {}) {
+function makeHarness({
+  status = 200,
+  payload = [],
+  bodyText = null,
+  contentType = "application/json; charset=utf-8",
+} = {}) {
   const body = new FakeElement("body");
   const head = new FakeElement("head");
   const documentElement = new FakeElement("html");
@@ -112,8 +118,8 @@ function makeHarness({ status = 200, payload = [] } = {}) {
       statusText: status === 200 ? "OK" : "Error",
       redirected: false,
       url: String(url),
-      headers: { get: () => "application/json; charset=utf-8" },
-      text: async () => JSON.stringify(payload),
+      headers: { get: () => contentType },
+      text: async () => bodyText ?? JSON.stringify(payload),
     };
   };
 
@@ -122,10 +128,25 @@ function makeHarness({ status = 200, payload = [] } = {}) {
     origin: "https://www.dlsite.com",
     reload() {},
   };
+  class FakeDOMParser {
+    parseFromString(html) {
+      const parsedBody = new FakeElement("body");
+      parsedBody.outerHTML = html;
+      parsedBody.innerHTML = html;
+      parsedBody.textContent = html.replace(/<[^>]+>/g, " ");
+      parsedBody.innerText = parsedBody.textContent;
+      return {
+        body: parsedBody,
+        documentElement: parsedBody,
+        querySelectorAll: () => [],
+      };
+    }
+  }
   const context = {
     AbortController,
     Blob,
     DOMException,
+    DOMParser: FakeDOMParser,
     TextEncoder,
     URL,
     WeakSet,
@@ -167,8 +188,9 @@ async function runHarness(harness) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
-test("A 版只发起一次同源优惠券请求并识别根数组", async () => {
+test("即使响应头误写 text/html，也会按正文识别 JSON 且只请求一次", async () => {
   const harness = makeHarness({
+    contentType: "text/html; charset=UTF-8",
     payload: [
       {
         coupon_id: "REAL-1",
@@ -238,4 +260,32 @@ test("诊断导出移除认证和账号字段但保留真实优惠券 ID", async
     exported.rawPayload[0].conditions.product_all,
     ["RJ123456", "RJ654321"],
   );
+});
+
+test("200 HTML 优惠券片段会被本地分析而不是误判成退出登录", async () => {
+  const harness = makeHarness({
+    contentType: "text/html; charset=UTF-8",
+    bodyText:
+      '<body><section class="coupon-list">coupon REAL-2 person@example.com</section></body>',
+  });
+
+  await runHarness(harness);
+
+  assert.equal(harness.fetchCount, 1);
+  const status = harness.nodes().find((node) =>
+    node.className.includes("dlcr-status"),
+  );
+  assert.match(status.textContent, /正常 HTML 片段/);
+  assert.doesNotMatch(status.textContent, /退出登录/);
+
+  const copyButton = harness.nodes().find(
+    (node) => node.textContent === "复制诊断 JSON",
+  );
+  copyButton.click();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const exported = JSON.parse(harness.copiedText);
+  assert.equal(exported.analysis.responseKind, "html");
+  assert.equal(exported.error, null);
+  assert.match(exported.rawPayload.sanitizedHtml, /REAL-2/);
+  assert.doesNotMatch(exported.rawPayload.sanitizedHtml, /person@example\.com/);
 });

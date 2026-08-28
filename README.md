@@ -8,6 +8,8 @@
 
 目前先用独立脚本验证 DLsite 登录账号实际返回的优惠券数据结构。A 版只在“我的优惠券”页面运行，并且脚本自身只发起一次 DLsite 同源结构化请求；它不会打开优惠券详情、不会翻适用作品列表、不会访问单个作品，也不会请求 DLwatcher。
 
+读取器会根据响应正文判断 JSON 或 HTML，不依赖 DLsite 返回的 `Content-Type`；这兼容了接口把 JSON 标成 `text/html` 的情况。
+
 **[直接安装优惠券读取器 A 版](https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/main/userscript/dlsite-coupon-reader.user.js)**
 
 Via 等支持 `.user.js` 的浏览器可以直接打开链接安装。安装后登录 DLsite 并打开“我的优惠券”页面，脚本会显示接口券数、页面券数、数量核对结果和字段结构摘要。随后点击“下载诊断 JSON”或“复制诊断 JSON”，把结果私下发回用于开发 B 版。
