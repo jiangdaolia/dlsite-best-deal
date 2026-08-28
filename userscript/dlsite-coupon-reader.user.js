@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         DLsite 优惠券读取器（验证 A 版）
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.1.2
-// @description  在“我的优惠券”页面用一次同源请求读取 JSON 或 HTML 数据，并导出安全诊断
+// @version      0.2.0
+// @description  读取账号优惠券，并在购物车按优惠力度标记每部作品可用的券
 // @author       Syoius & Cassandra-fox; coupon reader maintained by jiangdaolia
 // @license      MIT
 // @match        https://www.dlsite.com/*/mypage/coupon*
 // @match        https://www.dlsite.com/mypage/coupon*
+// @match        https://www.dlsite.com/*/cart*
+// @match        https://www.dlsite.com/cart*
 // @run-at       document-idle
 // @noframes
 // @grant        none
@@ -22,29 +24,39 @@
   // This independent reader preserves the requested project lineage:
   // direct source: syoius/dlTracker4TamperMonkey
   // indirect source: Cassandra-fox/dlTracker
-  // Stage A intentionally contains no price-history or optimizer code.
+  // This script intentionally contains no price-history code and never submits orders.
 
   const APP_NAME = "DLsite 优惠券读取器";
-  const APP_VERSION = "0.1.2";
+  const APP_VERSION = "0.2.0";
   const ROOT_ID = "dlsite-coupon-reader-a";
   const STYLE_ID = `${ROOT_ID}-style`;
   const API_PATH = "/books/mypage/coupon/list/ajax";
+  const PRODUCT_INFO_PATH = "/maniax/product/info/ajax";
   const REQUEST_TIMEOUT_MS = 30_000;
   const MAX_SCHEMA_ROWS = 300;
   const MAX_SCHEMA_DEPTH = 9;
   const MAX_SCHEMA_ARRAY_SAMPLE = 20;
 
-  if (!/\/mypage\/coupon(?:\/|[?#]|$)/i.test(location.href)) return;
-  if (document.getElementById(ROOT_ID)) return;
+  const IS_COUPON_PAGE = /\/mypage\/coupon(?:\/|[?#]|$)/i.test(location.href);
+  const IS_CART_PAGE = /\/cart(?:\/|[?#]|$)/i.test(location.href);
+  if (!IS_COUPON_PAGE && !IS_CART_PAGE) return;
 
   const startedAt = new Date().toISOString();
-  const pageEvidence = collectPageCountEvidence(document);
+  const pageEvidence = IS_COUPON_PAGE
+    ? collectPageCountEvidence(document)
+    : { resolvedCount: null, resolution: "not-applicable", evidence: [] };
   let requestCount = 0;
-  let diagnostic = makeInitialDiagnostic();
+  let diagnostic = null;
   let lastDiagnosticText = "";
+  let ui = null;
 
-  const ui = mountPanel();
-  void readOnce();
+  if (IS_COUPON_PAGE && !document.getElementById(ROOT_ID)) {
+    diagnostic = makeInitialDiagnostic();
+    ui = mountPanel();
+    void readOnce();
+  } else if (IS_CART_PAGE && !document.getElementById("dlcr-cart-status")) {
+    void enhanceCartCouponMarkers();
+  }
 
   function makeInitialDiagnostic() {
     return {
@@ -52,7 +64,7 @@
       script: {
         name: APP_NAME,
         version: APP_VERSION,
-        stage: "A",
+        stage: "B-reader",
       },
       capturedAt: null,
       environment: {
@@ -92,14 +104,14 @@
 
     const headingRow = element("div", "dlcr-heading-row");
     const heading = element("h2", "dlcr-title", `${APP_NAME} `);
-    heading.appendChild(element("span", "dlcr-badge", "验证 A 版"));
+    heading.appendChild(element("span", "dlcr-badge", "B 版"));
     headingRow.appendChild(heading);
     root.appendChild(headingRow);
 
     const scope = element(
       "p",
       "dlcr-scope",
-      "本版只验证读取通路：一次同源请求；不读详情、不翻页、不访问作品或第三方网站。",
+      "优惠券页仍只做一次同源读取与诊断；购物车页会另外批量读取当前购物车作品的条件字段。",
     );
     root.appendChild(scope);
 
@@ -977,6 +989,670 @@
       return JSON.stringify(redacted.length > 50 ? `${redacted.slice(0, 47)}…` : redacted);
     }
     return String(value);
+  }
+
+  // <cart-coupon-core>
+  function cartNumber(value, fallback = 0) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number(value.replace(/,/g, "").trim());
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return fallback;
+  }
+
+  function cartTokens(value) {
+    if (value === null || value === undefined) return [];
+    if (Array.isArray(value)) return value.flatMap(cartTokens);
+    if (isPlainObject(value)) return Object.values(value).flatMap(cartTokens);
+    return [String(value)];
+  }
+
+  function couponPlainText(value) {
+    return String(value || "")
+      .replace(/<br\s*\/?\s*>/gi, " ")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function parseRelativeValidityDays(text) {
+    const patterns = [
+      /(?:使用|利用|유효|기한|期限|有效期)[^\d]{0,20}(\d{1,3})\s*(?:日|天|일)/i,
+      /(\d{1,3})\s*(?:日|天|일)[^。.!！?？]{0,20}(?:使用|利用|유효|기한|期限|有效)/i,
+    ];
+    for (const pattern of patterns) {
+      const matched = text.match(pattern);
+      if (matched) return Number(matched[1]);
+    }
+    return null;
+  }
+
+  function parseJstDateTime(value) {
+    const text = String(value || "").trim();
+    if (!text) return null;
+    const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)
+      ? `${text.replace(" ", "T")}+09:00`
+      : text;
+    const parsed = Date.parse(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function couponExpiryMs(raw) {
+    const limit = cartNumber(raw?.limit_date, NaN);
+    if (Number.isFinite(limit) && limit > 0) {
+      return limit > 1e12 ? limit : limit * 1000;
+    }
+    return parseJstDateTime(raw?.end_date);
+  }
+
+  function canonicalBusinessValue(value) {
+    if (Array.isArray(value)) {
+      return value
+        .map(canonicalBusinessValue)
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    }
+    if (isPlainObject(value)) {
+      return Object.fromEntries(
+        Object.keys(value)
+          .sort()
+          .map((key) => [key, canonicalBusinessValue(value[key])]),
+      );
+    }
+    return value;
+  }
+
+  function stableBusinessString(value) {
+    return JSON.stringify(canonicalBusinessValue(value));
+  }
+
+  function couponMinimumSpend(conditions) {
+    const raw = conditions?.price_sum;
+    if (Array.isArray(raw)) return Math.max(0, ...raw.map((value) => cartNumber(value)));
+    return Math.max(0, cartNumber(raw));
+  }
+
+  function normalizeCartCoupon(raw, index) {
+    const conditions = isPlainObject(raw?.conditions) ? raw.conditions : {};
+    const combinedText = couponPlainText(
+      [raw?.coupon_name, raw?.condition_info, raw?.info].filter(Boolean).join(" "),
+    );
+    const expiryMs = couponExpiryMs(raw);
+    const startMs = parseJstDateTime(raw?.start_date);
+    const relativeDays = parseRelativeValidityDays(combinedText);
+    const discountType = raw?.discount_type === "price" ? "fixed" : "percent";
+    const discount = Math.max(0, cartNumber(raw?.discount));
+    const minSpend = couponMinimumSpend(conditions);
+    const minItems = Math.max(1, Math.round(cartNumber(conditions?.post_condition?.count, 1)));
+    const multipleUse = raw?.is_multiple_use === true;
+    const validityPolicy =
+      raw?.is_static_limit === false && relativeDays
+        ? `relative:${relativeDays}`
+        : `absolute:${expiryMs || "unknown"}`;
+    const equivalentRate =
+      discountType === "percent"
+        ? discount
+        : minSpend > 0
+          ? (discount / minSpend) * 100
+          : 0;
+
+    return {
+      instanceId: String(raw?.coupon_id || `coupon-${index + 1}`),
+      name: String(raw?.coupon_name || `优惠券 ${index + 1}`),
+      conditionInfo: couponPlainText(raw?.condition_info),
+      info: couponPlainText(raw?.info),
+      conditionType: String(raw?.condition_type || ""),
+      conditions,
+      distributeTargets: cartTokens(raw?.distribute_targets).sort(),
+      discountType,
+      discount,
+      minSpend,
+      minItems,
+      multipleUse,
+      affectsPayment: raw?.is_affect_to_payment === true,
+      allowsDiscounted:
+        raw?.is_affect_to_payment === true ||
+        /割引中の作品にも適用|打折中的作品|할인[^。.!]{0,10}(?:적용|사용)/i.test(combinedText),
+      expiryMs,
+      startMs,
+      relativeDays,
+      validityPolicy,
+      equivalentRate,
+      isExceeded: raw?.is_limited_exceeded === true,
+      groupKey: stableBusinessString({
+        conditionType: String(raw?.condition_type || ""),
+        conditions,
+        discountType,
+        discount,
+        distributeTargets: cartTokens(raw?.distribute_targets).sort(),
+        multipleUse,
+        affectsPayment: raw?.is_affect_to_payment === true,
+        validityPolicy,
+      }),
+    };
+  }
+
+  function groupCartCoupons(rawCoupons, nowMs = Date.now()) {
+    const grouped = new Map();
+    (Array.isArray(rawCoupons) ? rawCoupons : [])
+      .map(normalizeCartCoupon)
+      .filter((coupon) => !coupon.isExceeded)
+      .filter((coupon) => coupon.startMs === null || coupon.startMs <= nowMs)
+      .filter((coupon) => coupon.expiryMs === null || coupon.expiryMs >= nowMs)
+      .forEach((coupon) => {
+        if (!grouped.has(coupon.groupKey)) {
+          grouped.set(coupon.groupKey, {
+            key: coupon.groupKey,
+            conditionType: coupon.conditionType,
+            conditions: coupon.conditions,
+            distributeTargets: coupon.distributeTargets,
+            discountType: coupon.discountType,
+            discount: coupon.discount,
+            minSpend: coupon.minSpend,
+            minItems: coupon.minItems,
+            multipleUse: coupon.multipleUse,
+            affectsPayment: coupon.affectsPayment,
+            allowsDiscounted: coupon.allowsDiscounted,
+            validityPolicy: coupon.validityPolicy,
+            relativeDays: coupon.relativeDays,
+            equivalentRate: coupon.equivalentRate,
+            instances: [],
+            names: [],
+          });
+        }
+        const group = grouped.get(coupon.groupKey);
+        group.instances.push({
+          id: coupon.instanceId,
+          name: coupon.name,
+          expiryMs: coupon.expiryMs,
+        });
+        if (!group.names.includes(coupon.name)) group.names.push(coupon.name);
+        group.allowsDiscounted ||= coupon.allowsDiscounted;
+      });
+
+    return [...grouped.values()].map((group) => {
+      group.instances.sort((a, b) => (a.expiryMs || Infinity) - (b.expiryMs || Infinity));
+      group.earliestExpiryMs = group.instances[0]?.expiryMs || null;
+      group.latestExpiryMs = group.instances.at(-1)?.expiryMs || null;
+      group.displayName = couponGroupDisplayName(group);
+      return group;
+    });
+  }
+
+  function couponGroupDisplayName(group) {
+    if (group.affectsPayment && group.discountType === "fixed" && group.minSpend > 0) {
+      return `满${formatCartYen(group.minSpend)}减${formatCartYen(group.discount)}`;
+    }
+    return group.names[0] || "DLsite 优惠券";
+  }
+
+  function tokenSet(value) {
+    return new Set(cartTokens(value).map((token) => token.toUpperCase()));
+  }
+
+  function setsIntersect(left, right) {
+    for (const value of left) if (right.has(value)) return true;
+    return false;
+  }
+
+  function metadataProductPrice(item, metadata) {
+    const value = cartNumber(metadata?.price, NaN);
+    return Number.isFinite(value) && value > 0 ? value : item.price;
+  }
+
+  function couponMatchesCartProduct(group, item, metadata) {
+    const conditions = group.conditions || {};
+    const itemIds = tokenSet([item.id, ...(item.alternateIds || [])]);
+    switch (group.conditionType) {
+      case "payment":
+        return true;
+      case "id_all":
+        return setsIntersect(itemIds, tokenSet(conditions.product_all));
+      case "custom_genre":
+        return setsIntersect(
+          tokenSet(conditions.custom_genre),
+          tokenSet(metadata?.custom_genres),
+        );
+      case "common":
+        return setsIntersect(
+          tokenSet(conditions.maker_id),
+          tokenSet([metadata?.maker_id, metadata?.maker?.id]),
+        );
+      case "site_ids": {
+        const siteMatches = setsIntersect(
+          tokenSet(conditions.site_ids),
+          tokenSet(metadata?.site_id),
+        );
+        if (!siteMatches) return false;
+        const maximumPrice = cartNumber(conditions.maximum_applicable_price);
+        return maximumPrice <= 0 || metadataProductPrice(item, metadata) <= maximumPrice;
+      }
+      case "worktype":
+        return setsIntersect(tokenSet(conditions.worktype), tokenSet(metadata?.work_type));
+      default:
+        return false;
+    }
+  }
+
+  function buildCartCouponOptions(items, groups, metadataById, cartSubtotal) {
+    const contexts = groups.map((group) => {
+      const matchingIds = new Set(
+        items
+          .filter((item) =>
+            couponMatchesCartProduct(group, item, metadataById.get(item.id)),
+          )
+          .map((item) => item.id),
+      );
+      const countSatisfied = matchingIds.size >= group.minItems;
+      const spendSatisfied = cartSubtotal >= group.minSpend;
+      return { group, matchingIds, countSatisfied, spendSatisfied };
+    });
+
+    const result = new Map();
+    for (const item of items) {
+      const options = contexts
+        .filter((context) => context.matchingIds.has(item.id))
+        .map((context) => {
+          const usableNow = context.countSatisfied && context.spendSatisfied;
+          let blockedReason = "";
+          if (!context.countSatisfied) {
+            blockedReason = `还差 ${context.group.minItems - context.matchingIds.size} 部适用作品`;
+          } else if (!context.spendSatisfied) {
+            blockedReason = `购物车还差 ${formatCartYen(context.group.minSpend - cartSubtotal)}`;
+          }
+          return { ...context.group, usableNow, blockedReason };
+        })
+        .sort(
+          (a, b) =>
+            Number(b.usableNow) - Number(a.usableNow) ||
+            b.equivalentRate - a.equivalentRate ||
+            (a.earliestExpiryMs || Infinity) - (b.earliestExpiryMs || Infinity),
+        );
+      result.set(item.id, options);
+    }
+    return result;
+  }
+
+  function formatCartYen(value) {
+    return `${Math.round(cartNumber(value)).toLocaleString("zh-CN")}日元`;
+  }
+  // </cart-coupon-core>
+
+  async function enhanceCartCouponMarkers() {
+    installCartMarkerStyles();
+    const status = mountCartStatus();
+    try {
+      setCartStatus(status, "正在识别购物车作品……", "reading");
+      const items = await waitForCartProducts();
+      if (!items.length) {
+        throw new Error("没有在“立即购买”区域识别到作品；请确认购物车已加载完成后刷新页面");
+      }
+
+      setCartStatus(status, `已识别 ${items.length} 部作品，正在读取账号优惠券（请求 1/2）……`, "reading");
+      const couponPayload = await fetchCartJson(API_PATH, "优惠券接口");
+      const rawCoupons = couponArrayFromCartPayload(couponPayload);
+      if (!rawCoupons) throw new Error("优惠券接口没有返回可识别的数组");
+      const groups = groupCartCoupons(rawCoupons);
+
+      const needsMetadata = groups.some((group) =>
+        ["custom_genre", "common", "site_ids", "worktype"].includes(group.conditionType),
+      );
+      let metadataById = new Map();
+      let metadataError = null;
+      if (needsMetadata) {
+        setCartStatus(
+          status,
+          `已读取 ${rawCoupons.length} 张券并归为 ${groups.length} 种；正在批量检查当前购物车作品（请求 2/2）……`,
+          "reading",
+        );
+        try {
+          metadataById = await fetchCartProductMetadata(items);
+        } catch (error) {
+          metadataError = error;
+          console.warn(`[${APP_NAME}] cart product metadata failed:`, error);
+        }
+      }
+
+      const cartSubtotal = items.reduce((sum, item) => sum + item.price, 0);
+      const optionsById = buildCartCouponOptions(
+        items,
+        groups,
+        metadataById,
+        cartSubtotal,
+      );
+      for (const item of items) {
+        renderCartCouponCard(item, optionsById.get(item.id) || []);
+      }
+
+      const usableOptionCount = [...optionsById.values()].reduce(
+        (sum, options) => sum + options.filter((option) => option.usableNow).length,
+        0,
+      );
+      if (metadataError) {
+        setCartStatus(
+          status,
+          `已读取 ${rawCoupons.length} 张券并归为 ${groups.length} 种，但作品条件接口失败；当前仅可靠标记指定 ID 券和满减券。${errorMessage(metadataError)}`,
+          "partial",
+        );
+      } else {
+        setCartStatus(
+          status,
+          `完成：${rawCoupons.length} 张券归为 ${groups.length} 种，已检查 ${items.length} 部作品，共找到 ${usableOptionCount} 个当前可用的“作品×券种”组合。每单仍只能使用一张券。`,
+          "success",
+        );
+      }
+    } catch (error) {
+      setCartStatus(status, `优惠券标记失败：${errorMessage(error)}`, "error");
+    }
+  }
+
+  async function fetchCartJson(path, label) {
+    const response = await fetch(new URL(path, location.origin), {
+      method: "GET",
+      credentials: "include",
+      redirect: "follow",
+      headers: { Accept: "application/json" },
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      const risk = [403, 429].includes(response.status) ? "（检测到风控状态，已停止）" : "";
+      throw new Error(`${label}返回 HTTP ${response.status}${risk}`);
+    }
+    const trimmed = text.trimStart();
+    if (!/^(?:\{|\[)/.test(trimmed)) {
+      const blockReason = detectBlockingHtml(text, response.url);
+      throw new Error(blockReason || `${label}没有返回 JSON`);
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error(`${label}返回的 JSON 无法解析`);
+    }
+  }
+
+  function couponArrayFromCartPayload(payload) {
+    if (Array.isArray(payload)) return payload;
+    for (const key of ["coupons", "items", "data", "values"]) {
+      if (Array.isArray(payload?.[key])) return payload[key];
+    }
+    return null;
+  }
+
+  async function fetchCartProductMetadata(items) {
+    const url = new URL(PRODUCT_INFO_PATH, location.origin);
+    url.searchParams.set("product_id", items.map((item) => item.id).join(","));
+    const payload = await fetchCartJson(url.href, "作品条件接口");
+    return productMetadataMap(payload);
+  }
+
+  function productMetadataMap(payload) {
+    const rawRecords = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.products)
+        ? payload.products
+        : isPlainObject(payload?.products)
+          ? Object.entries(payload.products).map(([id, value]) => ({
+              ...(isPlainObject(value) ? value : {}),
+              product_id: value?.product_id || id,
+            }))
+          : isPlainObject(payload)
+            ? Object.entries(payload).map(([id, value]) => ({
+                ...(isPlainObject(value) ? value : {}),
+                product_id: value?.product_id || id,
+              }))
+            : [];
+    const records = new Map();
+    for (const record of rawRecords) {
+      const id = String(record?.product_id || record?.workno || record?.id || "").toUpperCase();
+      if (id) records.set(id, record);
+    }
+    return records;
+  }
+
+  async function waitForCartProducts() {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const items = extractCartProducts();
+      if (items.length) return items;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return [];
+  }
+
+  function extractCartProducts() {
+    const selectors = [
+      "li.cart_list_item._cart_items",
+      "li.cart_list_item[id^='buy_now_']",
+      "li.cart_list_item[data-workno]",
+      "li.n_work_list_item[id^='buy_now_']",
+      "li.n_work_list_item[data-workno]",
+      ".__buy_now_target",
+    ];
+    const seenNodes = new Set();
+    const seenIds = new Set();
+    const items = [];
+    for (const selector of selectors) {
+      for (const rawNode of document.querySelectorAll(selector)) {
+        const node =
+          rawNode.closest("li.cart_list_item, li.n_work_list_item") || rawNode;
+        if (seenNodes.has(node) || isBuyLaterNode(node) || isHiddenCartNode(node)) continue;
+        seenNodes.add(node);
+        const id = extractCartWorkId(node);
+        if (!id || seenIds.has(id)) continue;
+        seenIds.add(id);
+        items.push({
+          id,
+          alternateIds: extractAlternateCartWorkIds(node, id),
+          title: extractCartTitle(node, id),
+          price: extractCartCurrentPrice(node),
+          node,
+        });
+      }
+    }
+    return items;
+  }
+
+  function extractCartWorkId(node) {
+    const candidates = [
+      node.getAttribute("data-workno"),
+      node.getAttribute("data-product-id"),
+      node.getAttribute("data-pack-parent-id"),
+      node.querySelector("[data-workno]")?.getAttribute("data-workno"),
+      node.querySelector("[data-product-id]")?.getAttribute("data-product-id"),
+    ];
+    const href = node.querySelector('a[href*="product_id/"]')?.getAttribute("href") || "";
+    candidates.push(href);
+    for (const candidate of candidates) {
+      const matched = String(candidate || "").match(/\b([RBV]J\d{6,})\b/i);
+      if (matched) return matched[1].toUpperCase();
+    }
+    return null;
+  }
+
+  function extractAlternateCartWorkIds(node, primaryId) {
+    const values = new Set();
+    const add = (value) => {
+      const matched = String(value || "").match(/\b([RBV]J\d{6,})\b/i);
+      if (matched && matched[1].toUpperCase() !== primaryId) values.add(matched[1].toUpperCase());
+    };
+    add(node.getAttribute("data-pack-parent-id"));
+    add(node.getAttribute("data-product-id"));
+    add(node.getAttribute("data-workno"));
+    const translation = String(node.getAttribute("data-translation_info") || "").replace(/&quot;/g, '"');
+    try {
+      const parsed = JSON.parse(translation);
+      add(parsed?.parent_workno);
+      add(parsed?.original_workno);
+    } catch {
+      // Optional translation metadata is not always present.
+    }
+    return [...values];
+  }
+
+  function extractCartTitle(node, fallback) {
+    return (
+      node.querySelector(".work_name a, .n_work_name a")?.textContent?.trim() ||
+      node.querySelector('a[href*="product_id/"]')?.textContent?.trim() ||
+      fallback
+    );
+  }
+
+  function extractCartCurrentPrice(node) {
+    const priceNodes = [
+      node.querySelector(".n_work_price_wrap"),
+      node.querySelector(".work_price"),
+      node.querySelector('[class*="price"]'),
+    ].filter(Boolean);
+    for (const priceNode of priceNodes) {
+      const matches = [...String(priceNode.textContent || "").replace(/,/g, "").matchAll(/(\d{1,8})\s*(?:円|JPY)/gi)];
+      if (matches.length) return Number(matches.at(-1)[1]);
+    }
+    const attributeNames = [
+      "data-price",
+      "data-sale-price",
+      "data-bulkbuy_price",
+      "data-bulk-price",
+    ];
+    for (const name of attributeNames) {
+      const direct = node.getAttribute(name) || node.querySelector(`[${name}]`)?.getAttribute(name);
+      const parsed = cartNumber(direct, NaN);
+      if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+    }
+    return 0;
+  }
+
+  function isBuyLaterNode(node) {
+    return (
+      /^buy_later_/i.test(String(node.id || "")) ||
+      node.matches?.(".__buy_later_target") ||
+      !!node.querySelector?.(".__buy_later_target")
+    );
+  }
+
+  function isHiddenCartNode(node) {
+    return (
+      node.classList?.contains("_removed") ||
+      /display\s*:\s*none/i.test(node.getAttribute("style") || "")
+    );
+  }
+
+  function renderCartCouponCard(item, options) {
+    item.node.querySelector(".dlcr-cart-coupon-card")?.remove();
+    const card = element("section", "dlcr-cart-coupon-card");
+    const usable = options.filter((option) => option.usableNow);
+    const pending = options.filter((option) => !option.usableNow);
+    const heading = element("div", "dlcr-cart-card-heading");
+    if (usable.length) {
+      heading.appendChild(element("strong", "", `可用券 ${usable.length} 种`));
+      heading.appendChild(
+        element("span", "dlcr-cart-best", `最佳 ${formatEquivalentRate(usable[0].equivalentRate)} OFF`),
+      );
+    } else {
+      heading.appendChild(element("strong", "", "暂未发现当前可用券"));
+    }
+    card.appendChild(heading);
+
+    for (const option of [...usable, ...pending]) {
+      const row = element(
+        "div",
+        `dlcr-cart-option${option.usableNow ? "" : " is-pending"}`,
+      );
+      const rate = element(
+        "span",
+        "dlcr-cart-rate",
+        option.discountType === "fixed"
+          ? `等效 ${formatEquivalentRate(option.equivalentRate)}`
+          : `${formatEquivalentRate(option.equivalentRate)}`,
+      );
+      const content = element("div", "dlcr-cart-option-content");
+      content.appendChild(element("div", "dlcr-cart-option-name", option.displayName));
+      const details = [];
+      if (option.instances.length > 1) details.push(`共 ${option.instances.length} 张`);
+      details.push(option.multipleUse ? "期限内无限使用" : "每张一次");
+      if (option.minItems > 1) details.push(`至少 ${option.minItems} 部适用作品`);
+      if (option.allowsDiscounted) details.push("可用于折扣作品");
+      if (option.earliestExpiryMs) details.push(`最早 ${formatChinaDate(option.earliestExpiryMs)} 到期`);
+      if (!option.usableNow) details.unshift(option.blockedReason);
+      content.appendChild(element("div", "dlcr-cart-option-meta", details.join(" · ")));
+      row.append(rate, content);
+      card.appendChild(row);
+    }
+
+    let host =
+      item.node.querySelector(".n_work_price_wrap, .work_price") ||
+      item.node.querySelector(".cart_list_item_inner") ||
+      item.node;
+    if (host.tagName === "SPAN" && host.parentElement) host = host.parentElement;
+    host.appendChild(card);
+  }
+
+  function formatEquivalentRate(rate) {
+    const value = Math.round(cartNumber(rate) * 10) / 10;
+    return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}%`;
+  }
+
+  function formatChinaDate(timestamp) {
+    return new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date(timestamp));
+  }
+
+  function mountCartStatus() {
+    const root = element("section", "dlcr-cart-status is-reading");
+    root.id = "dlcr-cart-status";
+    root.setAttribute("role", "status");
+    root.setAttribute("aria-live", "polite");
+    root.textContent = `${APP_NAME}：准备读取……`;
+    const host = document.querySelector("#main_inner, #main, main, .l-content") || document.body;
+    host.prepend(root);
+    return root;
+  }
+
+  function setCartStatus(node, message, state) {
+    node.className = `dlcr-cart-status is-${state}`;
+    node.textContent = `${APP_NAME}：${message}`;
+  }
+
+  function installCartMarkerStyles() {
+    if (document.getElementById("dlcr-cart-style")) return;
+    const style = document.createElement("style");
+    style.id = "dlcr-cart-style";
+    style.textContent = `
+      .dlcr-cart-status {
+        margin: 10px auto; padding: 10px 12px; max-width: 1100px;
+        border-radius: 8px; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .dlcr-cart-status.is-reading { color: #854d0e; background: #fef9c3; }
+      .dlcr-cart-status.is-success { color: #166534; background: #dcfce7; }
+      .dlcr-cart-status.is-partial { color: #9a3412; background: #ffedd5; }
+      .dlcr-cart-status.is-error { color: #991b1b; background: #fee2e2; }
+      .dlcr-cart-coupon-card {
+        clear: both; margin-top: 8px; padding: 8px; color: #1f2937; background: #f8fafc;
+        border: 1px solid #cbd5e1; border-radius: 7px; font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .dlcr-cart-card-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 5px; }
+      .dlcr-cart-best { padding: 2px 7px; color: #fff; background: #dc2626; border-radius: 999px; font-weight: 700; }
+      .dlcr-cart-option { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-top: 1px solid #e2e8f0; }
+      .dlcr-cart-option.is-pending { opacity: .58; }
+      .dlcr-cart-rate { flex: 0 0 auto; min-width: 66px; padding: 2px 5px; color: #fff; background: #ea580c; border-radius: 5px; text-align: center; font-weight: 750; }
+      .dlcr-cart-option.is-pending .dlcr-cart-rate { background: #64748b; }
+      .dlcr-cart-option-content { min-width: 0; }
+      .dlcr-cart-option-name { font-weight: 650; overflow-wrap: anywhere; }
+      .dlcr-cart-option-meta { color: #64748b; overflow-wrap: anywhere; }
+      @media (max-width: 720px) {
+        .dlcr-cart-status { margin: 8px; }
+        .dlcr-cart-coupon-card { width: 100%; }
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function errorMessage(error) {
+    return error instanceof Error ? error.message : String(error);
   }
 
   async function exportDiagnostic(mode) {
