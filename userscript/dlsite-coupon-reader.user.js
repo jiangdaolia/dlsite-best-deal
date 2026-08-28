@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 优惠券读取器（验证 A 版）
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.2.0
+// @version      0.2.1
 // @description  读取账号优惠券，并在购物车按优惠力度标记每部作品可用的券
 // @author       Syoius & Cassandra-fox; coupon reader maintained by jiangdaolia
 // @license      MIT
@@ -1273,6 +1273,36 @@
     return result;
   }
 
+  function buildCartCouponOptionsForAreas(items, groups, metadataById) {
+    const activeItems = items.filter((item) => item.area !== "later");
+    const activeSubtotal = activeItems.reduce((sum, item) => sum + item.price, 0);
+    const activeOptions = buildCartCouponOptions(
+      activeItems,
+      groups,
+      metadataById,
+      activeSubtotal,
+    );
+    const optionsByItem = new Map();
+
+    for (const item of activeItems) {
+      optionsByItem.set(item, activeOptions.get(item.id) || []);
+    }
+    for (const item of items.filter((candidate) => candidate.area === "later")) {
+      // “稍后再买”不属于当前订单。仅预览把这一部移入后，订单会有哪些券可用。
+      const hypotheticalItems = [...activeItems, { ...item, area: "active" }];
+      const hypotheticalSubtotal = activeSubtotal + item.price;
+      const hypotheticalOptions = buildCartCouponOptions(
+        hypotheticalItems,
+        groups,
+        metadataById,
+        hypotheticalSubtotal,
+      );
+      optionsByItem.set(item, hypotheticalOptions.get(item.id) || []);
+    }
+
+    return { activeItems, activeSubtotal, optionsByItem };
+  }
+
   function formatCartYen(value) {
     return `${Math.round(cartNumber(value)).toLocaleString("zh-CN")}日元`;
   }
@@ -1285,10 +1315,17 @@
       setCartStatus(status, "正在识别购物车作品……", "reading");
       const items = await waitForCartProducts();
       if (!items.length) {
-        throw new Error("没有在“立即购买”区域识别到作品；请确认购物车已加载完成后刷新页面");
+        throw new Error("没有在“立即购买”或“稍后再买”区域识别到作品；请确认页面已加载完成后刷新");
       }
 
-      setCartStatus(status, `已识别 ${items.length} 部作品，正在读取账号优惠券（请求 1/2）……`, "reading");
+      const activeCount = items.filter((item) => item.area !== "later").length;
+      const laterCount = items.length - activeCount;
+
+      setCartStatus(
+        status,
+        `已识别立即购买 ${activeCount} 部、稍后再买 ${laterCount} 部，正在读取账号优惠券（请求 1/2）……`,
+        "reading",
+      );
       const couponPayload = await fetchCartJson(API_PATH, "优惠券接口");
       const rawCoupons = couponArrayFromCartPayload(couponPayload);
       if (!rawCoupons) throw new Error("优惠券接口没有返回可识别的数组");
@@ -1302,7 +1339,7 @@
       if (needsMetadata) {
         setCartStatus(
           status,
-          `已读取 ${rawCoupons.length} 张券并归为 ${groups.length} 种；正在批量检查当前购物车作品（请求 2/2）……`,
+          `已读取 ${rawCoupons.length} 张券并归为 ${groups.length} 种；正在一次批量检查页面中的 ${items.length} 部作品（请求 2/2）……`,
           "reading",
         );
         try {
@@ -1313,19 +1350,29 @@
         }
       }
 
-      const cartSubtotal = items.reduce((sum, item) => sum + item.price, 0);
-      const optionsById = buildCartCouponOptions(
+      const { optionsByItem } = buildCartCouponOptionsForAreas(
         items,
         groups,
         metadataById,
-        cartSubtotal,
       );
       for (const item of items) {
-        renderCartCouponCard(item, optionsById.get(item.id) || []);
+        renderCartCouponCard(item, optionsByItem.get(item) || []);
       }
 
-      const usableOptionCount = [...optionsById.values()].reduce(
-        (sum, options) => sum + options.filter((option) => option.usableNow).length,
+      const activeUsableOptionCount = items.reduce(
+        (sum, item) =>
+          sum +
+          (item.area === "later"
+            ? 0
+            : (optionsByItem.get(item) || []).filter((option) => option.usableNow).length),
+        0,
+      );
+      const laterPreviewCount = items.reduce(
+        (sum, item) =>
+          sum +
+          (item.area === "later"
+            ? (optionsByItem.get(item) || []).filter((option) => option.usableNow).length
+            : 0),
         0,
       );
       if (metadataError) {
@@ -1337,7 +1384,7 @@
       } else {
         setCartStatus(
           status,
-          `完成：${rawCoupons.length} 张券归为 ${groups.length} 种，已检查 ${items.length} 部作品，共找到 ${usableOptionCount} 个当前可用的“作品×券种”组合。每单仍只能使用一张券。`,
+          `完成：${rawCoupons.length} 张券归为 ${groups.length} 种；立即购买找到 ${activeUsableOptionCount} 个当前可用组合，稍后再买找到 ${laterPreviewCount} 个移入后可用组合。每单仍只能使用一张券。`,
           "success",
         );
       }
@@ -1422,28 +1469,39 @@
     const selectors = [
       "li.cart_list_item._cart_items",
       "li.cart_list_item[id^='buy_now_']",
+      "li.cart_list_item[id^='buy_later_']",
       "li.cart_list_item[data-workno]",
+      "li.n_work_list_item._cart_item",
       "li.n_work_list_item[id^='buy_now_']",
+      "li.n_work_list_item[id^='buy_later_']",
       "li.n_work_list_item[data-workno]",
       ".__buy_now_target",
+      ".__buy_later_target",
+      "section.buy_later a[href*='product_id/']",
+      "section.cart_hold a[href*='product_id/']",
     ];
     const seenNodes = new Set();
-    const seenIds = new Set();
+    const seenKeys = new Set();
     const items = [];
     for (const selector of selectors) {
       for (const rawNode of document.querySelectorAll(selector)) {
         const node =
-          rawNode.closest("li.cart_list_item, li.n_work_list_item") || rawNode;
-        if (seenNodes.has(node) || isBuyLaterNode(node) || isHiddenCartNode(node)) continue;
+          rawNode.closest("li.cart_list_item, li.n_work_list_item") ||
+          rawNode.closest(".__buy_now_target, .__buy_later_target") ||
+          rawNode;
+        if (seenNodes.has(node) || isHiddenCartNode(node)) continue;
         seenNodes.add(node);
         const id = extractCartWorkId(node);
-        if (!id || seenIds.has(id)) continue;
-        seenIds.add(id);
+        const area = cartProductArea(rawNode, node);
+        const key = `${area}:${id}`;
+        if (!id || seenKeys.has(key)) continue;
+        seenKeys.add(key);
         items.push({
           id,
           alternateIds: extractAlternateCartWorkIds(node, id),
           title: extractCartTitle(node, id),
           price: extractCartCurrentPrice(node),
+          area,
           node,
         });
       }
@@ -1462,7 +1520,7 @@
     const href = node.querySelector('a[href*="product_id/"]')?.getAttribute("href") || "";
     candidates.push(href);
     for (const candidate of candidates) {
-      const matched = String(candidate || "").match(/\b([RBV]J\d{6,})\b/i);
+      const matched = String(candidate || "").match(/([RBV]J\d{6,})/i);
       if (matched) return matched[1].toUpperCase();
     }
     return null;
@@ -1471,7 +1529,7 @@
   function extractAlternateCartWorkIds(node, primaryId) {
     const values = new Set();
     const add = (value) => {
-      const matched = String(value || "").match(/\b([RBV]J\d{6,})\b/i);
+      const matched = String(value || "").match(/([RBV]J\d{6,})/i);
       if (matched && matched[1].toUpperCase() !== primaryId) values.add(matched[1].toUpperCase());
     };
     add(node.getAttribute("data-pack-parent-id"));
@@ -1520,12 +1578,17 @@
     return 0;
   }
 
-  function isBuyLaterNode(node) {
-    return (
-      /^buy_later_/i.test(String(node.id || "")) ||
-      node.matches?.(".__buy_later_target") ||
-      !!node.querySelector?.(".__buy_later_target")
-    );
+  function cartProductArea(rawNode, ownerNode) {
+    const nodes = [rawNode, ownerNode].filter(Boolean);
+    for (const node of nodes) {
+      if (/^buy_later_/i.test(String(node.id || ""))) return "later";
+      if (node.matches?.(".__buy_later_target")) return "later";
+      if (node.closest?.(".__buy_later_target, section.buy_later, section.cart_hold")) {
+        return "later";
+      }
+    }
+    if (ownerNode?.querySelector?.(".__buy_later_target")) return "later";
+    return "active";
   }
 
   function isHiddenCartNode(node) {
@@ -1540,16 +1603,35 @@
     const card = element("section", "dlcr-cart-coupon-card");
     const usable = options.filter((option) => option.usableNow);
     const pending = options.filter((option) => !option.usableNow);
+    const isLater = item.area === "later";
+    if (isLater) card.classList.add("is-buy-later");
     const heading = element("div", "dlcr-cart-card-heading");
     if (usable.length) {
-      heading.appendChild(element("strong", "", `可用券 ${usable.length} 种`));
       heading.appendChild(
-        element("span", "dlcr-cart-best", `最佳 ${formatEquivalentRate(usable[0].equivalentRate)} OFF`),
+        element("strong", "", isLater ? `移入后可用券 ${usable.length} 种` : `可用券 ${usable.length} 种`),
+      );
+      heading.appendChild(
+        element(
+          "span",
+          "dlcr-cart-best",
+          `${isLater ? "移入后最佳" : "最佳"} ${formatEquivalentRate(usable[0].equivalentRate)} OFF`,
+        ),
       );
     } else {
-      heading.appendChild(element("strong", "", "暂未发现当前可用券"));
+      heading.appendChild(
+        element("strong", "", isLater ? "移入后仍未满足用券条件" : "暂未发现当前可用券"),
+      );
     }
     card.appendChild(heading);
+    if (isLater) {
+      card.appendChild(
+        element(
+          "div",
+          "dlcr-cart-area-note",
+          "稍后再买不计入当前订单；以下按“只把这部移入立即购买”预览。",
+        ),
+      );
+    }
 
     for (const option of [...usable, ...pending]) {
       const row = element(
@@ -1566,6 +1648,7 @@
       const content = element("div", "dlcr-cart-option-content");
       content.appendChild(element("div", "dlcr-cart-option-name", option.displayName));
       const details = [];
+      if (isLater && option.usableNow) details.push("需先移入立即购买");
       if (option.instances.length > 1) details.push(`共 ${option.instances.length} 张`);
       details.push(option.multipleUse ? "期限内无限使用" : "每张一次");
       if (option.minItems > 1) details.push(`至少 ${option.minItems} 部适用作品`);
@@ -1607,8 +1690,10 @@
     root.setAttribute("role", "status");
     root.setAttribute("aria-live", "polite");
     root.textContent = `${APP_NAME}：准备读取……`;
-    const host = document.querySelector("#main_inner, #main, main, .l-content") || document.body;
-    host.prepend(root);
+    root.title = "点按可隐藏这条状态提示";
+    root.addEventListener("click", () => root.remove(), { once: true });
+    const host = document.body || document.documentElement;
+    host.appendChild(root);
     return root;
   }
 
@@ -1623,8 +1708,11 @@
     style.id = "dlcr-cart-style";
     style.textContent = `
       .dlcr-cart-status {
-        margin: 10px auto; padding: 10px 12px; max-width: 1100px;
-        border-radius: 8px; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        position: fixed; z-index: 2147483647; left: 50%; bottom: max(12px, env(safe-area-inset-bottom));
+        transform: translateX(-50%); box-sizing: border-box; width: min(760px, calc(100vw - 24px));
+        margin: 0; padding: 10px 12px; border: 1px solid rgba(15, 23, 42, .16);
+        border-radius: 9px; box-shadow: 0 5px 24px rgba(15, 23, 42, .28); cursor: pointer;
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       .dlcr-cart-status.is-reading { color: #854d0e; background: #fef9c3; }
       .dlcr-cart-status.is-success { color: #166534; background: #dcfce7; }
@@ -1634,6 +1722,8 @@
         clear: both; margin-top: 8px; padding: 8px; color: #1f2937; background: #f8fafc;
         border: 1px solid #cbd5e1; border-radius: 7px; font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
+      .dlcr-cart-coupon-card.is-buy-later { background: #f5f3ff; border-color: #c4b5fd; }
+      .dlcr-cart-area-note { margin: -1px 0 5px; color: #6d28d9; font-size: 11px; }
       .dlcr-cart-card-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 5px; }
       .dlcr-cart-best { padding: 2px 7px; color: #fff; background: #dc2626; border-radius: 999px; font-weight: 700; }
       .dlcr-cart-option { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-top: 1px solid #e2e8f0; }
@@ -1644,7 +1734,7 @@
       .dlcr-cart-option-name { font-weight: 650; overflow-wrap: anywhere; }
       .dlcr-cart-option-meta { color: #64748b; overflow-wrap: anywhere; }
       @media (max-width: 720px) {
-        .dlcr-cart-status { margin: 8px; }
+        .dlcr-cart-status { bottom: max(8px, env(safe-area-inset-bottom)); width: calc(100vw - 16px); }
         .dlcr-cart-coupon-card { width: 100%; }
       }
     `;

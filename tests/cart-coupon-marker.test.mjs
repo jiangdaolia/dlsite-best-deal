@@ -24,6 +24,7 @@ vm.runInNewContext(
     groupCartCoupons,
     couponMatchesCartProduct,
     buildCartCouponOptions,
+    buildCartCouponOptionsForAreas,
   };
   `,
   sandbox,
@@ -34,6 +35,7 @@ const {
   groupCartCoupons,
   couponMatchesCartProduct,
   buildCartCouponOptions,
+  buildCartCouponOptionsForAreas,
 } = sandbox.cartCouponCore;
 
 const futureLimit = Math.floor(Date.parse("2026-09-03T00:20:00+08:00") / 1000);
@@ -161,6 +163,21 @@ test("未满足满减金额或适用作品数量时显示为暂不可用", () =>
   assert.ok(options.every((option) => !option.usableNow));
   assert.ok(options.some((option) => /还差 1 部/.test(option.blockedReason)));
   assert.ok(options.some((option) => /还差 300日元/.test(option.blockedReason)));
+});
+
+test("稍后再买按移入后的订单预览，但不计入当前购物车门槛", () => {
+  const groups = groupCartCoupons([paymentCoupon(0)], now);
+  const active = { id: "RJ200001", price: 500, area: "active" };
+  const later = { id: "RJ200002", price: 800, area: "later" };
+
+  const { activeItems, activeSubtotal, optionsByItem } =
+    buildCartCouponOptionsForAreas([active, later], groups, new Map());
+
+  assert.equal(activeItems.length, 1);
+  assert.equal(activeSubtotal, 500);
+  assert.equal(optionsByItem.get(active)[0].usableNow, false);
+  assert.match(optionsByItem.get(active)[0].blockedReason, /还差 700日元/);
+  assert.equal(optionsByItem.get(later)[0].usableNow, true);
 });
 
 test("分类、社团和站点价格上限使用作品元数据判断", () => {
