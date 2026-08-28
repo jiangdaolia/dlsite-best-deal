@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 优惠券读取器（验证 A 版）
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.1.1
+// @version      0.1.2
 // @description  在“我的优惠券”页面用一次同源请求读取 JSON 或 HTML 数据，并导出安全诊断
 // @author       Syoius & Cassandra-fox; coupon reader maintained by jiangdaolia
 // @license      MIT
@@ -25,7 +25,7 @@
   // Stage A intentionally contains no price-history or optimizer code.
 
   const APP_NAME = "DLsite 优惠券读取器";
-  const APP_VERSION = "0.1.1";
+  const APP_VERSION = "0.1.2";
   const ROOT_ID = "dlsite-coupon-reader-a";
   const STYLE_ID = `${ROOT_ID}-style`;
   const API_PATH = "/books/mypage/coupon/list/ajax";
@@ -68,6 +68,7 @@
         externalServicesUsed: false,
         persistedLocally: false,
         containsRealCouponIds: true,
+        containsCouponRedemptionCodes: false,
       },
       pageCountEvidence: pageEvidence,
       request: {
@@ -117,7 +118,7 @@
     const warning = element(
       "p",
       "dlcr-warning",
-      "注意：诊断 JSON 会移除认证信息、邮箱和账号身份字段，但按你的选择保留真实优惠券 ID。请只在私下排错时发送，不要公开上传。",
+      "注意：诊断 JSON 会移除认证信息、兑换码、邮箱和账号身份字段，但按你的选择保留真实优惠券 ID。请只在私下排错时发送，不要公开上传。",
     );
     root.appendChild(warning);
 
@@ -903,7 +904,14 @@
   function shouldRemoveExportField(key, path) {
     const normalized = String(key).toLowerCase().replace(/[-\s]/g, "_");
     const bare = normalized.replace(/^data_/, "");
-    if (/^coupon_?(id|no|code)$/.test(bare)) return false;
+    if (/^coupon_?id$/.test(bare)) return false;
+    if (
+      /^(encrypted_code|coupon_code|coupon_no|serial_code|redeem_code|redemption_code|gift_code|promo_code|claim_code|issue_code)$/.test(
+        bare,
+      )
+    ) {
+      return true;
+    }
     if (
       /^(cookie|set_cookie|authorization|headers?|request_headers?|password|passwd|secret|bearer|csrf|csrf_token|xsrf|xsrf_token|access_token|refresh_token|id_token|session|session_id|login_token)$/.test(
         bare,
@@ -974,7 +982,7 @@
   async function exportDiagnostic(mode) {
     if (!lastDiagnosticText) return;
     const approved = window.confirm(
-      "诊断 JSON 已移除 Cookie、认证信息、邮箱和账号身份字段，但仍保留真实优惠券 ID。请勿公开上传。是否继续？",
+      "诊断 JSON 已移除 Cookie、认证信息、兑换码、邮箱和账号身份字段，但仍保留真实优惠券 ID。请勿公开上传。是否继续？",
     );
     if (!approved) return;
 

@@ -231,6 +231,7 @@ test("诊断导出移除认证和账号字段但保留真实优惠券 ID", async
     payload: [
       {
         coupon_id: "REAL-COUPON-ID",
+        encrypted_code: "SECRET-REDEMPTION-CODE",
         coupon_name: "20% OFF",
         email: "person@example.com",
         cookie: "secret-cookie",
@@ -251,6 +252,7 @@ test("诊断导出移除认证和账号字段但保留真实优惠券 ID", async
 
   const exported = JSON.parse(harness.copiedText);
   assert.equal(exported.rawPayload[0].coupon_id, "REAL-COUPON-ID");
+  assert.equal(exported.rawPayload[0].encrypted_code, "[已移除]");
   assert.equal(exported.rawPayload[0].coupon_name, "20% OFF");
   assert.equal(exported.rawPayload[0].email, "[已移除]");
   assert.equal(exported.rawPayload[0].cookie, "[已移除]");
