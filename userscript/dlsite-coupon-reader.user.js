@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DLsite 优惠券读取器（验证 A 版）
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.2.1
-// @description  读取账号优惠券，并在购物车按优惠力度标记每部作品可用的券
+// @version      0.2.2
+// @description  读取账号优惠券，在购物车补充日元现价并按优惠力度标记可用券
 // @author       Syoius & Cassandra-fox; coupon reader maintained by jiangdaolia
 // @license      MIT
 // @match        https://www.dlsite.com/*/mypage/coupon*
@@ -1303,6 +1303,16 @@
     return { activeItems, activeSubtotal, optionsByItem };
   }
 
+  function resolveCartYenPrice(item, metadata) {
+    const cartPrice = cartNumber(item?.price, NaN);
+    if (Number.isFinite(cartPrice) && cartPrice > 0) return cartPrice;
+    for (const candidate of [metadata?.currency_price?.JPY, metadata?.price]) {
+      const value = cartNumber(candidate, NaN);
+      if (Number.isFinite(value) && value >= 0) return value;
+    }
+    return null;
+  }
+
   function formatCartYen(value) {
     return `${Math.round(cartNumber(value)).toLocaleString("zh-CN")}日元`;
   }
@@ -1331,23 +1341,24 @@
       if (!rawCoupons) throw new Error("优惠券接口没有返回可识别的数组");
       const groups = groupCartCoupons(rawCoupons);
 
-      const needsMetadata = groups.some((group) =>
-        ["custom_genre", "common", "site_ids", "worktype"].includes(group.conditionType),
-      );
       let metadataById = new Map();
       let metadataError = null;
-      if (needsMetadata) {
-        setCartStatus(
-          status,
-          `已读取 ${rawCoupons.length} 张券并归为 ${groups.length} 种；正在一次批量检查页面中的 ${items.length} 部作品（请求 2/2）……`,
-          "reading",
-        );
-        try {
-          metadataById = await fetchCartProductMetadata(items);
-        } catch (error) {
-          metadataError = error;
-          console.warn(`[${APP_NAME}] cart product metadata failed:`, error);
-        }
+      setCartStatus(
+        status,
+        `已读取 ${rawCoupons.length} 张券并归为 ${groups.length} 种；正在一次批量读取 ${items.length} 部作品的日元现价和用券条件（请求 2/2）……`,
+        "reading",
+      );
+      try {
+        metadataById = await fetchCartProductMetadata(items);
+      } catch (error) {
+        metadataError = error;
+        console.warn(`[${APP_NAME}] cart product metadata failed:`, error);
+      }
+
+      for (const item of items) {
+        const yenPrice = resolveCartYenPrice(item, metadataById.get(item.id));
+        if (yenPrice !== null) item.price = yenPrice;
+        renderCartYenPrice(item, yenPrice);
       }
 
       const { optionsByItem } = buildCartCouponOptionsForAreas(
@@ -1378,7 +1389,7 @@
       if (metadataError) {
         setCartStatus(
           status,
-          `已读取 ${rawCoupons.length} 张券并归为 ${groups.length} 种，但作品条件接口失败；当前仅可靠标记指定 ID 券和满减券。${errorMessage(metadataError)}`,
+          `已读取 ${rawCoupons.length} 张券并归为 ${groups.length} 种，但作品日元价格/条件接口失败；仅在购物车自带日元字段可读时补价，当前只可靠标记指定 ID 券和满减券。${errorMessage(metadataError)}`,
           "partial",
         );
       } else {
@@ -1598,6 +1609,29 @@
     );
   }
 
+  function cartPriceHost(item) {
+    let host =
+      item.node.querySelector(".n_work_price_wrap, .work_price") ||
+      item.node.querySelector(".cart_list_item_inner") ||
+      item.node;
+    if (host.tagName === "SPAN" && host.parentElement) host = host.parentElement;
+    return host;
+  }
+
+  function renderCartYenPrice(item, yenPrice) {
+    item.node.querySelector(".dlcr-cart-yen-price")?.remove();
+    if (!Number.isFinite(yenPrice) || yenPrice < 0) return;
+    const label = element(
+      "span",
+      "dlcr-cart-yen-price",
+      `（${Math.round(yenPrice).toLocaleString("zh-CN")}日元）`,
+    );
+    const host = cartPriceHost(item);
+    const card = host.querySelector(".dlcr-cart-coupon-card");
+    if (card?.parentElement === host) host.insertBefore(label, card);
+    else host.appendChild(label);
+  }
+
   function renderCartCouponCard(item, options) {
     item.node.querySelector(".dlcr-cart-coupon-card")?.remove();
     const card = element("section", "dlcr-cart-coupon-card");
@@ -1660,12 +1694,7 @@
       card.appendChild(row);
     }
 
-    let host =
-      item.node.querySelector(".n_work_price_wrap, .work_price") ||
-      item.node.querySelector(".cart_list_item_inner") ||
-      item.node;
-    if (host.tagName === "SPAN" && host.parentElement) host = host.parentElement;
-    host.appendChild(card);
+    cartPriceHost(item).appendChild(card);
   }
 
   function formatEquivalentRate(rate) {
@@ -1721,6 +1750,10 @@
       .dlcr-cart-coupon-card {
         clear: both; margin-top: 8px; padding: 8px; color: #1f2937; background: #f8fafc;
         border: 1px solid #cbd5e1; border-radius: 7px; font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .dlcr-cart-yen-price {
+        display: inline-block; margin-left: 5px; color: #475569; white-space: nowrap;
+        font: 600 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       .dlcr-cart-coupon-card.is-buy-later { background: #f5f3ff; border-color: #c4b5fd; }
       .dlcr-cart-area-note { margin: -1px 0 5px; color: #6d28d9; font-size: 11px; }

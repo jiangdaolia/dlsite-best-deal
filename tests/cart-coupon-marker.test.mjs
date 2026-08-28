@@ -25,6 +25,7 @@ vm.runInNewContext(
     couponMatchesCartProduct,
     buildCartCouponOptions,
     buildCartCouponOptionsForAreas,
+    resolveCartYenPrice,
   };
   `,
   sandbox,
@@ -36,6 +37,7 @@ const {
   couponMatchesCartProduct,
   buildCartCouponOptions,
   buildCartCouponOptionsForAreas,
+  resolveCartYenPrice,
 } = sandbox.cartCouponCore;
 
 const futureLimit = Math.floor(Date.parse("2026-09-03T00:20:00+08:00") / 1000);
@@ -178,6 +180,23 @@ test("稍后再买按移入后的订单预览，但不计入当前购物车门�
   assert.equal(optionsByItem.get(active)[0].usableNow, false);
   assert.match(optionsByItem.get(active)[0].blockedReason, /还差 700日元/);
   assert.equal(optionsByItem.get(later)[0].usableNow, true);
+});
+
+test("中文价格页面从作品元数据取得精确日元现价", () => {
+  assert.equal(
+    resolveCartYenPrice(
+      { price: 0 },
+      { price: 1386, currency_price: { JPY: 1386, CNY: 58.56 } },
+    ),
+    1386,
+  );
+  assert.equal(
+    resolveCartYenPrice(
+      { price: 660 },
+      { price: 990, currency_price: { JPY: 990, CNY: 41.83 } },
+    ),
+    660,
+  );
 });
 
 test("分类、社团和站点价格上限使用作品元数据判断", () => {
