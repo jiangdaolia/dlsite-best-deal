@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.4.3
+// @version      0.4.4
 // @description  在 DLsite 页面显示史低价格，自动读取优惠券并计算最优拆单方案
 // @author       Syoius & Cassandra-fox; deal planner maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.4.3";
+  const APP_VERSION = "0.4.4";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -55,6 +55,9 @@
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.4.4": [
+      "中文等本地货币价格后紧跟显示折后日元价",
+    ],
     "0.4.3": [
       "详情页强制将“本次可到”与史低拆成上下两个独立框",
     ],
@@ -2075,19 +2078,31 @@
 
   function appendJpyPrice(host, product) {
     if (!host || !product?.price) return;
-    const target = host.matches?.(".work_price, .discount, [class*='price']")
-      ? host
-      : firstElementBySelectors([
-          ".work_price.discount",
-          ".work_price",
-          ".c-purchaseBox__value",
-          ".app-price",
-        ], host) || host;
+    const priceSelectors = [
+      ".work_price.discount",
+      ".work_price",
+      ".c-purchaseBox__value",
+      ".app-price",
+      "[data-testid*='price']",
+    ];
+    const descendants = priceSelectors
+      .flatMap((selector) => [...host.querySelectorAll(selector)]);
+    const localizedCurrency = /RMB|CNY|CN\s*¥|人民币|USD|US\s*\$|EUR|€|KRW|₩/i;
+    const localizedSymbol = /[¥￥]/;
+    const isChinesePage = /^zh(?:-|$)/i.test(document.documentElement.lang || "") ||
+      /^zh(?:-|$)/i.test(navigator.language || "");
+    const target = descendants.find((element) => {
+      const text = element.textContent || "";
+      return localizedCurrency.test(text) || (isChinesePage && localizedSymbol.test(text));
+    }) || descendants[0] || host;
     const visible = target.textContent || "";
-    if (/\bJPY\b|円/i.test(visible) || target.querySelector(".dltracker-jpy-price")) return;
+    if (host.querySelector(".dltracker-jpy-price")) return;
+    const showsLocalizedPrice = localizedCurrency.test(visible) ||
+      (isChinesePage && localizedSymbol.test(visible));
+    if (!showsLocalizedPrice && /\bJPY\b|円/i.test(visible)) return;
     const label = document.createElement("span");
     label.className = "dltracker-jpy-price";
-    label.textContent = `（折后 ${Math.round(product.price).toLocaleString("ja-JP")} JPY）`;
+    label.textContent = `（¥${Math.round(product.price).toLocaleString("ja-JP")}）`;
     target.appendChild(label);
   }
 
