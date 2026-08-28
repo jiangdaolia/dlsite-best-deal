@@ -11,10 +11,15 @@ const matched = source.match(
   /\/\/ <deal-insight-core>([\s\S]*?)\/\/ <\/deal-insight-core>/,
 );
 if (!matched) throw new Error("deal insight core markers not found");
+const formatMatched = source.match(
+  /\/\/ <deal-insight-format-core>([\s\S]*?)\/\/ <\/deal-insight-format-core>/,
+);
+if (!formatMatched) throw new Error("deal insight format core markers not found");
 
 const sandbox = {};
 vm.runInNewContext(
   `${matched[1]}
+  ${formatMatched[1]}
   globalThis.dealInsightCore = {
     normalizeDealCoupon,
     groupDealCoupons,
@@ -22,6 +27,13 @@ vm.runInNewContext(
     couponEquivalentRate,
     buildDealCouponOptions,
     calculateBestReach,
+    calculateHypotheticalPrice,
+    compareDealSortEntries,
+    dealDateMillis,
+    compactCouponCondition,
+    compactCouponExpiry,
+    compactCouponUsage,
+    compactCouponListLabel,
   };`,
   sandbox,
 );
@@ -31,6 +43,13 @@ const {
   couponMatchesDealProduct,
   buildDealCouponOptions,
   calculateBestReach,
+  calculateHypotheticalPrice,
+  compareDealSortEntries,
+  dealDateMillis,
+  compactCouponCondition,
+  compactCouponExpiry,
+  compactCouponUsage,
+  compactCouponListLabel,
 } = sandbox.dealInsightCore;
 
 const future = Math.floor(Date.parse("2026-10-01T00:00:00+08:00") / 1000);
@@ -139,4 +158,79 @@ test("指定作品、社团、站点与隐藏分类分别匹配", () => {
     customGenres: ["campaign50"],
   };
   assert.equal(groups.filter((coupon) => couponMatchesDealProduct(coupon, product)).length, 4);
+});
+
+test("日本时间到期字段会转换为绝对时间并可按中国时间显示", () => {
+  const value = dealDateMillis("2026-09-13 23:59:00");
+  assert.equal(new Date(value).toISOString(), "2026-09-13T14:59:00.000Z");
+});
+
+test("三种稍后再买排序使用各自主字段且并列保持原顺序", () => {
+  const entries = [
+    { id: "A", isNewLowest: false, reachRank: 80, hypotheticalPrice: 300, order: 0 },
+    { id: "B", isNewLowest: true, reachRank: 60, hypotheticalPrice: 200, order: 1 },
+    { id: "C", isNewLowest: true, reachRank: 80, hypotheticalPrice: 400, order: 2 },
+  ];
+  assert.deepEqual(
+    entries.toSorted((a, b) => compareDealSortEntries(a, b, "lowest")).map((x) => x.id),
+    ["B", "C", "A"],
+  );
+  assert.deepEqual(
+    entries.toSorted((a, b) => compareDealSortEntries(a, b, "reach")).map((x) => x.id),
+    ["A", "C", "B"],
+  );
+  assert.deepEqual(
+    entries.toSorted((a, b) => compareDealSortEntries(a, b, "price")).map((x) => x.id),
+    ["B", "A", "C"],
+  );
+});
+
+test("低价优先使用本次可到后的假设价格", () => {
+  assert.equal(
+    calculateHypotheticalPrice({ officialPrice: 1000 }, { totalRate: 80 }),
+    200,
+  );
+});
+
+test("列表与详情使用最终确认的紧凑券文案", () => {
+  const option = {
+    equivalentRate: 50,
+    minCount: 3,
+    minSpend: 0,
+    countShortfall: 2,
+    spendShortfall: 0,
+    repeatable: true,
+    instances: 1,
+    usageLimit: 0,
+    originals: [{ expiresAt: Date.parse("2026-09-13T14:59:00Z") }],
+    earliestExpiry: Date.parse("2026-09-13T14:59:00Z"),
+  };
+  assert.equal(compactCouponListLabel(option), "券50OFF·3部起用");
+  assert.equal(compactCouponCondition(option, true), "3部起用（还差2部）");
+  assert.equal(compactCouponUsage(option), "无限使用");
+  assert.equal(
+    compactCouponExpiry(option),
+    "9月13日 22:59中国时间到期",
+  );
+});
+
+test("同类单次券显示张数和最早到期", () => {
+  const first = Date.parse("2026-09-02T08:17:00Z");
+  const later = Date.parse("2026-09-03T08:17:00Z");
+  const option = {
+    equivalentRate: 100 / 3,
+    minCount: 1,
+    minSpend: 1200,
+    countShortfall: 0,
+    spendShortfall: 400,
+    repeatable: false,
+    instances: 15,
+    usageLimit: 0,
+    originals: [{ expiresAt: first }, { expiresAt: later }],
+    earliestExpiry: first,
+  };
+  assert.equal(compactCouponListLabel(option), "券33OFF·满1200");
+  assert.equal(compactCouponCondition(option, true), "满1,200日元（还差400日元）");
+  assert.equal(compactCouponUsage(option), "15张，每张1次");
+  assert.match(compactCouponExpiry(option), /^最早/);
 });

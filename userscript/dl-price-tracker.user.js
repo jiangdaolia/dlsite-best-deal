@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.4.0
+// @version      0.4.1
 // @description  在 DLsite 页面显示史低价格，自动读取优惠券并计算最优拆单方案
 // @author       Syoius & Cassandra-fox; deal planner maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.4.0";
+  const APP_VERSION = "0.4.1";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -39,8 +39,9 @@
   const ENABLE_WISHLIST_ACTION_PANEL = false;
   const BUY_LATER_SORT_STORAGE_KEY = "dltracker-buy-later-sort-enabled";
   const BUY_LATER_SORT_MODE_STORAGE_KEY = "dltracker-buy-later-sort-mode";
+  const BUY_LATER_SORT_MODE_LOWEST = "lowest";
+  const BUY_LATER_SORT_MODE_REACH = "reach";
   const BUY_LATER_SORT_MODE_PRICE = "price";
-  const BUY_LATER_SORT_MODE_DISCOUNT = "discount";
   const UPDATE_NOTICE_SEEN_VERSION_KEY = "dltracker-update-notice-seen-version";
   const DEAL_PLANNER_STORAGE_KEY = "dltracker-deal-planner-v1";
   const DEAL_PLANNER_MAX_ITEMS = 12;
@@ -48,12 +49,17 @@
   const DLSITE_COUPON_API_PATH = "/books/mypage/coupon/list/ajax";
   const DLSITE_PRODUCT_INFO_PATH = "/maniax/product/info/ajax";
   const PRODUCT_METADATA_TTL_MS = 30 * 60 * 1000;
-  const DEAL_CACHE_STORAGE_KEY = "dltracker-deal-insight-cache-v1";
+  const DEAL_CACHE_STORAGE_KEY = "dltracker-deal-insight-cache-v2";
   const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v1";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.4.1": [
+      "优惠券读取结果改为 5 秒临时提示，并同时显示张数与合并种类",
+      "购物车和详情页改用紧凑的活动框与优惠券框",
+      "稍后再买支持史低、本次可到和假设低价三种排序",
+    ],
     "0.4.0": [
       "浏览列表与作品详情页显示可用优惠券和三件折扣活动",
       "史低标签后追加满足条件时的“本次可到”折扣",
@@ -128,6 +134,7 @@
   const recordInFlight = new Map();
   const canonicalRjCache = new Map();
   let couponImportInFlight = null;
+  let dealCouponFetchInFlight = null;
   let importedCouponPageUrl = "";
   let dealSessionStopped = false;
   let metadataBatchUsedForUrl = "";
@@ -135,6 +142,7 @@
   const dealInsightById = new Map();
   let pendingCartAdd = null;
   let cartRefreshInFlight = null;
+  let dealToastTimer = null;
 
   function nowIso() {
     return new Date().toISOString();
@@ -1216,6 +1224,19 @@
     if (Number.isFinite(numeric) && numeric > 0) {
       return numeric > 1e12 ? numeric : numeric * 1000;
     }
+    const japanDate = String(value || "").match(
+      /^(20\d{2})[-\/]([01]?\d)[-\/]([0-3]?\d)[ T]([0-2]?\d):([0-5]\d)(?::([0-5]\d))?$/,
+    );
+    if (japanDate) {
+      return Date.UTC(
+        Number(japanDate[1]),
+        Number(japanDate[2]) - 1,
+        Number(japanDate[3]),
+        Number(japanDate[4]) - 9,
+        Number(japanDate[5]),
+        Number(japanDate[6] || 0),
+      );
+    }
     const parsed = Date.parse(String(value || "").replace(" ", "T"));
     return Number.isFinite(parsed) ? parsed : null;
   }
@@ -1439,6 +1460,27 @@
         bestCoupon?.minSpend > 0,
     };
   }
+
+  function calculateHypotheticalPrice(product, bestReach) {
+    const officialPrice = Math.max(0, dealNumber(product?.officialPrice));
+    const rate = Math.max(0, Math.min(100, dealNumber(bestReach?.totalRate)));
+    return officialPrice > 0
+      ? Math.round(officialPrice * (1 - rate / 100))
+      : Number.POSITIVE_INFINITY;
+  }
+
+  function compareDealSortEntries(a, b, mode) {
+    if (mode === "lowest" && a.isNewLowest !== b.isNewLowest) {
+      return a.isNewLowest ? -1 : 1;
+    }
+    if (mode === "reach" && a.reachRank !== b.reachRank) {
+      return b.reachRank - a.reachRank;
+    }
+    if (mode === "price" && a.hypotheticalPrice !== b.hypotheticalPrice) {
+      return a.hypotheticalPrice - b.hypotheticalPrice;
+    }
+    return a.order - b.order;
+  }
   // </deal-insight-core>
 
   function emptyDealCache() {
@@ -1500,6 +1542,21 @@
     console.warn(`[${APP_NAME}] DLsite deal requests stopped for this page: ${reason}`);
   }
 
+  function showDealToast(message, isError = false, durationMs = 5000) {
+    document.querySelector(".dltracker-deal-toast")?.remove();
+    if (dealToastTimer) clearTimeout(dealToastTimer);
+    const toast = document.createElement("div");
+    toast.className = `dltracker-deal-toast${isError ? " is-error" : ""}`;
+    toast.textContent = String(message || "");
+    document.body.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add("is-visible"));
+    dealToastTimer = setTimeout(() => {
+      toast.classList.remove("is-visible");
+      setTimeout(() => toast.remove(), 180);
+      dealToastTimer = null;
+    }, durationMs);
+  }
+
   async function fetchSameOriginText(url, label) {
     if (dealSessionStopped) throw new Error("本页请求已因风控信号停止");
     const response = await fetch(url, {
@@ -1558,27 +1615,39 @@
     if (!force && cache.coupons.loaded && !expired && !accountChanged) {
       return Array.isArray(cache.coupons.raw) ? cache.coupons.raw : [];
     }
-
-    const url = new URL(DLSITE_COUPON_API_PATH, location.origin);
-    const text = await fetchSameOriginText(url, "优惠券接口");
-    let payload;
+    if (dealCouponFetchInFlight) return dealCouponFetchInFlight;
+    dealCouponFetchInFlight = (async () => {
+      const url = new URL(DLSITE_COUPON_API_PATH, location.origin);
+      const text = await fetchSameOriginText(url, "优惠券接口");
+      let payload;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        if (/^\s*</.test(text)) stopDealRequests("优惠券接口返回网页");
+        throw new Error("优惠券接口没有返回 JSON");
+      }
+      const raw = couponArrayFromPayload(payload);
+      cache.coupons = {
+        loaded: true,
+        raw,
+        fetchedAt: Date.now(),
+        accountKey,
+        earliestExpiry: rawCouponEarliestExpiry(raw),
+      };
+      saveDealCache(cache);
+      syncPlannerCouponsFromRaw(raw);
+      showDealToast(
+        `已读取 ${raw.length} 张优惠券，合并为 ${groupDealCoupons(raw).length} 种`,
+        false,
+        5000,
+      );
+      return raw;
+    })();
     try {
-      payload = JSON.parse(text);
-    } catch {
-      if (/^\s*</.test(text)) stopDealRequests("优惠券接口返回网页");
-      throw new Error("优惠券接口没有返回 JSON");
+      return await dealCouponFetchInFlight;
+    } finally {
+      dealCouponFetchInFlight = null;
     }
-    const raw = couponArrayFromPayload(payload);
-    cache.coupons = {
-      loaded: true,
-      raw,
-      fetchedAt: Date.now(),
-      accountKey,
-      earliestExpiry: rawCouponEarliestExpiry(raw),
-    };
-    saveDealCache(cache);
-    syncPlannerCouponsFromRaw(raw);
-    return raw;
   }
 
   function invalidateCouponCacheAfterPurchase() {
@@ -1832,37 +1901,37 @@
       /(?:end_date|endDate|period_end|終了|截止|结束|까지|まで)[\s\S]{0,160}?(20\d{2})[\/-年](\d{1,2})[\/-月](\d{1,2})(?:日)?(?:[^\d]{0,12}(\d{1,2}):(\d{2}))?/i,
     );
     if (labelled) {
-      return new Date(
+      return Date.UTC(
         Number(labelled[1]),
         Number(labelled[2]) - 1,
         Number(labelled[3]),
-        Number(labelled[4] || 23),
+        Number(labelled[4] || 23) - 9,
         Number(labelled[5] || 59),
         59,
-      ).getTime();
+      );
     }
     const short = dealPlainText(html).match(
       /(?:終了|截止|结束|까지|まで)[^\n]{0,80}?(\d{1,2})[\/-月](\d{1,2})(?:日)?(?:[^\d]{0,12}(\d{1,2}):(\d{2}))?/i,
     );
     if (!short) return null;
     const now = new Date();
-    let result = new Date(
+    let result = new Date(Date.UTC(
       now.getFullYear(),
       Number(short[1]) - 1,
       Number(short[2]),
-      Number(short[3] || 23),
+      Number(short[3] || 23) - 9,
       Number(short[4] || 59),
       59,
-    );
+    ));
     if (result.getTime() < Date.now() - 24 * 60 * 60 * 1000) {
-      result = new Date(
+      result = new Date(Date.UTC(
         now.getFullYear() + 1,
         Number(short[1]) - 1,
         Number(short[2]),
-        Number(short[3] || 23),
+        Number(short[3] || 23) - 9,
         Number(short[4] || 59),
         59,
-      );
+      ));
     }
     return result.getTime();
   }
@@ -1872,7 +1941,7 @@
     if (!key) return null;
     const cache = loadDealCache();
     const cached = cache.bulkRules[key];
-    if (cached && (!cached.endsAt || cached.endsAt > Date.now())) return cached;
+    if (cached && (!cached.cacheUntil || cached.cacheUntil > Date.now())) return cached;
     try {
       const html = await fetchSameOriginText(
         new URL(dealCampaignPath(product, key), location.origin),
@@ -1892,8 +1961,9 @@
         key,
         discountRate,
         minCount,
+        expiresAt: parsedEnd,
         // 未识别到结束时间时只缓存 24 小时，宁可低频复核，也不沿用过期活动。
-        endsAt: parsedEnd || Date.now() + 24 * 60 * 60 * 1000,
+        cacheUntil: parsedEnd || Date.now() + 24 * 60 * 60 * 1000,
         fetchedAt: Date.now(),
       };
       cache.bulkRules[key] = rule;
@@ -1998,35 +2068,108 @@
 
   function appendJpyPrice(host, product) {
     if (!host || !product?.price) return;
-    const visible = host.textContent || "";
-    if (/\bJPY\b|円/i.test(visible) || host.querySelector(".dltracker-jpy-price")) return;
+    const target = host.matches?.(".work_price, .discount, [class*='price']")
+      ? host
+      : firstElementBySelectors([
+          ".work_price.discount",
+          ".work_price",
+          ".c-purchaseBox__value",
+          ".app-price",
+        ], host) || host;
+    const visible = target.textContent || "";
+    if (/\bJPY\b|円/i.test(visible) || target.querySelector(".dltracker-jpy-price")) return;
     const label = document.createElement("span");
     label.className = "dltracker-jpy-price";
     label.textContent = `（折后 ${Math.round(product.price).toLocaleString("ja-JP")} JPY）`;
-    host.appendChild(label);
+    target.appendChild(label);
   }
 
-  function formatCouponBadge(option) {
-    return `券${Math.round(option.equivalentRate)}%`;
+  // <deal-insight-format-core>
+  function compactOff(rate, prefix = "") {
+    return `${prefix}${Math.round(dealNumber(rate))}OFF`;
   }
+
+  function compactCouponCondition(option, includeProgress = false) {
+    const parts = [];
+    if (option.minCount > 1) {
+      let text = `${option.minCount}部起用`;
+      if (includeProgress) {
+        text += option.countShortfall > 0
+          ? `（还差${option.countShortfall}部）`
+          : "（已满足）";
+      }
+      parts.push(text);
+    }
+    if (option.minSpend > 0) {
+      let text = `满${Math.round(option.minSpend).toLocaleString("ja-JP")}日元`;
+      if (includeProgress) {
+        text += option.spendShortfall > 0
+          ? `（还差${Math.round(option.spendShortfall).toLocaleString("ja-JP")}日元）`
+          : "（已满足）";
+      }
+      parts.push(text);
+    }
+    return parts.length ? parts.join("＋") : "无门槛";
+  }
+
+  function chinaExpiryText(value, earliest = false) {
+    if (!value) return "到期时间未确认";
+    const parts = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(new Date(value));
+    const pick = (type) => parts.find((part) => part.type === type)?.value || "";
+    return `${earliest ? "最早" : ""}${Number(pick("month"))}月${Number(pick("day"))}日 ${pick("hour")}:${pick("minute")}中国时间到期`;
+  }
+
+  function compactCouponExpiry(option) {
+    const expiries = new Set((option.originals || [])
+      .map((original) => original.expiresAt)
+      .filter(Boolean));
+    return chinaExpiryText(option.earliestExpiry, expiries.size > 1);
+  }
+
+  function compactCouponUsage(option) {
+    if (option.repeatable) return "无限使用";
+    if (option.usageLimit > 0) {
+      return `${option.instances}张，已用${option.usageCount}/${option.usageLimit}`;
+    }
+    return `${option.instances}张，每张1次`;
+  }
+
+  function compactCouponListLabel(option) {
+    const condition = option.minCount > 1
+      ? `${option.minCount}部起用`
+      : option.minSpend > 0
+        ? `满${Math.round(option.minSpend)}`
+        : "";
+    return `${compactOff(option.equivalentRate, "券")}${condition ? `·${condition}` : ""}`;
+  }
+  // </deal-insight-format-core>
 
   function renderCompactInsight(host, insight) {
     if (!host) return;
     host.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`)?.remove();
+    if (!insight.bulkRule && !insight.couponOptions.length && !insight.partial) return;
     const box = document.createElement("div");
     box.className = `${DEAL_INSIGHT_CLASSNAME} dltracker-deal-compact`;
-    const activity = document.createElement("div");
-    activity.className = "dltracker-deal-row dltracker-activity-row";
-    activity.textContent = insight.bulkRule
-      ? `${insight.bulkRule.minCount}件${Math.round(insight.bulkRule.discountRate)}%`
-      : "活动：—";
-    const coupons = document.createElement("div");
-    coupons.className = "dltracker-deal-row dltracker-coupon-row";
-    const visible = insight.couponOptions.slice(0, 3).map(formatCouponBadge);
-    coupons.textContent = visible.length
-      ? `${visible.join("  ")}${insight.couponOptions.length > 3 ? `  +${insight.couponOptions.length - 3}` : ""}`
-      : "优惠券：—";
-    box.append(activity, coupons);
+    if (insight.bulkRule) {
+      const activity = document.createElement("div");
+      activity.className = "dltracker-deal-row dltracker-activity-row";
+      activity.textContent = `${insight.bulkRule.minCount}件${compactOff(insight.bulkRule.discountRate)}`;
+      box.appendChild(activity);
+    }
+    if (insight.couponOptions.length) {
+      const coupons = document.createElement("div");
+      coupons.className = "dltracker-deal-row dltracker-coupon-row";
+      const visible = insight.couponOptions.slice(0, 3).map(compactCouponListLabel);
+      coupons.textContent = `${visible.join("  ")}${insight.couponOptions.length > 3 ? `  +${insight.couponOptions.length - 3}` : ""}`;
+      box.appendChild(coupons);
+    }
     if (insight.partial) {
       const partial = document.createElement("span");
       partial.className = "dltracker-deal-partial";
@@ -2036,95 +2179,53 @@
     host.appendChild(box);
   }
 
-  function couponSummary(option) {
-    const discount = option.discountType === "percent"
-      ? `${Math.round(option.discount)}% OFF`
-      : `减 ${Math.round(option.discount)} 日元（按门槛折算约 ${Math.round(option.equivalentRate)}%）`;
-    const threshold = option.minCount > 1
-      ? `至少 ${option.minCount} 部适用作品`
-      : option.minSpend > 0
-        ? `订单满 ${Math.round(option.minSpend)} 日元`
-        : "1 部起用";
-    return `${discount}；${threshold}`;
-  }
-
   function renderDetailInsight(host, insight) {
     if (!host) return;
     host.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`)?.remove();
+    if (!insight.bulkRule && !insight.couponOptions.length && !insight.partial) return;
     const box = document.createElement("section");
     box.className = `${DEAL_INSIGHT_CLASSNAME} dltracker-deal-detail`;
-    const activity = document.createElement("div");
-    activity.className = "dltracker-deal-section dltracker-activity-row";
-    const activityTitle = document.createElement("strong");
-    activityTitle.textContent = "平台活动";
-    const cartBulkCount = insight.cartProducts.filter((item) =>
-      item.bulkbuyKey && item.bulkbuyKey === insight.product.bulkbuyKey,
-    ).length;
-    const activityText = document.createElement("span");
     if (insight.bulkRule) {
+      const activity = document.createElement("div");
+      activity.className = "dltracker-deal-section dltracker-activity-row";
+      const activityTitle = document.createElement("strong");
+      activityTitle.textContent = "平台活动";
+      const cartBulkCount = insight.cartProducts.filter((item) =>
+        item.bulkbuyKey && item.bulkbuyKey === insight.product.bulkbuyKey,
+      ).length;
       const shortfall = Math.max(0, insight.bulkRule.minCount - cartBulkCount);
-      activityText.textContent = `${insight.bulkRule.minCount} 件 ${Math.round(insight.bulkRule.discountRate)}% OFF；` +
-        (shortfall ? `当前购物车还差 ${shortfall} 件` : "当前购物车已满足件数");
-    } else {
-      activityText.textContent = "此作品未确认到三件折扣活动";
+      const activityText = document.createElement("span");
+      activityText.textContent = [
+        `${insight.bulkRule.minCount}件${compactOff(insight.bulkRule.discountRate)}`,
+        shortfall ? `还差${shortfall}件` : "已满足",
+        chinaExpiryText(insight.bulkRule.expiresAt),
+      ].join("｜");
+      activity.append(activityTitle, activityText);
+      box.appendChild(activity);
     }
-    activity.append(activityTitle, activityText);
-
-    const couponSection = document.createElement("div");
-    couponSection.className = "dltracker-deal-section dltracker-coupon-row";
-    const couponTitle = document.createElement("strong");
-    couponTitle.textContent = "优惠券（每个订单只能使用一张）";
-    couponSection.appendChild(couponTitle);
-    if (!insight.couponOptions.length) {
-      const empty = document.createElement("span");
-      empty.textContent = "未发现此作品可用的优惠券";
-      couponSection.appendChild(empty);
+    if (insight.couponOptions.length) {
+      const couponSection = document.createElement("div");
+      couponSection.className = "dltracker-deal-section dltracker-coupon-row";
+      const couponTitle = document.createElement("strong");
+      couponTitle.textContent = "可用优惠券";
+      couponSection.appendChild(couponTitle);
+      for (const option of insight.couponOptions) {
+        const line = document.createElement("div");
+        line.className = "dltracker-coupon-line";
+        line.textContent = [
+          compactOff(option.equivalentRate),
+          compactCouponCondition(option, true),
+          compactCouponUsage(option),
+          compactCouponExpiry(option),
+        ].join("｜");
+        couponSection.appendChild(line);
+      }
+      box.appendChild(couponSection);
     }
-    for (const option of insight.couponOptions) {
-      const details = document.createElement("details");
-      details.className = "dltracker-coupon-detail";
-      const summary = document.createElement("summary");
-      const progress = option.minSpend > 0
-        ? option.spendShortfall > 0
-          ? `购物车还差 ${Math.round(option.spendShortfall)} 日元`
-          : "购物车已满额"
-        : option.minCount > 1
-          ? option.countShortfall > 0
-            ? `购物车还差 ${option.countShortfall} 部适用作品`
-            : "购物车已满足件数"
-          : "当前作品适用";
-      summary.textContent = `${formatCouponBadge(option)} · ${couponSummary(option)} · ${progress}`;
-      const body = document.createElement("div");
-      body.className = "dltracker-coupon-original";
-      const expiry = option.earliestExpiry
-        ? new Date(option.earliestExpiry).toLocaleString("zh-CN", { hour12: false })
-        : "未提供";
-      body.textContent = [
-        `数量：${option.instances} 张；${option.repeatable ? "期限内可重复使用" : "每张一次"}`,
-        option.usageLimit > 0
-          ? `使用次数：${option.usageCount}/${option.usageLimit}`
-          : "",
-        `最早到期：${expiry}`,
-        "当前作品即使已有平台折扣，仍判定为可用。",
-        "可与平台三件折扣叠加；不可与另一张优惠券叠加。",
-        option.fixedOrderApproximation || (option.discountType === "fixed" && option.minSpend > 0)
-          ? "固定金额券的折算百分比是订单级近似，不保证每部作品都达到该比例。"
-          : "",
-        ...option.originals.map((original) => {
-          const originalExpiry = original.expiresAt
-            ? new Date(original.expiresAt).toLocaleString("zh-CN", { hour12: false })
-            : "未提供";
-          return `[${original.id}] ${original.name}\n到期：${originalExpiry}\n${original.info}\n${original.conditionInfo}`;
-        }),
-      ].filter(Boolean).join("\n");
-      details.append(summary, body);
-      couponSection.appendChild(details);
-    }
-    box.append(activity, couponSection);
     if (insight.partial) {
       const partial = document.createElement("div");
       partial.className = "dltracker-deal-partial";
-      partial.textContent = "部分优惠未确认：作品隐藏条件读取失败，本页不会自动重试。";
+      partial.textContent = "部分优惠未确认";
       box.appendChild(partial);
     }
     host.appendChild(box);
@@ -2165,6 +2266,12 @@
     const cards = collectBrowseCards();
     if (!cards.length) return;
     const metadata = await ensureProductMetadata(cards.map((entry) => entry.id));
+    const enrichedCartProducts = cartProducts.map((item) => ({
+      ...item,
+      ...(metadata.get(item.id) || {}),
+      id: item.id,
+      price: item.price || metadata.get(item.id)?.price || 0,
+    }));
     // 活动页同源请求也保持串行，避免列表上出现并发访问。
     await mapWithConcurrency(cards, 1, async ({ id, node }) => {
       const priceHost = findBrowsePriceHost(node);
@@ -2191,8 +2298,12 @@
           )
         : coupons;
       appendJpyPrice(priceHost, product);
-      const insight = await buildInsight(product, usableCoupons, cartProducts, partial);
-      renderCompactInsight(priceHost, insight);
+      const insight = await buildInsight(product, usableCoupons, enrichedCartProducts, partial);
+      if (isCartPage(location.href)) {
+        renderDetailInsight(priceHost, insight);
+      } else {
+        renderCompactInsight(priceHost, insight);
+      }
 
       if (/^[RB]J/i.test(id) && !node.querySelector(`.${UI_CLASSNAME}`)) {
         const historyHost = document.createElement("div");
@@ -2246,6 +2357,8 @@
         rawCoupons = await ensureDealCoupons(forceCouponRefresh);
       } catch (error) {
         console.warn(`[${APP_NAME}] coupon insight load failed:`, error);
+        stopDealRequests("优惠券读取失败");
+        showDealToast("优惠券读取失败，本页已停止自动请求", true, 8000);
       }
       const coupons = groupDealCoupons(rawCoupons);
       const cartSnapshot = await ensureCartSnapshot();
@@ -2254,44 +2367,22 @@
         await enhanceProductDealDetail(coupons, cartProducts);
       }
       await enhanceGenericBrowseCards(coupons, cartProducts);
+      if (isCartPage(location.href)) await sortBuyLaterItems();
     })().finally(() => {
       insightBootstrapInFlight = null;
     });
     return insightBootstrapInFlight;
   }
 
-  function renderCouponImportStatus(status, isError = false) {
-    let box = document.querySelector(".dltracker-coupon-import-status");
-    if (!box) {
-      box = document.createElement("div");
-      box.className = "dltracker-coupon-import-status";
-      (document.querySelector("#main_inner, main") || document.body).prepend(box);
-    }
-    box.classList.toggle("is-error", isError);
-    box.textContent = status;
-  }
-
   async function importDlsiteCoupons() {
     if (couponImportInFlight) return couponImportInFlight;
     couponImportInFlight = (async () => {
-      renderCouponImportStatus("最优买法：正在从当前账号读取优惠券…");
       const raw = await ensureDealCoupons(false);
-      const imported = syncPlannerCouponsFromRaw(raw);
-      const state = getPlannerState();
-      renderCouponImportStatus(
-        `最优买法：已自动导入 ${imported.length} 张有效优惠券` +
-          (state.lastCouponImport.repeatableCount
-            ? `，其中 ${state.lastCouponImport.repeatableCount} 张期限内可重复使用`
-            : "") +
-          "。无需打开“适用作品”长列表。",
-      );
-      return imported;
+      return syncPlannerCouponsFromRaw(raw);
     })().catch((error) => {
       console.warn(`[${APP_NAME}] import coupons failed:`, error);
-      renderCouponImportStatus(
-        `最优买法：自动读取失败（${error instanceof Error ? error.message : String(error)}）。请确认已登录后刷新本页。`,
-        true,
-      );
+      stopDealRequests("优惠券读取失败");
+      showDealToast("优惠券读取失败，本页已停止自动请求", true, 8000);
       return [];
     }).finally(() => {
       couponImportInFlight = null;
@@ -2997,20 +3088,25 @@
   function getBuyLaterSortMode() {
     try {
       const raw = localStorage.getItem(BUY_LATER_SORT_MODE_STORAGE_KEY);
-      if (raw === BUY_LATER_SORT_MODE_DISCOUNT) {
-        return BUY_LATER_SORT_MODE_DISCOUNT;
-      }
-      return BUY_LATER_SORT_MODE_PRICE;
+      if ([
+        BUY_LATER_SORT_MODE_LOWEST,
+        BUY_LATER_SORT_MODE_REACH,
+        BUY_LATER_SORT_MODE_PRICE,
+      ].includes(raw)) return raw;
+      // 旧版“折扣优先”迁移为口径更明确的“当前最低可达优先”。
+      if (raw === "discount") return BUY_LATER_SORT_MODE_REACH;
+      return BUY_LATER_SORT_MODE_REACH;
     } catch {
-      return BUY_LATER_SORT_MODE_PRICE;
+      return BUY_LATER_SORT_MODE_REACH;
     }
   }
 
   function setBuyLaterSortMode(mode) {
-    const normalized =
-      mode === BUY_LATER_SORT_MODE_DISCOUNT
-        ? BUY_LATER_SORT_MODE_DISCOUNT
-        : BUY_LATER_SORT_MODE_PRICE;
+    const normalized = [
+      BUY_LATER_SORT_MODE_LOWEST,
+      BUY_LATER_SORT_MODE_REACH,
+      BUY_LATER_SORT_MODE_PRICE,
+    ].includes(mode) ? mode : BUY_LATER_SORT_MODE_REACH;
     try {
       localStorage.setItem(BUY_LATER_SORT_MODE_STORAGE_KEY, normalized);
     } catch {
@@ -3076,7 +3172,7 @@
       input.type = "checkbox";
 
       const text = document.createElement("span");
-      text.textContent = "优先显示史低作品";
+      text.textContent = "启用排序";
 
       toggle.appendChild(input);
       toggle.appendChild(text);
@@ -3085,13 +3181,14 @@
       modeWrap.className = "dltracker-buy-later-mode";
 
       const modeLabel = document.createElement("span");
-      modeLabel.textContent = "次级排序";
+      modeLabel.textContent = "排序方式";
 
       const modeSelect = document.createElement("select");
       modeSelect.className = "dltracker-buy-later-mode-select";
       modeSelect.innerHTML = `
+        <option value="${BUY_LATER_SORT_MODE_LOWEST}">史低优先</option>
+        <option value="${BUY_LATER_SORT_MODE_REACH}">当前最低可达优先</option>
         <option value="${BUY_LATER_SORT_MODE_PRICE}">低价优先</option>
-        <option value="${BUY_LATER_SORT_MODE_DISCOUNT}">折扣优先</option>
       `;
 
       const updateState = () => {
@@ -3238,27 +3335,9 @@
     );
   }
 
-  function getRecordDiscountScore(record) {
-    const discountRate = safeNumber(record?.discountRate);
-    if (typeof discountRate === "number" && discountRate > 0) {
-      return discountRate;
-    }
-
-    const regularPrice = safeNumber(record?.regularPrice);
-    const lowestPrice = safeNumber(record?.lowestPrice);
-    if (
-      typeof regularPrice === "number" &&
-      typeof lowestPrice === "number" &&
-      regularPrice > 0
-    ) {
-      return Math.max(0, (1 - lowestPrice / regularPrice) * 100);
-    }
-
-    return 0;
-  }
-
-  function isRecordNewLowest(record) {
-    const compareCurrent = getRecordCompareCurrentPrice(record);
+  function isRecordNewLowest(record, currentPrice) {
+    const compareCurrent = safeNumber(currentPrice) ??
+      getRecordCompareCurrentPrice(record);
     const lowestPrice = safeNumber(record?.lowestPrice);
     if (typeof compareCurrent !== "number" || typeof lowestPrice !== "number") {
       return false;
@@ -3285,46 +3364,30 @@
 
       const rjCode = extractRjCodeFromCartItem(owner);
       const record = rjCode ? await getPriceRecord(rjCode) : null;
-      const isNewLowest = isRecordNewLowest(record);
-      const compareCurrent = getRecordCompareCurrentPrice(record);
-      const currentRank =
-        typeof compareCurrent === "number"
-          ? compareCurrent
-          : Number.POSITIVE_INFINITY;
-      const discountRank = getRecordDiscountScore(record);
+      const insight = rjCode
+        ? dealInsightById.get(String(rjCode).toUpperCase())
+        : null;
+      const isNewLowest = isRecordNewLowest(record, insight?.product?.price);
+      const reachRank = dealNumber(insight?.bestReach?.totalRate, -1);
+      const hypotheticalPrice = reachRank >= 0
+        ? calculateHypotheticalPrice(insight?.product, insight?.bestReach)
+        : Number.POSITIVE_INFINITY;
+      const originalOrder = Number(owner.dataset.dltrackerBuyLaterOrder);
 
       if (!grouped.has(parent)) grouped.set(parent, []);
       grouped.get(parent).push({
         node: owner,
         isNewLowest,
-        currentRank,
-        discountRank,
-        order: grouped.get(parent).length,
+        reachRank,
+        hypotheticalPrice,
+        order: Number.isFinite(originalOrder)
+          ? originalOrder
+          : grouped.get(parent).length,
       });
     }
 
     for (const [parent, entries] of grouped.entries()) {
-      entries.sort((a, b) => {
-        if (a.isNewLowest !== b.isNewLowest) {
-          return a.isNewLowest ? -1 : 1;
-        }
-        if (sortMode === BUY_LATER_SORT_MODE_DISCOUNT) {
-          if (a.discountRank !== b.discountRank) {
-            return b.discountRank - a.discountRank;
-          }
-          if (a.currentRank !== b.currentRank) {
-            return a.currentRank - b.currentRank;
-          }
-        } else {
-          if (a.currentRank !== b.currentRank) {
-            return a.currentRank - b.currentRank;
-          }
-          if (a.discountRank !== b.discountRank) {
-            return b.discountRank - a.discountRank;
-          }
-        }
-        return a.order - b.order;
-      });
+      entries.sort((a, b) => compareDealSortEntries(a, b, sortMode));
 
       for (const entry of entries) {
         parent.appendChild(entry.node);
@@ -4705,11 +4768,10 @@
 .dltracker-deal-detail {
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  padding: 9px;
-  border: 1px solid #dfdfdf;
-  border-radius: 8px;
-  background: #fff;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   text-align: left;
 }
 
@@ -4718,7 +4780,7 @@
   flex-direction: column;
   align-items: stretch;
   gap: 4px;
-  padding: 7px 8px;
+  padding: 5px 7px;
   border-radius: 6px;
 }
 
@@ -4726,30 +4788,43 @@
   font-size: 12px;
 }
 
-.dltracker-coupon-detail {
+.dltracker-coupon-line + .dltracker-coupon-line {
+  padding-top: 3px;
   border-top: 1px dashed rgba(128, 80, 13, 0.25);
-  padding-top: 4px;
-}
-
-.dltracker-coupon-detail summary {
-  cursor: pointer;
-  font-weight: 650;
-}
-
-.dltracker-coupon-original {
-  margin-top: 5px;
-  padding: 6px;
-  border-radius: 5px;
-  background: rgba(255, 255, 255, 0.7);
-  color: #5b4a31;
-  font-weight: 400;
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
 .dltracker-deal-partial {
   color: #a14716;
   font-size: 10px;
+}
+
+.dltracker-deal-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+  z-index: 2147483646;
+  max-width: min(88vw, 520px);
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(34, 96, 58, 0.96);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  opacity: 0;
+  transform: translate(-50%, 8px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  pointer-events: none;
+}
+
+.dltracker-deal-toast.is-visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.dltracker-deal-toast.is-error {
+  background: rgba(178, 45, 45, 0.97);
 }
 
 .${UI_CLASSNAME} .dltracker-btn {
@@ -4925,23 +5000,6 @@
   margin-top: 2px;
   color: #666;
   font-size: 12px;
-}
-
-.dltracker-coupon-import-status {
-  margin: 12px 0;
-  padding: 10px 13px;
-  border: 1px solid #9ae6b4;
-  border-radius: 8px;
-  background: #f0fff4;
-  color: #22543d;
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.dltracker-coupon-import-status.is-error {
-  border-color: #feb2b2;
-  background: #fff5f5;
-  color: #9b2c2c;
 }
 
 .dltracker-deal-planner {
