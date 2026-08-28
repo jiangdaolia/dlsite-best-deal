@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.4.4
+// @version      0.4.5
 // @description  在 DLsite 页面显示史低价格，自动读取优惠券并计算最优拆单方案
 // @author       Syoius & Cassandra-fox; deal planner maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.4.4";
+  const APP_VERSION = "0.4.5";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -55,6 +55,9 @@
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.4.5": [
+      "折后日元价简化为“880円”格式",
+    ],
     "0.4.4": [
       "中文等本地货币价格后紧跟显示折后日元价",
     ],
@@ -2102,7 +2105,7 @@
     if (!showsLocalizedPrice && /\bJPY\b|円/i.test(visible)) return;
     const label = document.createElement("span");
     label.className = "dltracker-jpy-price";
-    label.textContent = `（¥${Math.round(product.price).toLocaleString("ja-JP")}）`;
+    label.textContent = `${Math.round(product.price).toLocaleString("ja-JP")}円`;
     target.appendChild(label);
   }
 
