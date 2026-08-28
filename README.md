@@ -4,6 +4,16 @@
 
 > 史低/当前价格数据来源：[DLwatcher](https://dlwatcher.com/)
 
+## 优惠券读取器：验证 A 版
+
+目前先用独立脚本验证 DLsite 登录账号实际返回的优惠券数据结构。A 版只在“我的优惠券”页面运行，并且脚本自身只发起一次 DLsite 同源结构化请求；它不会打开优惠券详情、不会翻适用作品列表、不会访问单个作品，也不会请求 DLwatcher。
+
+**[直接安装优惠券读取器 A 版](https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/main/userscript/dlsite-coupon-reader.user.js)**
+
+Via 等支持 `.user.js` 的浏览器可以直接打开链接安装。安装后登录 DLsite 并打开“我的优惠券”页面，脚本会显示接口券数、页面券数、数量核对结果和字段结构摘要。随后点击“下载诊断 JSON”或“复制诊断 JSON”，把结果私下发回用于开发 B 版。
+
+诊断 JSON 不包含 Cookie、认证请求头、登录凭据、邮箱或账号身份字段，但会按当前验证方案保留真实优惠券 ID，因此不要把文件公开上传。若浏览器里仍启用了旧版“最优买法”脚本，它也可能自行读取优惠券；进行“一次请求”验收时只启用本读取器。
+
 ## 当前功能
 
 - DLsite RJ（同人）/BJ（乙女）商品页显示价格标签（当前价、史低、折扣）
@@ -67,6 +77,7 @@ node --test tests/deal-optimizer.test.mjs
 
 ```text
 userscript/
+  dlsite-coupon-reader.user.js
   dl-price-tracker.user.js
 tests/
   deal-optimizer.test.mjs
