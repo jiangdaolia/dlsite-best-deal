@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 优惠券读取器（验证 A 版）
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.2.2
+// @version      0.2.3
 // @description  读取账号优惠券，在购物车补充日元现价并按优惠力度标记可用券
 // @author       Syoius & Cassandra-fox; coupon reader maintained by jiangdaolia
 // @license      MIT
@@ -27,7 +27,7 @@
   // This script intentionally contains no price-history code and never submits orders.
 
   const APP_NAME = "DLsite 优惠券读取器";
-  const APP_VERSION = "0.2.0";
+  const APP_VERSION = "0.2.3";
   const ROOT_ID = "dlsite-coupon-reader-a";
   const STYLE_ID = `${ROOT_ID}-style`;
   const API_PATH = "/books/mypage/coupon/list/ajax";
@@ -1234,7 +1234,13 @@
     }
   }
 
-  function buildCartCouponOptions(items, groups, metadataById, cartSubtotal) {
+  function buildCartCouponOptions(
+    items,
+    groups,
+    metadataById,
+    cartSubtotal,
+    subjectItems = items,
+  ) {
     const contexts = groups.map((group) => {
       const matchingIds = new Set(
         items
@@ -1249,9 +1255,15 @@
     });
 
     const result = new Map();
-    for (const item of items) {
+    for (const item of subjectItems) {
       const options = contexts
-        .filter((context) => context.matchingIds.has(item.id))
+        .filter((context) =>
+          couponMatchesCartProduct(
+            context.group,
+            item,
+            metadataById.get(item.id),
+          ),
+        )
         .map((context) => {
           const usableNow = context.countSatisfied && context.spendSatisfied;
           let blockedReason = "";
@@ -1288,16 +1300,15 @@
       optionsByItem.set(item, activeOptions.get(item.id) || []);
     }
     for (const item of items.filter((candidate) => candidate.area === "later")) {
-      // “稍后再买”不属于当前订单。仅预览把这一部移入后，订单会有哪些券可用。
-      const hypotheticalItems = [...activeItems, { ...item, area: "active" }];
-      const hypotheticalSubtotal = activeSubtotal + item.price;
-      const hypotheticalOptions = buildCartCouponOptions(
-        hypotheticalItems,
+      // 稍后再买作品只作为展示对象，不增加当前订单金额或件数。
+      const laterOptions = buildCartCouponOptions(
+        activeItems,
         groups,
         metadataById,
-        hypotheticalSubtotal,
+        activeSubtotal,
+        [item],
       );
-      optionsByItem.set(item, hypotheticalOptions.get(item.id) || []);
+      optionsByItem.set(item, laterOptions.get(item.id) || []);
     }
 
     return { activeItems, activeSubtotal, optionsByItem };
@@ -1378,7 +1389,7 @@
             : (optionsByItem.get(item) || []).filter((option) => option.usableNow).length),
         0,
       );
-      const laterPreviewCount = items.reduce(
+      const laterReadyCount = items.reduce(
         (sum, item) =>
           sum +
           (item.area === "later"
@@ -1395,7 +1406,7 @@
       } else {
         setCartStatus(
           status,
-          `完成：${rawCoupons.length} 张券归为 ${groups.length} 种；立即购买找到 ${activeUsableOptionCount} 个当前可用组合，稍后再买找到 ${laterPreviewCount} 个移入后可用组合。每单仍只能使用一张券。`,
+          `完成：${rawCoupons.length} 张券归为 ${groups.length} 种；立即购买找到 ${activeUsableOptionCount} 个当前可用组合，稍后再买找到 ${laterReadyCount} 个当前门槛已满足的适用组合。稍后再买不计入金额或件数，每单仍只能使用一张券。`,
           "success",
         );
       }
@@ -1642,18 +1653,18 @@
     const heading = element("div", "dlcr-cart-card-heading");
     if (usable.length) {
       heading.appendChild(
-        element("strong", "", isLater ? `移入后可用券 ${usable.length} 种` : `可用券 ${usable.length} 种`),
+        element("strong", "", isLater ? `当前门槛已满足 ${usable.length} 种` : `可用券 ${usable.length} 种`),
       );
       heading.appendChild(
         element(
           "span",
           "dlcr-cart-best",
-          `${isLater ? "移入后最佳" : "最佳"} ${formatEquivalentRate(usable[0].equivalentRate)} OFF`,
+          `最佳 ${formatEquivalentRate(usable[0].equivalentRate)} OFF`,
         ),
       );
     } else {
       heading.appendChild(
-        element("strong", "", isLater ? "移入后仍未满足用券条件" : "暂未发现当前可用券"),
+        element("strong", "", isLater ? "适用券的当前门槛未满足" : "暂未发现当前可用券"),
       );
     }
     card.appendChild(heading);
@@ -1662,7 +1673,7 @@
         element(
           "div",
           "dlcr-cart-area-note",
-          "稍后再买不计入当前订单；以下按“只把这部移入立即购买”预览。",
+          "稍后再买不计入当前订单；下列金额和件数门槛只按立即购买区计算。",
         ),
       );
     }
@@ -1682,7 +1693,7 @@
       const content = element("div", "dlcr-cart-option-content");
       content.appendChild(element("div", "dlcr-cart-option-name", option.displayName));
       const details = [];
-      if (isLater && option.usableNow) details.push("需先移入立即购买");
+      if (isLater && option.usableNow) details.push("当前门槛已满足");
       if (option.instances.length > 1) details.push(`共 ${option.instances.length} 张`);
       details.push(option.multipleUse ? "期限内无限使用" : "每张一次");
       if (option.minItems > 1) details.push(`至少 ${option.minItems} 部适用作品`);

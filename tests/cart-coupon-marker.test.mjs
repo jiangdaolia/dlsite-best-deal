@@ -167,7 +167,7 @@ test("未满足满减金额或适用作品数量时显示为暂不可用", () =>
   assert.ok(options.some((option) => /还差 300日元/.test(option.blockedReason)));
 });
 
-test("稍后再买按移入后的订单预览，但不计入当前购物车门槛", () => {
+test("稍后再买作品不参与满减金额或件数门槛", () => {
   const groups = groupCartCoupons([paymentCoupon(0)], now);
   const active = { id: "RJ200001", price: 500, area: "active" };
   const later = { id: "RJ200002", price: 800, area: "later" };
@@ -179,7 +179,8 @@ test("稍后再买按移入后的订单预览，但不计入当前购物车门�
   assert.equal(activeSubtotal, 500);
   assert.equal(optionsByItem.get(active)[0].usableNow, false);
   assert.match(optionsByItem.get(active)[0].blockedReason, /还差 700日元/);
-  assert.equal(optionsByItem.get(later)[0].usableNow, true);
+  assert.equal(optionsByItem.get(later)[0].usableNow, false);
+  assert.match(optionsByItem.get(later)[0].blockedReason, /还差 700日元/);
 });
 
 test("中文价格页面从作品元数据取得精确日元现价", () => {

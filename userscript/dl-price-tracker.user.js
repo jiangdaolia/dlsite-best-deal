@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.4.6
-// @description  在 DLsite 页面显示史低价格，自动读取优惠券并计算最优拆单方案
-// @author       Syoius & Cassandra-fox; deal planner maintained by jiangdaolia
+// @version      0.5.0
+// @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
+// @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
 // @match        https://www.dlsite.com/*
 // @run-at       document-idle
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.4.6";
+  const APP_VERSION = "0.5.0";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -50,11 +50,17 @@
   const DLSITE_PRODUCT_INFO_PATH = "/maniax/product/info/ajax";
   const PRODUCT_METADATA_TTL_MS = 30 * 60 * 1000;
   const DEAL_CACHE_STORAGE_KEY = "dltracker-deal-insight-cache-v2";
-  const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v1";
+  const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v2";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.5.0": [
+      "“本次可到”改为价格加圆形 OFF 标签，与史低同格式",
+      "满1200减400和三件活动的门槛不再计入稍后再买作品",
+      "移除需要手填规则的最优拆单规划器",
+      "浏览列表的活动和优惠券放在价格趋势下方",
+    ],
     "0.4.6": [
       "所有页面的“本次可到”都与史低拆框换行，并防止移动端溢出",
     ],
@@ -1651,7 +1657,6 @@
         earliestExpiry: rawCouponEarliestExpiry(raw),
       };
       saveDealCache(cache);
-      syncPlannerCouponsFromRaw(raw);
       showDealToast(
         `已读取 ${raw.length} 张优惠券，合并为 ${groupDealCoupons(raw).length} 种`,
         false,
@@ -2270,6 +2275,22 @@
     host.appendChild(box);
   }
 
+  function createBestReachBadge(insight) {
+    const badge = document.createElement("div");
+    badge.className = "dltracker-chip dltracker-chip-hot dltracker-best-reach-badge";
+    const price = calculateHypotheticalPrice(insight?.product, insight?.bestReach);
+    const text = document.createElement("span");
+    text.className = "dltracker-chip-text";
+    text.textContent = Number.isFinite(price)
+      ? `本次可到 ${toYen(price)}`
+      : "本次可到";
+    const off = document.createElement("span");
+    off.className = "dltracker-off-badge";
+    off.textContent = `${Math.round(insight?.bestReach?.totalRate || 0)}OFF`;
+    badge.append(text, off);
+    return badge;
+  }
+
   function refreshHistoryReachBadges(id) {
     const insight = dealInsightById.get(String(id).toUpperCase());
     for (const card of document.querySelectorAll(
@@ -2277,9 +2298,7 @@
     )) {
       card.querySelector(".dltracker-best-reach-badge")?.remove();
       if (!insight?.bestReach?.totalRate) continue;
-      const badge = document.createElement("div");
-      badge.className = "dltracker-best-reach-badge";
-      badge.textContent = `本次可到${Math.round(insight.bestReach.totalRate)}% OFF`;
+      const badge = createBestReachBadge(insight);
       const chip = card.querySelector(".dltracker-history-chip");
       if (chip) {
         chip?.insertAdjacentElement("afterend", badge);
@@ -2345,8 +2364,6 @@
       const insight = await buildInsight(product, usableCoupons, enrichedCartProducts, partial);
       if (isCartPage(location.href)) {
         renderDetailInsight(priceHost, insight);
-      } else {
-        renderCompactInsight(priceHost, insight);
       }
 
       if (/^[RB]J/i.test(id) && !node.querySelector(`.${UI_CLASSNAME}`)) {
@@ -2362,6 +2379,9 @@
           forceFetch: false,
         });
         renderPriceCard(record, historyHost);
+      }
+      if (!isCartPage(location.href)) {
+        renderCompactInsight(priceHost, insight);
       }
     });
   }
@@ -3365,6 +3385,14 @@
 
   function isBuyLaterCartItem(item) {
     const owner = getCartOwnerItem(item);
+    const laterContainer =
+      ".__buy_later_target, section.buy_later, section.cart_hold, [id^='buy_later_']";
+    if (item?.matches?.(laterContainer) || item?.closest?.(laterContainer)) {
+      return true;
+    }
+    if (owner?.matches?.(laterContainer) || owner?.closest?.(laterContainer)) {
+      return true;
+    }
     const ownerId = String(owner?.id || "");
     if (/^buy_later_/i.test(ownerId)) return true;
     if (owner?.matches?.(".__buy_later_target")) return true;
@@ -4208,9 +4236,7 @@
       ? dealInsightById.get(String(record.rjCode).toUpperCase())
       : null;
     if (insight?.bestReach?.totalRate > 0) {
-      const reachBadge = document.createElement("div");
-      reachBadge.className = "dltracker-best-reach-badge";
-      reachBadge.textContent = `本次可到${Math.round(insight.bestReach.totalRate)}% OFF`;
+      const reachBadge = createBestReachBadge(insight);
       card.appendChild(reachBadge);
     }
     if (discounted) {
@@ -4443,7 +4469,7 @@
   }
 
   async function enhanceCartItems() {
-    injectDealPlanner();
+    document.querySelector(".dltracker-deal-planner")?.remove();
     injectBuyLaterSortToggle();
 
     const items = getCartItems();
@@ -4591,8 +4617,10 @@
 
   async function bootstrap() {
     const url = location.href;
-    if (!isCartPage(url)) {
-      document.querySelector(".dltracker-deal-planner")?.remove();
+    document.querySelector(".dltracker-deal-planner")?.remove();
+    try {
+      localStorage.removeItem(DEAL_PLANNER_STORAGE_KEY);
+    } catch {
     }
     if (isProductPage(url)) {
       await enhanceProductPage();
@@ -4753,22 +4781,9 @@
 }
 
 .${UI_CLASSNAME} .dltracker-best-reach-badge {
-  display: inline-flex;
-  align-items: center;
   align-self: flex-start;
   width: fit-content;
   max-width: 100%;
-  box-sizing: border-box;
-  padding: 4px 8px;
-  border: 1px solid #f0cf94;
-  border-radius: 6px;
-  background: #fff4de;
-  color: #9f3412;
-  font-size: 11px;
-  font-weight: 750;
-  line-height: 1.25;
-  white-space: normal;
-  overflow-wrap: anywhere;
 }
 
 .${UI_CLASSNAME}.dltracker-wishlist-inline > .dltracker-best-reach-badge {
