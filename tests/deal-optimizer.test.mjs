@@ -332,6 +332,29 @@ test("明确的空适用列表不会被误认为全作品适用", () => {
   assert.equal(result.total, 1000);
 });
 
+test("至少三部适用作品券不会在只有两部时误用", () => {
+  const coupon = {
+    id: "THREE50",
+    type: "percent",
+    value: 50,
+    minEligibleCount: 3,
+    eligibleIds: ["A", "B", "C"],
+    repeatable: true,
+  };
+  const two = optimizeDealPlan([
+    { id: "A", regularPrice: 1000 },
+    { id: "B", regularPrice: 1000 },
+  ], [coupon]);
+  assert.equal(two.total, 2000);
+
+  const three = optimizeDealPlan([
+    { id: "A", regularPrice: 1000 },
+    { id: "B", regularPrice: 1000 },
+    { id: "C", regularPrice: 1000 },
+  ], [coupon]);
+  assert.equal(three.total, 1500);
+});
+
 test("上限规模的购物车和优惠券可以完成精确计算", () => {
   const items = Array.from({ length: 12 }, (_, index) => ({
     id: `I${index}`,

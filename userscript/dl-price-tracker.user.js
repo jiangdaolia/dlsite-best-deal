@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.3.1
+// @version      0.4.0
 // @description  在 DLsite 页面显示史低价格，自动读取优惠券并计算最优拆单方案
 // @author       Syoius & Cassandra-fox; deal planner maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.3.1";
+  const APP_VERSION = "0.4.0";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -47,8 +47,18 @@
   const DEAL_PLANNER_MAX_COUPONS = 8;
   const DLSITE_COUPON_API_PATH = "/books/mypage/coupon/list/ajax";
   const DLSITE_PRODUCT_INFO_PATH = "/maniax/product/info/ajax";
-  const COUPON_IMPORT_TTL_MS = 5 * 60 * 1000;
+  const PRODUCT_METADATA_TTL_MS = 30 * 60 * 1000;
+  const DEAL_CACHE_STORAGE_KEY = "dltracker-deal-insight-cache-v1";
+  const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v1";
+  const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
+  const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
+  const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.4.0": [
+      "浏览列表与作品详情页显示可用优惠券和三件折扣活动",
+      "史低标签后追加满足条件时的“本次可到”折扣",
+      "按事件更新购物车进度，并限制作品信息为每页一次批量请求",
+    ],
     "0.3.1": [
       "安装说明不再把 Tampermonkey 作为唯一运行方式",
       "补充 Via 等内置用户脚本浏览器的安装入口",
@@ -119,6 +129,12 @@
   const canonicalRjCache = new Map();
   let couponImportInFlight = null;
   let importedCouponPageUrl = "";
+  let dealSessionStopped = false;
+  let metadataBatchUsedForUrl = "";
+  let insightBootstrapInFlight = null;
+  const dealInsightById = new Map();
+  let pendingCartAdd = null;
+  let cartRefreshInFlight = null;
 
   function nowIso() {
     return new Date().toISOString();
@@ -260,6 +276,7 @@
         type: raw?.type === "fixed" ? "fixed" : "percent",
         value: plannerYen(raw?.value),
         minSpend: plannerYen(raw?.minSpend),
+        minEligibleCount: Math.max(1, plannerYen(raw?.minEligibleCount, 1)),
         maxDiscount: plannerYen(raw?.maxDiscount),
         scope: raw?.scope === "one" ? "one" : "all",
         minSpendScope:
@@ -298,6 +315,7 @@
         )
       : [];
     if (coupon && !eligible.length) return null;
+    if (coupon && eligible.length < coupon.minEligibleCount) return null;
 
     const targetSets = !coupon
       ? [[]]
@@ -549,7 +567,7 @@
   }
 
   function isProductPage(url) {
-    return /\/product_id\/[RB]J\d+/i.test(url);
+    return /\/product_id\/[RBV]J\d+/i.test(url);
   }
 
   function isFavoritePage(url) {
@@ -878,12 +896,12 @@
       item.getAttribute("data-workno") ||
       item.getAttribute("data-product-id") ||
       item.getAttribute("data-pack-parent-id");
-    if (fromData && isValidRjCode(fromData)) return fromData.toUpperCase();
+    if (fromData && isValidProductCode(fromData)) return fromData.toUpperCase();
 
     const link = item.querySelector('a[href*="product_id/"]');
     const href = link?.getAttribute("href") || "";
-    const matched = href.match(/product_id\/([RB]J\d{6,})/i);
-    return matched ? matched[1].toUpperCase() : null;
+    const productMatched = `${fromData || ""} ${href}`.match(/product_id\/([RBV]J\d{6,})/i);
+    return productMatched ? productMatched[1].toUpperCase() : null;
   }
 
   function parseTranslationInfo(raw) {
@@ -1008,6 +1026,10 @@
       for (const key of keys) {
         const parsed = parseNumberish(object[key]);
         if (typeof parsed === "number") return parsed;
+        for (const token of conditionTokens(object[key])) {
+          const nested = parseNumberish(token);
+          if (typeof nested === "number") return nested;
+        }
       }
     }
     return fallback;
@@ -1027,6 +1049,7 @@
       "unlimited",
       "is_unlimited",
       "repeatable",
+      "is_multiple_use",
       "repeat_flg",
       "reuse_flg",
       "use_unlimited_flg",
@@ -1076,6 +1099,7 @@
         "minimum_price",
         "min_price",
         "lower_limit_price",
+        "price_sum",
       ],
       textThreshold ? Number(textThreshold[1].replace(/,/g, "")) : 0,
     );
@@ -1087,16 +1111,16 @@
     const eligibleIds = conditionType === "id_all"
       ? conditionTokens(conditions.product_all)
           .map((id) => String(id).toUpperCase())
-          .filter((id) => RJ_CODE_REGEX.test(id))
+          .filter((id) => /^[RBV]J\d{6,}$/i.test(id))
       : [];
-    const unrestricted = ["", "all", "all_product", "product_all"].includes(
+    const unrestricted = ["", "all", "all_product", "product_all", "payment"].includes(
       conditionType,
     );
     const repeatable = inferRepeatableCoupon(raw, combinedText);
     const warnings = [];
     if (
       !unrestricted &&
-      !["id_all", "custom_genre", "site_ids", "worktype"].includes(
+      !["id_all", "custom_genre", "site_ids", "worktype", "common", "payment"].includes(
         conditionType,
       )
     ) {
@@ -1123,6 +1147,10 @@
       type: discountType === "price" ? "fixed" : "percent",
       value: plannerYen(raw?.discount),
       minSpend: plannerYen(minSpend),
+      minEligibleCount: Math.max(
+        1,
+        plannerYen(conditions?.post_condition?.count, 1),
+      ),
       maxDiscount: plannerYen(maxDiscount),
       scope:
         /(?:1作品|1本|1点|一作品|一商品)/i.test(combinedText)
@@ -1147,6 +1175,1091 @@
   }
   // </coupon-import-core>
 
+  // <deal-insight-core>
+  function dealNumber(value, fallback = 0) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number(value.replace(/,/g, "").trim());
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return fallback;
+  }
+
+  function dealTokens(value) {
+    if (value === null || value === undefined) return [];
+    if (Array.isArray(value)) return value.flatMap(dealTokens);
+    if (typeof value === "object") return Object.values(value).flatMap(dealTokens);
+    return [String(value)];
+  }
+
+  function dealPlainText(value) {
+    return String(value || "")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;|&#160;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/\r/g, "")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  function dealNormalizedSite(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/-touch$|touch$/g, "")
+      .replace(/-/g, "");
+  }
+
+  function dealDateMillis(value) {
+    const numeric = dealNumber(value, NaN);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric > 1e12 ? numeric : numeric * 1000;
+    }
+    const parsed = Date.parse(String(value || "").replace(" ", "T"));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function normalizeDealCoupon(raw, index = 0) {
+    if (!raw || typeof raw !== "object") return null;
+    const discountKind = String(raw.discount_type || "").toLowerCase();
+    if (!['rate', 'price'].includes(discountKind)) return null;
+    const conditions = raw.conditions && typeof raw.conditions === "object"
+      ? raw.conditions
+      : {};
+    const conditionType = String(raw.condition_type || "").toLowerCase();
+    const combinedText = dealPlainText([
+      raw.coupon_name,
+      raw.info,
+      raw.condition_info,
+    ].filter(Boolean).join("\n"));
+    const textMinimum = combinedText.match(/([\d,]+)\s*(?:円|엔|日元|JPY)(?:以上|이상|起)?/i);
+    const minimumValue = conditions.price_sum ??
+      raw.minimum_applicable_price ?? raw.minimum_order_amount;
+    const minSpend = dealNumber(
+      dealTokens(minimumValue)[0],
+      textMinimum ? dealNumber(textMinimum[1]) : 0,
+    );
+    const postCondition = conditions.post_condition || {};
+    const minCount = Math.max(1, Math.round(dealNumber(postCondition.count, 1)));
+    const repeatable = raw.is_multiple_use === true ||
+      raw.is_multiple_use === 1 ||
+      /何回でも|回数制限なし|不限次数|无限使用|무제한|횟수 제한 없음/i.test(combinedText);
+    const expiresAt = dealDateMillis(raw.limit_date ?? raw.end_date);
+    const productIds = dealTokens(conditions.product_all)
+      .map((value) => String(value).toUpperCase())
+      .filter((value) => /^[RBV]J\d{6,}$/i.test(value));
+    const coupon = {
+      id: String(raw.coupon_id || `coupon-${index + 1}`),
+      name: dealPlainText(raw.coupon_name) || `优惠券 ${index + 1}`,
+      info: dealPlainText(raw.info),
+      conditionInfo: dealPlainText(raw.condition_info),
+      conditionType,
+      discountType: discountKind === "rate" ? "percent" : "fixed",
+      discount: Math.max(0, dealNumber(raw.discount)),
+      minSpend: Math.max(0, minSpend),
+      minCount,
+      maxPrice: Math.max(0, dealNumber(
+        conditions.maximum_applicable_price ?? conditions.maximum_price,
+      )),
+      productIds: [...new Set(productIds)],
+      makerIds: [...new Set(dealTokens(conditions.maker_id))],
+      siteIds: [...new Set(dealTokens(conditions.site_ids).map(dealNormalizedSite))],
+      customGenres: [...new Set(dealTokens(conditions.custom_genre))],
+      workTypes: [...new Set(dealTokens(conditions.worktype).map((x) => String(x).toLowerCase()))],
+      distributeTargets: [...new Set(dealTokens(raw.distribute_targets).map(dealNormalizedSite))],
+      repeatable,
+      usageCount: Math.max(0, dealNumber(raw.limited_usage_count)),
+      usageLimit: Math.max(0, dealNumber(raw.limited_usage_limit)),
+      expiresAt,
+      relativeExpiry: raw.is_static_limit === false,
+      raw,
+    };
+    return coupon;
+  }
+
+  function dealCouponGroupKey(coupon) {
+    const sorted = (values) => [...values].sort().join(",");
+    return [
+      coupon.conditionType,
+      coupon.discountType,
+      coupon.discount,
+      coupon.minSpend,
+      coupon.minCount,
+      coupon.maxPrice,
+      sorted(coupon.productIds),
+      sorted(coupon.makerIds),
+      sorted(coupon.siteIds),
+      sorted(coupon.customGenres),
+      sorted(coupon.workTypes),
+      sorted(coupon.distributeTargets),
+      coupon.repeatable ? "repeat" : "single",
+      coupon.relativeExpiry ? "relative" : "fixed-expiry",
+    ].join("|");
+  }
+
+  function groupDealCoupons(rawCoupons, now = Date.now()) {
+    const groups = new Map();
+    (Array.isArray(rawCoupons) ? rawCoupons : [])
+      .map(normalizeDealCoupon)
+      .filter(Boolean)
+      .filter((coupon) => !coupon.expiresAt || coupon.expiresAt > now)
+      .forEach((coupon) => {
+        const key = dealCouponGroupKey(coupon);
+        const group = groups.get(key);
+        if (!group) {
+          groups.set(key, {
+            ...coupon,
+            ids: [coupon.id],
+            names: [coupon.name],
+            instances: 1,
+            earliestExpiry: coupon.expiresAt,
+            originals: [{
+              id: coupon.id,
+              name: coupon.name,
+              info: coupon.info,
+              conditionInfo: coupon.conditionInfo,
+              expiresAt: coupon.expiresAt,
+            }],
+          });
+          return;
+        }
+        group.ids.push(coupon.id);
+        group.names.push(coupon.name);
+        group.instances += 1;
+        group.originals.push({
+          id: coupon.id,
+          name: coupon.name,
+          info: coupon.info,
+          conditionInfo: coupon.conditionInfo,
+          expiresAt: coupon.expiresAt,
+        });
+        if (!group.earliestExpiry ||
+          (coupon.expiresAt && coupon.expiresAt < group.earliestExpiry)) {
+          group.earliestExpiry = coupon.expiresAt;
+        }
+      });
+    return [...groups.values()];
+  }
+
+  function dealProductIds(product) {
+    return new Set([product?.id, ...(product?.alternateIds || [])]
+      .filter(Boolean)
+      .map((value) => String(value).toUpperCase()));
+  }
+
+  function couponMatchesDealProduct(coupon, product) {
+    if (!coupon || !product?.id) return false;
+    const price = dealNumber(product.price);
+    if (coupon.maxPrice > 0 && price > coupon.maxPrice) return false;
+    const type = coupon.conditionType;
+    if (["", "all", "all_product", "product_all", "payment"].includes(type)) {
+      return true;
+    }
+    if (type === "id_all") {
+      const ids = dealProductIds(product);
+      return coupon.productIds.some((id) => ids.has(id));
+    }
+    if (type === "common") {
+      return coupon.makerIds.length > 0 &&
+        coupon.makerIds.includes(String(product.makerId || ""));
+    }
+    if (type === "site_ids") {
+      const site = dealNormalizedSite(product.siteId || product.site || "");
+      return coupon.siteIds.includes(site);
+    }
+    if (type === "custom_genre") {
+      const genres = new Set(dealTokens(product.customGenres));
+      return coupon.customGenres.some((value) => genres.has(value));
+    }
+    if (type === "worktype") {
+      const workType = String(product.workType || "").toLowerCase();
+      return coupon.workTypes.includes(workType);
+    }
+    return false;
+  }
+
+  function couponEquivalentRate(coupon, product) {
+    if (coupon.discountType === "percent") return Math.min(100, coupon.discount);
+    const basis = coupon.minSpend > 0
+      ? coupon.minSpend
+      : Math.max(1, dealNumber(product?.price));
+    return Math.min(100, (coupon.discount / basis) * 100);
+  }
+
+  function buildDealCouponOptions(coupons, product, cartProducts = []) {
+    const cart = Array.isArray(cartProducts) ? cartProducts : [];
+    const cartSubtotal = cart.reduce(
+      (sum, item) => sum + Math.max(0, dealNumber(item?.price)),
+      0,
+    );
+    return (Array.isArray(coupons) ? coupons : [])
+      .filter((coupon) => couponMatchesDealProduct(coupon, product))
+      .map((coupon) => {
+        const eligibleCartCount = cart.filter((item) =>
+          couponMatchesDealProduct(coupon, item),
+        ).length;
+        const countShortfall = Math.max(0, coupon.minCount - eligibleCartCount);
+        const spendShortfall = Math.max(0, coupon.minSpend - cartSubtotal);
+        return {
+          ...coupon,
+          equivalentRate: couponEquivalentRate(coupon, product),
+          eligibleCartCount,
+          cartSubtotal,
+          countShortfall,
+          spendShortfall,
+          ready: countShortfall === 0 && spendShortfall === 0,
+        };
+      })
+      .sort((a, b) => b.equivalentRate - a.equivalentRate ||
+        (a.earliestExpiry || Infinity) - (b.earliestExpiry || Infinity));
+  }
+
+  function calculateBestReach(product, couponOptions, bulkRule) {
+    const officialPrice = Math.max(0, dealNumber(product?.officialPrice));
+    const currentPrice = Math.max(0, dealNumber(product?.price));
+    const saleRate = officialPrice > 0 && currentPrice < officialPrice
+      ? (1 - currentPrice / officialPrice) * 100
+      : 0;
+    const bulkRate = product?.bulkbuyKey && bulkRule?.discountRate
+      ? Math.max(0, dealNumber(bulkRule.discountRate))
+      : 0;
+    const platformRate = Math.max(saleRate, bulkRate);
+    const bestCoupon = (Array.isArray(couponOptions) ? couponOptions : [])[0] || null;
+    const couponRate = bestCoupon ? bestCoupon.equivalentRate : 0;
+    const totalRate = 100 - ((100 - platformRate) * (100 - couponRate)) / 100;
+    return {
+      saleRate,
+      bulkRate,
+      platformRate,
+      couponRate,
+      totalRate: Math.max(0, Math.min(100, totalRate)),
+      bestCoupon,
+      fixedOrderApproximation: bestCoupon?.discountType === "fixed" &&
+        bestCoupon?.minSpend > 0,
+    };
+  }
+  // </deal-insight-core>
+
+  function emptyDealCache() {
+    return {
+      coupons: { loaded: false, raw: [], fetchedAt: 0, accountKey: "" },
+      metadata: {},
+      bulkRules: {},
+    };
+  }
+
+  function loadDealCache() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(DEAL_CACHE_STORAGE_KEY) || "null");
+      if (!parsed || typeof parsed !== "object") return emptyDealCache();
+      return {
+        ...emptyDealCache(),
+        ...parsed,
+        coupons: { ...emptyDealCache().coupons, ...(parsed.coupons || {}) },
+        metadata: parsed.metadata && typeof parsed.metadata === "object"
+          ? parsed.metadata
+          : {},
+        bulkRules: parsed.bulkRules && typeof parsed.bulkRules === "object"
+          ? parsed.bulkRules
+          : {},
+      };
+    } catch {
+      return emptyDealCache();
+    }
+  }
+
+  function saveDealCache(cache) {
+    try {
+      localStorage.setItem(DEAL_CACHE_STORAGE_KEY, JSON.stringify(cache));
+    } catch (error) {
+      console.warn(`[${APP_NAME}] deal cache write failed:`, error);
+    }
+  }
+
+  function quickHash(value) {
+    let hash = 2166136261;
+    for (const char of String(value || "")) {
+      hash ^= char.charCodeAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function currentAccountKey() {
+    const explicit = document.querySelector(
+      "[data-customer-id], [data-user-id], input[name='customer_id']",
+    );
+    const value = explicit?.getAttribute("data-customer-id") ||
+      explicit?.getAttribute("data-user-id") || explicit?.value || "";
+    return value ? `account-${quickHash(value)}` : "account-unresolved";
+  }
+
+  function stopDealRequests(reason) {
+    dealSessionStopped = true;
+    console.warn(`[${APP_NAME}] DLsite deal requests stopped for this page: ${reason}`);
+  }
+
+  async function fetchSameOriginText(url, label) {
+    if (dealSessionStopped) throw new Error("本页请求已因风控信号停止");
+    const response = await fetch(url, {
+      credentials: "include",
+      headers: { Accept: "application/json, text/html;q=0.9" },
+    });
+    const text = await response.text();
+    if (response.status === 403 || response.status === 429) {
+      stopDealRequests(`${label} HTTP ${response.status}`);
+      throw new Error(`${label}返回 HTTP ${response.status}`);
+    }
+    if (!response.ok) throw new Error(`${label}返回 HTTP ${response.status}`);
+    if (/captcha|reCAPTCHA|認証|验证|アクセスが集中/i.test(text) &&
+      /^\s*</.test(text)) {
+      stopDealRequests(`${label}返回验证页`);
+      throw new Error(`${label}返回了验证页`);
+    }
+    return text;
+  }
+
+  function rawCouponEarliestExpiry(rawCoupons) {
+    const values = (Array.isArray(rawCoupons) ? rawCoupons : [])
+      .map((raw) => dealDateMillis(raw?.limit_date ?? raw?.end_date))
+      .filter((value) => typeof value === "number" && value > Date.now());
+    return values.length ? Math.min(...values) : null;
+  }
+
+  function syncPlannerCouponsFromRaw(rawCoupons) {
+    const imported = (Array.isArray(rawCoupons) ? rawCoupons : [])
+      .map(normalizeDlsiteCoupon)
+      .filter(Boolean)
+      .filter((coupon) => !coupon.expiresAt || Date.parse(coupon.expiresAt) > Date.now());
+    const state = getPlannerState();
+    state.coupons = [
+      ...state.coupons.filter((coupon) => coupon?.source !== "dlsite"),
+      ...imported,
+    ];
+    state.lastCouponImport = {
+      at: nowIso(),
+      count: imported.length,
+      repeatableCount: imported.filter((coupon) => coupon.repeatable).length,
+    };
+    savePlannerState(state);
+    return imported;
+  }
+
+  async function ensureDealCoupons(force = false) {
+    const cache = loadDealCache();
+    const accountKey = currentAccountKey();
+    const accountChanged = cache.coupons.accountKey &&
+      accountKey !== "account-unresolved" &&
+      cache.coupons.accountKey !== "account-unresolved" &&
+      cache.coupons.accountKey !== accountKey;
+    const expired = cache.coupons.earliestExpiry &&
+      cache.coupons.earliestExpiry <= Date.now();
+    if (!force && cache.coupons.loaded && !expired && !accountChanged) {
+      return Array.isArray(cache.coupons.raw) ? cache.coupons.raw : [];
+    }
+
+    const url = new URL(DLSITE_COUPON_API_PATH, location.origin);
+    const text = await fetchSameOriginText(url, "优惠券接口");
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      if (/^\s*</.test(text)) stopDealRequests("优惠券接口返回网页");
+      throw new Error("优惠券接口没有返回 JSON");
+    }
+    const raw = couponArrayFromPayload(payload);
+    cache.coupons = {
+      loaded: true,
+      raw,
+      fetchedAt: Date.now(),
+      accountKey,
+      earliestExpiry: rawCouponEarliestExpiry(raw),
+    };
+    saveDealCache(cache);
+    syncPlannerCouponsFromRaw(raw);
+    return raw;
+  }
+
+  function invalidateCouponCacheAfterPurchase() {
+    if (!/(?:order|purchase|payment).*(?:complete|finish|thanks)|thanks.*(?:order|purchase)/i.test(location.pathname)) {
+      return;
+    }
+    const cache = loadDealCache();
+    cache.coupons = { ...cache.coupons, loaded: false };
+    saveDealCache(cache);
+  }
+
+  function normalizedMetadataProduct(id, raw) {
+    const nestedYen = raw?.currency_price?.JPY;
+    const translationInfo = typeof raw?.translation_info === "string"
+      ? parseTranslationInfo(raw.translation_info)
+      : raw?.translation_info;
+    const price = dealNumber(
+      raw?.price ?? nestedYen?.price ?? nestedYen,
+      0,
+    );
+    const officialPrice = dealNumber(
+      raw?.official_price ?? raw?.regular_price ?? nestedYen?.official_price,
+      price,
+    );
+    return {
+      id: String(id || raw?.product_id || raw?.workno || "").toUpperCase(),
+      price,
+      officialPrice,
+      makerId: String(raw?.maker_id || ""),
+      siteId: String(raw?.site_id || location.pathname.split("/")[1] || ""),
+      workType: String(raw?.work_type || ""),
+      customGenres: dealTokens(raw?.custom_genres),
+      bulkbuyKey: String(raw?.bulkbuy_key || ""),
+      alternateIds: dealTokens([
+        translationInfo?.parent_workno,
+        translationInfo?.original_workno,
+        raw?.parent_workno,
+      ]).map((value) => String(value).toUpperCase()),
+      raw,
+    };
+  }
+
+  async function ensureProductMetadata(ids) {
+    const cache = loadDealCache();
+    const unique = [...new Set((Array.isArray(ids) ? ids : [])
+      .map((id) => String(id).toUpperCase())
+      .filter((id) => /^[RBV]J\d{6,}$/i.test(id)))]
+      .slice(0, MAX_PRODUCT_METADATA_BATCH);
+    const result = new Map();
+    const missing = [];
+    for (const id of unique) {
+      const entry = cache.metadata[id];
+      if (entry && Date.now() - dealNumber(entry.fetchedAt) < PRODUCT_METADATA_TTL_MS) {
+        result.set(id, normalizedMetadataProduct(id, entry.raw));
+      } else {
+        missing.push(id);
+      }
+    }
+    if (!missing.length || dealSessionStopped) return result;
+    if (metadataBatchUsedForUrl === location.href) return result;
+    metadataBatchUsedForUrl = location.href;
+
+    const url = new URL(DLSITE_PRODUCT_INFO_PATH, location.origin);
+    url.searchParams.set("product_id", missing.join(","));
+    try {
+      const text = await fetchSameOriginText(url, "作品信息接口");
+      let payload;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        if (/^\s*</.test(text)) stopDealRequests("作品信息接口返回网页");
+        throw new Error("作品信息接口没有返回 JSON");
+      }
+      const records = productRecordsFromPayload(payload);
+      for (const id of missing) {
+        const raw = records.get(id);
+        if (!raw) continue;
+        cache.metadata[id] = { fetchedAt: Date.now(), raw };
+        result.set(id, normalizedMetadataProduct(id, raw));
+      }
+      saveDealCache(cache);
+    } catch (error) {
+      console.warn(`[${APP_NAME}] product metadata batch failed:`, error);
+    }
+    return result;
+  }
+
+  function loadCartSnapshot() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(CART_SNAPSHOT_STORAGE_KEY) || "null");
+      return parsed && parsed.loaded
+        ? parsed
+        : { loaded: false, products: [], updatedAt: 0 };
+    } catch {
+      return { loaded: false, products: [], updatedAt: 0 };
+    }
+  }
+
+  function saveCartSnapshot(products) {
+    const snapshot = {
+      loaded: true,
+      products: Array.isArray(products) ? products : [],
+      updatedAt: Date.now(),
+    };
+    try {
+      localStorage.setItem(CART_SNAPSHOT_STORAGE_KEY, JSON.stringify(snapshot));
+    } catch (error) {
+      console.warn(`[${APP_NAME}] cart snapshot write failed:`, error);
+    }
+    return snapshot;
+  }
+
+  function cartProductsFromRoot(root) {
+    const nodes = root.querySelectorAll([
+      "li.cart_list_item._cart_items",
+      "li.cart_list_item[id^='buy_now_']",
+      "li.n_work_list_item._cart_item",
+      "li.n_work_list_item[id^='buy_now_']",
+      "li[data-workno]",
+    ].join(","));
+    const products = [];
+    const seen = new Set();
+    for (const node of nodes) {
+      if (isBuyLaterCartItem(node) ||
+        /buy_later|later/i.test(`${node.id} ${node.className}`)) continue;
+      const dataId = node.getAttribute("data-workno") ||
+        node.getAttribute("data-product-id") || "";
+      const href = node.querySelector('a[href*="product_id/"]')?.getAttribute("href") || "";
+      const matched = `${dataId} ${href}`.match(/([RBV]J\d{6,})/i);
+      if (!matched) continue;
+      const id = matched[1].toUpperCase();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const priceText = node.querySelector(".work_price, .n_work_price_wrap, [class*='price']")?.textContent || "";
+      const priceMatch = priceText.replace(/,/g, "").match(/(\d{1,8})\s*(?:円|JPY)/i);
+      products.push({
+        id,
+        price: priceMatch ? Number(priceMatch[1]) : dealNumber(
+          node.getAttribute("data-bulkbuy_origin_price") || node.getAttribute("data-price"),
+        ),
+        bulkbuyKey: node.getAttribute("data-bulkbuy_key") || "",
+      });
+    }
+    return products;
+  }
+
+  async function ensureCartSnapshot() {
+    if (isCartPage(location.href)) {
+      return saveCartSnapshot(cartProductsFromRoot(document));
+    }
+    const existing = loadCartSnapshot();
+    if (existing.loaded) return existing;
+    const section = location.pathname.split("/").filter(Boolean)[0] || "maniax";
+    const url = new URL(`/${section}/cart`, location.origin);
+    try {
+      const html = await fetchSameOriginText(url, "购物车");
+      if (!/^\s*</.test(html)) throw new Error("购物车没有返回网页");
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      return saveCartSnapshot(cartProductsFromRoot(doc));
+    } catch (error) {
+      console.warn(`[${APP_NAME}] cart snapshot failed:`, error);
+      return existing;
+    }
+  }
+
+  function invalidateCartSnapshot() {
+    try {
+      localStorage.removeItem(CART_SNAPSHOT_STORAGE_KEY);
+    } catch {
+      // noop
+    }
+  }
+
+  function readHeaderCartCount() {
+    const candidates = document.querySelectorAll([
+      "#cart_count",
+      ".header_cart_count",
+      "[class*='cart_count']",
+      "[data-cart-count]",
+    ].join(","));
+    for (const node of candidates) {
+      const value = node.getAttribute("data-cart-count") || node.textContent || "";
+      const matched = String(value).match(/\d+/);
+      if (matched) return Number(matched[0]);
+    }
+    return null;
+  }
+
+  async function refreshCartSnapshotAfterAdd() {
+    if (cartRefreshInFlight) return cartRefreshInFlight;
+    invalidateCartSnapshot();
+    cartRefreshInFlight = ensureCartSnapshot().finally(() => {
+      cartRefreshInFlight = null;
+    });
+    return cartRefreshInFlight;
+  }
+
+  function maybeConfirmPendingCartAdd() {
+    if (!pendingCartAdd) return;
+    if (Date.now() > pendingCartAdd.expiresAt) {
+      pendingCartAdd = null;
+      return;
+    }
+    const nextCount = readHeaderCartCount();
+    const countIncreased = typeof pendingCartAdd.beforeCount === "number" &&
+      typeof nextCount === "number" && nextCount > pendingCartAdd.beforeCount;
+    const successNode = document.querySelector([
+      ".add_cart_complete",
+      ".cart_add_complete",
+      "[class*='add_cart'][class*='complete']",
+      "[class*='cart'][class*='success']",
+    ].join(","));
+    if (!countIncreased && !successNode) return;
+    pendingCartAdd = null;
+    void refreshCartSnapshotAfterAdd();
+  }
+
+  function installDealEventListeners() {
+    document.addEventListener("click", (event) => {
+      const target = event.target instanceof Element
+        ? event.target.closest("button, a, input[type='button'], input[type='submit']")
+        : null;
+      if (!target) return;
+      const signature = [
+        target.id,
+        target.className,
+        target.getAttribute("href"),
+        target.getAttribute("data-action"),
+        target.textContent,
+        target.getAttribute("value"),
+      ].filter(Boolean).join(" ");
+      if (!/(?:add.{0,8}cart|cart.{0,8}add|カートに入|加入购物车|加入購物車)/i.test(signature)) {
+        return;
+      }
+      pendingCartAdd = {
+        beforeCount: readHeaderCartCount(),
+        expiresAt: Date.now() + 12_000,
+      };
+    }, true);
+  }
+
+  function dealCampaignPath(product, key) {
+    const currentSection = location.pathname.split("/").filter(Boolean)[0] || "";
+    const section = currentSection.replace(/-touch$/i, "") ||
+      String(product?.siteId || "maniax").replace(/-touch$/i, "");
+    return `/${section}/campaign/bulkbuy/=/key/${encodeURIComponent(key)}/`;
+  }
+
+  function campaignEndFromHtml(html) {
+    const labelled = String(html || "").match(
+      /(?:end_date|endDate|period_end|終了|截止|结束|까지|まで)[\s\S]{0,160}?(20\d{2})[\/-年](\d{1,2})[\/-月](\d{1,2})(?:日)?(?:[^\d]{0,12}(\d{1,2}):(\d{2}))?/i,
+    );
+    if (labelled) {
+      return new Date(
+        Number(labelled[1]),
+        Number(labelled[2]) - 1,
+        Number(labelled[3]),
+        Number(labelled[4] || 23),
+        Number(labelled[5] || 59),
+        59,
+      ).getTime();
+    }
+    const short = dealPlainText(html).match(
+      /(?:終了|截止|结束|까지|まで)[^\n]{0,80}?(\d{1,2})[\/-月](\d{1,2})(?:日)?(?:[^\d]{0,12}(\d{1,2}):(\d{2}))?/i,
+    );
+    if (!short) return null;
+    const now = new Date();
+    let result = new Date(
+      now.getFullYear(),
+      Number(short[1]) - 1,
+      Number(short[2]),
+      Number(short[3] || 23),
+      Number(short[4] || 59),
+      59,
+    );
+    if (result.getTime() < Date.now() - 24 * 60 * 60 * 1000) {
+      result = new Date(
+        now.getFullYear() + 1,
+        Number(short[1]) - 1,
+        Number(short[2]),
+        Number(short[3] || 23),
+        Number(short[4] || 59),
+        59,
+      );
+    }
+    return result.getTime();
+  }
+
+  async function ensureBulkRule(product) {
+    const key = String(product?.bulkbuyKey || "");
+    if (!key) return null;
+    const cache = loadDealCache();
+    const cached = cache.bulkRules[key];
+    if (cached && (!cached.endsAt || cached.endsAt > Date.now())) return cached;
+    try {
+      const html = await fetchSameOriginText(
+        new URL(dealCampaignPath(product, key), location.origin),
+        "三件折扣活动页",
+      );
+      const objectMatch = html.match(/window\[[^\n]+?_product[^\n]+?\]\s*=\s*(\{[^\n]+?\});/i);
+      let embedded = null;
+      if (objectMatch) {
+        try { embedded = JSON.parse(objectMatch[1]); } catch { /* noop */ }
+      }
+      const titleMatch = dealPlainText(html).match(/(\d+)\s*(?:作品|本|件).*?(\d+)\s*%/i);
+      const discountRate = dealNumber(embedded?.discount_rate, titleMatch ? dealNumber(titleMatch[2]) : 0);
+      const minCount = Math.max(1, Math.round(dealNumber(embedded?.per_item, titleMatch ? dealNumber(titleMatch[1]) : 3)));
+      if (!discountRate) return null;
+      const parsedEnd = campaignEndFromHtml(html);
+      const rule = {
+        key,
+        discountRate,
+        minCount,
+        // 未识别到结束时间时只缓存 24 小时，宁可低频复核，也不沿用过期活动。
+        endsAt: parsedEnd || Date.now() + 24 * 60 * 60 * 1000,
+        fetchedAt: Date.now(),
+      };
+      cache.bulkRules[key] = rule;
+      saveDealCache(cache);
+      return rule;
+    } catch (error) {
+      console.warn(`[${APP_NAME}] bulkbuy rule failed:`, error);
+      return null;
+    }
+  }
+
+  function productIdFromNode(node) {
+    const values = [
+      node?.getAttribute?.("data-workno"),
+      node?.getAttribute?.("data-product_id"),
+      node?.getAttribute?.("data-product-id"),
+      node?.id,
+      node?.querySelector?.('a[href*="product_id/"]')?.getAttribute("href"),
+    ];
+    const matched = values.filter(Boolean).join(" ").match(PRODUCT_CODE_REGEX);
+    return matched ? matched[1].toUpperCase() : null;
+  }
+
+  function collectBrowseCards() {
+    if (/\/mypage\/(?:order|purchase|library|download)/i.test(location.pathname)) return [];
+    const selectors = [
+      "li.search_result_img_box_inner[data-workno]",
+      ".search_result_img_box_inner[data-workno]",
+      "article[data-workno]",
+      "li[data-workno]",
+      '[data-vue-component="product-item"][data-product_id]',
+    ];
+    const currentMatch = location.pathname.match(/product_id\/([RBV]J\d{6,})/i);
+    const currentId = currentMatch ? currentMatch[1].toUpperCase() : null;
+    const cards = [];
+    const seen = new Set();
+    const addCard = (node) => {
+      if (!node || seen.has(node) || cards.length >= MAX_PRODUCT_METADATA_BATCH) return;
+      const id = productIdFromNode(node);
+      if (!id ||
+        id === currentId ||
+        cards.some((entry) => entry.id === id &&
+          (entry.node.contains(node) || node.contains(entry.node))) ||
+        node.closest("#work_buy, .c-purchaseBox")) return;
+      seen.add(node);
+      cards.push({ id, node });
+    };
+    for (const node of document.querySelectorAll(selectors.join(","))) {
+      addCard(node);
+    }
+    if (cards.length < MAX_PRODUCT_METADATA_BATCH) {
+      for (const link of document.querySelectorAll('a[href*="product_id/"]')) {
+        const node = link.closest([
+          "li",
+          "article",
+          ".search_result_img_box_inner",
+          ".product-item",
+          ".n_worklist_item",
+          ".work",
+        ].join(","));
+        if (!node || !findBrowsePriceHost(node)) continue;
+        addCard(node);
+        if (cards.length >= MAX_PRODUCT_METADATA_BATCH) break;
+      }
+    }
+    return cards;
+  }
+
+  function findBrowsePriceHost(card) {
+    return firstElementBySelectors([
+      "dd.work_price_wrap",
+      ".work_price_wrap",
+      ".n_work_price_wrap",
+      ".work_price",
+      '[class*="price"]',
+    ], card);
+  }
+
+  function detailProductFromDom(id) {
+    const ga = document.querySelector(
+      `.ga4_event_item_${id}, [class*="ga4_event_item_"][data-price]`,
+    );
+    const price = dealNumber(ga?.getAttribute("data-price"), parseCurrentPrice() || 0);
+    const officialPrice = dealNumber(
+      ga?.getAttribute("data-official_price") || ga?.getAttribute("data-official-price"),
+      price,
+    );
+    const bulkHref = document.querySelector('a[href*="/campaign/bulkbuy/=/key/"]')?.getAttribute("href") || "";
+    const bulkMatch = bulkHref.match(/\/key\/([^/?#]+)/i);
+    return {
+      id,
+      price,
+      officialPrice,
+      makerId: ga?.getAttribute("data-maker_id") || ga?.getAttribute("data-maker-id") || "",
+      siteId: location.pathname.split("/").filter(Boolean)[0] || "",
+      workType: ga?.getAttribute("data-work_type") || ga?.getAttribute("data-work-type") || "",
+      customGenres: [],
+      bulkbuyKey: bulkMatch ? decodeURIComponent(bulkMatch[1]) : "",
+      alternateIds: [],
+    };
+  }
+
+  function appendJpyPrice(host, product) {
+    if (!host || !product?.price) return;
+    const visible = host.textContent || "";
+    if (/\bJPY\b|円/i.test(visible) || host.querySelector(".dltracker-jpy-price")) return;
+    const label = document.createElement("span");
+    label.className = "dltracker-jpy-price";
+    label.textContent = `（折后 ${Math.round(product.price).toLocaleString("ja-JP")} JPY）`;
+    host.appendChild(label);
+  }
+
+  function formatCouponBadge(option) {
+    return `券${Math.round(option.equivalentRate)}%`;
+  }
+
+  function renderCompactInsight(host, insight) {
+    if (!host) return;
+    host.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`)?.remove();
+    const box = document.createElement("div");
+    box.className = `${DEAL_INSIGHT_CLASSNAME} dltracker-deal-compact`;
+    const activity = document.createElement("div");
+    activity.className = "dltracker-deal-row dltracker-activity-row";
+    activity.textContent = insight.bulkRule
+      ? `${insight.bulkRule.minCount}件${Math.round(insight.bulkRule.discountRate)}%`
+      : "活动：—";
+    const coupons = document.createElement("div");
+    coupons.className = "dltracker-deal-row dltracker-coupon-row";
+    const visible = insight.couponOptions.slice(0, 3).map(formatCouponBadge);
+    coupons.textContent = visible.length
+      ? `${visible.join("  ")}${insight.couponOptions.length > 3 ? `  +${insight.couponOptions.length - 3}` : ""}`
+      : "优惠券：—";
+    box.append(activity, coupons);
+    if (insight.partial) {
+      const partial = document.createElement("span");
+      partial.className = "dltracker-deal-partial";
+      partial.textContent = "部分优惠未确认";
+      box.appendChild(partial);
+    }
+    host.appendChild(box);
+  }
+
+  function couponSummary(option) {
+    const discount = option.discountType === "percent"
+      ? `${Math.round(option.discount)}% OFF`
+      : `减 ${Math.round(option.discount)} 日元（按门槛折算约 ${Math.round(option.equivalentRate)}%）`;
+    const threshold = option.minCount > 1
+      ? `至少 ${option.minCount} 部适用作品`
+      : option.minSpend > 0
+        ? `订单满 ${Math.round(option.minSpend)} 日元`
+        : "1 部起用";
+    return `${discount}；${threshold}`;
+  }
+
+  function renderDetailInsight(host, insight) {
+    if (!host) return;
+    host.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`)?.remove();
+    const box = document.createElement("section");
+    box.className = `${DEAL_INSIGHT_CLASSNAME} dltracker-deal-detail`;
+    const activity = document.createElement("div");
+    activity.className = "dltracker-deal-section dltracker-activity-row";
+    const activityTitle = document.createElement("strong");
+    activityTitle.textContent = "平台活动";
+    const cartBulkCount = insight.cartProducts.filter((item) =>
+      item.bulkbuyKey && item.bulkbuyKey === insight.product.bulkbuyKey,
+    ).length;
+    const activityText = document.createElement("span");
+    if (insight.bulkRule) {
+      const shortfall = Math.max(0, insight.bulkRule.minCount - cartBulkCount);
+      activityText.textContent = `${insight.bulkRule.minCount} 件 ${Math.round(insight.bulkRule.discountRate)}% OFF；` +
+        (shortfall ? `当前购物车还差 ${shortfall} 件` : "当前购物车已满足件数");
+    } else {
+      activityText.textContent = "此作品未确认到三件折扣活动";
+    }
+    activity.append(activityTitle, activityText);
+
+    const couponSection = document.createElement("div");
+    couponSection.className = "dltracker-deal-section dltracker-coupon-row";
+    const couponTitle = document.createElement("strong");
+    couponTitle.textContent = "优惠券（每个订单只能使用一张）";
+    couponSection.appendChild(couponTitle);
+    if (!insight.couponOptions.length) {
+      const empty = document.createElement("span");
+      empty.textContent = "未发现此作品可用的优惠券";
+      couponSection.appendChild(empty);
+    }
+    for (const option of insight.couponOptions) {
+      const details = document.createElement("details");
+      details.className = "dltracker-coupon-detail";
+      const summary = document.createElement("summary");
+      const progress = option.minSpend > 0
+        ? option.spendShortfall > 0
+          ? `购物车还差 ${Math.round(option.spendShortfall)} 日元`
+          : "购物车已满额"
+        : option.minCount > 1
+          ? option.countShortfall > 0
+            ? `购物车还差 ${option.countShortfall} 部适用作品`
+            : "购物车已满足件数"
+          : "当前作品适用";
+      summary.textContent = `${formatCouponBadge(option)} · ${couponSummary(option)} · ${progress}`;
+      const body = document.createElement("div");
+      body.className = "dltracker-coupon-original";
+      const expiry = option.earliestExpiry
+        ? new Date(option.earliestExpiry).toLocaleString("zh-CN", { hour12: false })
+        : "未提供";
+      body.textContent = [
+        `数量：${option.instances} 张；${option.repeatable ? "期限内可重复使用" : "每张一次"}`,
+        option.usageLimit > 0
+          ? `使用次数：${option.usageCount}/${option.usageLimit}`
+          : "",
+        `最早到期：${expiry}`,
+        "当前作品即使已有平台折扣，仍判定为可用。",
+        "可与平台三件折扣叠加；不可与另一张优惠券叠加。",
+        option.fixedOrderApproximation || (option.discountType === "fixed" && option.minSpend > 0)
+          ? "固定金额券的折算百分比是订单级近似，不保证每部作品都达到该比例。"
+          : "",
+        ...option.originals.map((original) => {
+          const originalExpiry = original.expiresAt
+            ? new Date(original.expiresAt).toLocaleString("zh-CN", { hour12: false })
+            : "未提供";
+          return `[${original.id}] ${original.name}\n到期：${originalExpiry}\n${original.info}\n${original.conditionInfo}`;
+        }),
+      ].filter(Boolean).join("\n");
+      details.append(summary, body);
+      couponSection.appendChild(details);
+    }
+    box.append(activity, couponSection);
+    if (insight.partial) {
+      const partial = document.createElement("div");
+      partial.className = "dltracker-deal-partial";
+      partial.textContent = "部分优惠未确认：作品隐藏条件读取失败，本页不会自动重试。";
+      box.appendChild(partial);
+    }
+    host.appendChild(box);
+  }
+
+  function refreshHistoryReachBadges(id) {
+    const insight = dealInsightById.get(String(id).toUpperCase());
+    for (const card of document.querySelectorAll(
+      `.${UI_CLASSNAME}[data-product-id="${CSS.escape(String(id).toUpperCase())}"]`,
+    )) {
+      card.querySelector(".dltracker-best-reach-badge")?.remove();
+      if (!insight?.bestReach?.totalRate) continue;
+      const badge = document.createElement("span");
+      badge.className = "dltracker-best-reach-badge";
+      badge.textContent = `本次可到${Math.round(insight.bestReach.totalRate)}% OFF`;
+      card.querySelector(".dltracker-chip")?.appendChild(badge);
+    }
+  }
+
+  async function buildInsight(product, coupons, cartProducts, partial = false) {
+    const bulkRule = await ensureBulkRule(product);
+    const options = buildDealCouponOptions(coupons, product, cartProducts);
+    const bestReach = calculateBestReach(product, options, bulkRule);
+    const insight = {
+      product,
+      couponOptions: options,
+      cartProducts,
+      bulkRule,
+      bestReach,
+      partial,
+    };
+    dealInsightById.set(product.id, insight);
+    refreshHistoryReachBadges(product.id);
+    return insight;
+  }
+
+  async function enhanceGenericBrowseCards(coupons, cartProducts) {
+    const cards = collectBrowseCards();
+    if (!cards.length) return;
+    const metadata = await ensureProductMetadata(cards.map((entry) => entry.id));
+    // 活动页同源请求也保持串行，避免列表上出现并发访问。
+    await mapWithConcurrency(cards, 1, async ({ id, node }) => {
+      const priceHost = findBrowsePriceHost(node);
+      if (!priceHost) return;
+      const priceMatch = (priceHost.textContent || "")
+        .replace(/,/g, "")
+        .match(/(\d{1,8})\s*(?:円|JPY)/i);
+      const product = metadata.get(id) || {
+        id,
+        price: priceMatch ? Number(priceMatch[1]) : 0,
+        officialPrice: priceMatch ? Number(priceMatch[1]) : 0,
+        makerId: "",
+        siteId: location.pathname.split("/").filter(Boolean)[0] || "",
+        workType: "",
+        customGenres: [],
+        bulkbuyKey: "",
+        alternateIds: [],
+      };
+      const partial = !metadata.has(id);
+      const usableCoupons = partial
+        ? coupons.filter((coupon) =>
+            ["payment", "id_all"].includes(coupon.conditionType) &&
+            (!coupon.maxPrice || product.price > 0),
+          )
+        : coupons;
+      appendJpyPrice(priceHost, product);
+      const insight = await buildInsight(product, usableCoupons, cartProducts, partial);
+      renderCompactInsight(priceHost, insight);
+
+      if (/^[RB]J/i.test(id) && !node.querySelector(`.${UI_CLASSNAME}`)) {
+        const historyHost = document.createElement("div");
+        historyHost.className = "dltracker-inline-host";
+        priceHost.appendChild(historyHost);
+        renderLoadingCard(historyHost);
+        const link = node.querySelector('a[href*="product_id/"]');
+        const record = await buildOrUpdateRecord({
+          rjCode: id,
+          title: link?.textContent?.trim() || id,
+          currentPrice: product.price || undefined,
+          forceFetch: false,
+        });
+        renderPriceCard(record, historyHost);
+      }
+    });
+  }
+
+  async function enhanceProductDealDetail(coupons, cartProducts) {
+    if (!isProductPage(location.href)) return;
+    const matched = location.pathname.match(/product_id\/([RBV]J\d{6,})/i);
+    const id = matched ? matched[1].toUpperCase() : productIdFromNode(document.body);
+    if (!id) return;
+    const domProduct = detailProductFromDom(id);
+    const metadata = await ensureProductMetadata([id, ...cartProducts.map((item) => item.id)]);
+    const product = metadata.get(id) || domProduct;
+    const enrichedCart = cartProducts.map((item) => ({
+      ...item,
+      ...(metadata.get(item.id) || {}),
+      id: item.id,
+      price: item.price || metadata.get(item.id)?.price || 0,
+    }));
+    const partial = !metadata.has(id) && coupons.some((coupon) =>
+      ["custom_genre", "common", "site_ids", "worktype"].includes(coupon.conditionType),
+    );
+    const insight = await buildInsight(product, coupons, enrichedCart, partial);
+    const priceHost = findProductPriceHost();
+    appendJpyPrice(priceHost, product);
+    renderDetailInsight(findProductRenderHost(), insight);
+  }
+
+  async function enhanceDealInsights() {
+    if (insightBootstrapInFlight) return insightBootstrapInFlight;
+    insightBootstrapInFlight = (async () => {
+      invalidateCouponCacheAfterPurchase();
+      let rawCoupons = [];
+      try {
+        const forceCouponRefresh = isCouponPage(location.href) &&
+          importedCouponPageUrl !== location.href;
+        if (forceCouponRefresh) importedCouponPageUrl = location.href;
+        rawCoupons = await ensureDealCoupons(forceCouponRefresh);
+      } catch (error) {
+        console.warn(`[${APP_NAME}] coupon insight load failed:`, error);
+      }
+      const coupons = groupDealCoupons(rawCoupons);
+      const cartSnapshot = await ensureCartSnapshot();
+      const cartProducts = cartSnapshot.loaded ? cartSnapshot.products : [];
+      if (isProductPage(location.href)) {
+        await enhanceProductDealDetail(coupons, cartProducts);
+      }
+      await enhanceGenericBrowseCards(coupons, cartProducts);
+    })().finally(() => {
+      insightBootstrapInFlight = null;
+    });
+    return insightBootstrapInFlight;
+  }
+
   function renderCouponImportStatus(status, isError = false) {
     let box = document.querySelector(".dltracker-coupon-import-status");
     if (!box) {
@@ -1162,28 +2275,9 @@
     if (couponImportInFlight) return couponImportInFlight;
     couponImportInFlight = (async () => {
       renderCouponImportStatus("最优买法：正在从当前账号读取优惠券…");
-      const response = await fetch(
-        new URL(DLSITE_COUPON_API_PATH, location.origin),
-        { credentials: "include", headers: { Accept: "application/json" } },
-      );
-      if (!response.ok) {
-        throw new Error(`优惠券接口返回 HTTP ${response.status}`);
-      }
-      const payload = await response.json();
-      const now = Date.now();
-      const imported = couponArrayFromPayload(payload)
-        .map(normalizeDlsiteCoupon)
-        .filter(Boolean)
-        .filter((coupon) => !coupon.expiresAt || Date.parse(coupon.expiresAt) > now);
+      const raw = await ensureDealCoupons(false);
+      const imported = syncPlannerCouponsFromRaw(raw);
       const state = getPlannerState();
-      const manual = state.coupons.filter((coupon) => coupon?.source !== "dlsite");
-      state.coupons = [...manual, ...imported];
-      state.lastCouponImport = {
-        at: nowIso(),
-        count: imported.length,
-        repeatableCount: imported.filter((coupon) => coupon.repeatable).length,
-      };
-      savePlannerState(state);
       renderCouponImportStatus(
         `最优买法：已自动导入 ${imported.length} 张有效优惠券` +
           (state.lastCouponImport.repeatableCount
@@ -1206,25 +2300,16 @@
   }
 
   async function ensureDlsiteCoupons(force = false) {
-    const lastImport = getPlannerState().lastCouponImport;
-    const importedAt = Date.parse(lastImport?.at || "");
-    if (
-      !force &&
-      Number.isFinite(importedAt) &&
-      Date.now() - importedAt < COUPON_IMPORT_TTL_MS
-    ) {
-      return getPlannerState().coupons.filter(
-        (coupon) => coupon?.source === "dlsite",
-      );
-    }
-    return importDlsiteCoupons();
+    const raw = await ensureDealCoupons(force);
+    return syncPlannerCouponsFromRaw(raw);
   }
 
   async function enhanceCouponPage() {
     if (!isCouponPage(location.href)) return;
     if (importedCouponPageUrl === location.href) return;
     importedCouponPageUrl = location.href;
-    await ensureDlsiteCoupons(true);
+    const raw = await ensureDealCoupons(true);
+    syncPlannerCouponsFromRaw(raw);
   }
 
   function productRecordsFromPayload(payload) {
@@ -1287,11 +2372,16 @@
       const allowed = new Set(conditionTokens(conditions.worktype));
       return conditionTokens(metadata?.work_type).some((id) => allowed.has(id));
     }
+    if (type === "common") {
+      const allowed = new Set(conditionTokens(conditions.maker_id));
+      return conditionTokens(metadata?.maker_id).some((id) => allowed.has(id));
+    }
+    if (type === "payment") return true;
     return false;
   }
 
   async function resolveImportedCouponEligibility(items, coupons) {
-    const dynamicTypes = new Set(["custom_genre", "site_ids", "worktype"]);
+    const dynamicTypes = new Set(["custom_genre", "site_ids", "worktype", "common"]);
     const needsMetadata = coupons.some(
       (coupon) =>
         coupon?.source === "dlsite" &&
@@ -2274,6 +3364,10 @@
     return typeof code === "string" && /^[RB]J\d{6,}$/i.test(code);
   }
 
+  function isValidProductCode(code) {
+    return typeof code === "string" && /^[RBV]J\d{6,}$/i.test(code);
+  }
+
   function isCacheFresh(record) {
     if (!record?.lastChecked) return false;
     const checkedAt = new Date(record.lastChecked).getTime();
@@ -2915,6 +4009,7 @@
 
     const card = document.createElement("div");
     card.className = UI_CLASSNAME;
+    if (record?.rjCode) card.dataset.productId = record.rjCode;
     if (isProductPage(location.href)) {
       card.classList.add("dltracker-product-wide");
     }
@@ -3001,6 +4096,15 @@
     }
 
     card.appendChild(chip);
+    const insight = record?.rjCode
+      ? dealInsightById.get(String(record.rjCode).toUpperCase())
+      : null;
+    if (insight?.bestReach?.totalRate > 0) {
+      const reachBadge = document.createElement("span");
+      reachBadge.className = "dltracker-best-reach-badge";
+      reachBadge.textContent = `本次可到${Math.round(insight.bestReach.totalRate)}% OFF`;
+      chip.appendChild(reachBadge);
+    }
     if (discounted) {
       const button = document.createElement("a");
       button.className = "dltracker-btn";
@@ -3034,7 +4138,7 @@
     const rjCode = pathMatch
       ? pathMatch[1].toUpperCase()
       : extractRjCodeFromUrl(location.href);
-    if (!rjCode) return;
+    if (!rjCode || !isValidRjCode(rjCode)) return;
 
     const host = findProductRenderHost();
     if (!host) return;
@@ -3249,6 +4353,7 @@
 
       const rjCode = extractRjCodeFromCartItem(item);
       if (!rjCode) continue;
+      if (!isValidRjCode(rjCode)) continue;
 
       const title =
         item.querySelector(".work_name a")?.textContent?.trim() ||
@@ -3310,11 +4415,14 @@
 
   function maybeBootstrapForCartMutation(currentUrl) {
     if (!isCartPage(currentUrl)) return false;
+    saveCartSnapshot(cartProductsFromRoot(document));
     const items = getCartItems();
     if (
       items.some(
         (item) =>
-          isRenderableCartItem(item) && !item.querySelector(`.${UI_CLASSNAME}`),
+          isRenderableCartItem(item) &&
+          (!item.querySelector(`.${UI_CLASSNAME}`) ||
+            !item.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`)),
       )
     ) {
       scheduleCartBootstrap();
@@ -3325,7 +4433,10 @@
   function maybeBootstrapForWishlistMutation(currentUrl) {
     if (!isFavoritePage(currentUrl)) return false;
     const cards = getWishlistCards();
-    if (cards.some((card) => !card.querySelector(`.${UI_CLASSNAME}`))) {
+    if (cards.some((card) =>
+      !card.querySelector(`.${UI_CLASSNAME}`) ||
+      !card.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`),
+    )) {
       void bootstrap();
     }
     return true;
@@ -3389,9 +4500,7 @@
     if (isCartPage(url)) {
       await enhanceCartItems();
     }
-    if (isCouponPage(url)) {
-      await enhanceCouponPage();
-    }
+    await enhanceDealInsights();
   }
 
   function injectStyle() {
@@ -3533,6 +4642,114 @@
   letter-spacing: 0.2px;
   line-height: 1.2;
   white-space: nowrap;
+}
+
+.${UI_CLASSNAME} .dltracker-best-reach-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #fff;
+  color: #9f3412;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.dltracker-jpy-price {
+  display: inline-block;
+  margin-left: 5px;
+  color: #666;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.${DEAL_INSIGHT_CLASSNAME} {
+  width: 100%;
+  margin-top: 5px;
+  box-sizing: border-box;
+  color: #444;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.dltracker-deal-compact {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+.dltracker-deal-row {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 5px;
+  box-sizing: border-box;
+}
+
+.dltracker-activity-row {
+  background: #e8f5ed;
+  color: #22603a;
+}
+
+.dltracker-coupon-row {
+  background: #fff4de;
+  color: #80500d;
+}
+
+.dltracker-deal-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid #dfdfdf;
+  border-radius: 8px;
+  background: #fff;
+  text-align: left;
+}
+
+.dltracker-deal-section {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 7px 8px;
+  border-radius: 6px;
+}
+
+.dltracker-deal-section strong {
+  font-size: 12px;
+}
+
+.dltracker-coupon-detail {
+  border-top: 1px dashed rgba(128, 80, 13, 0.25);
+  padding-top: 4px;
+}
+
+.dltracker-coupon-detail summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.dltracker-coupon-original {
+  margin-top: 5px;
+  padding: 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.7);
+  color: #5b4a31;
+  font-weight: 400;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dltracker-deal-partial {
+  color: #a14716;
+  font-size: 10px;
 }
 
 .${UI_CLASSNAME} .dltracker-btn {
@@ -4123,10 +5340,13 @@
       domDebounceTimer = setTimeout(() => {
         domDebounceTimer = null;
         const currentUrl = location.href;
+        maybeConfirmPendingCartAdd();
 
         if (isProductPage(currentUrl)) {
           const host = findProductRenderHost();
-          if (host && !host.querySelector(`.${UI_CLASSNAME}`)) {
+          if (host &&
+            (!host.querySelector(`.${UI_CLASSNAME}`) ||
+              !host.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`))) {
             void bootstrap();
           }
           return;
@@ -4137,6 +5357,14 @@
 
         if (hasCartContainer() || hasWishlistContainer()) {
           scheduleCartBootstrap();
+          return;
+        }
+
+        const browseCards = collectBrowseCards();
+        if (browseCards.some(({ node }) =>
+          !node.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`),
+        )) {
+          void bootstrap();
         }
       }, 300);
     });
@@ -4149,6 +5377,7 @@
       showUpdateNoticeIfNeeded();
       await cleanExpiredCache();
       await bootstrap();
+      installDealEventListeners();
       installSpaListeners();
       console.log(`[${APP_NAME}] userscript started (${APP_VERSION})`);
     } catch (error) {
