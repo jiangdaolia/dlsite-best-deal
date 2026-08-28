@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.4.5
+// @version      0.4.6
 // @description  在 DLsite 页面显示史低价格，自动读取优惠券并计算最优拆单方案
 // @author       Syoius & Cassandra-fox; deal planner maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.4.5";
+  const APP_VERSION = "0.4.6";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -55,6 +55,9 @@
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.4.6": [
+      "所有页面的“本次可到”都与史低拆框换行，并防止移动端溢出",
+    ],
     "0.4.5": [
       "折后日元价简化为“880円”格式",
     ],
@@ -2278,10 +2281,10 @@
       badge.className = "dltracker-best-reach-badge";
       badge.textContent = `本次可到${Math.round(insight.bestReach.totalRate)}% OFF`;
       const chip = card.querySelector(".dltracker-history-chip");
-      if (card.classList.contains("dltracker-product-wide")) {
+      if (chip) {
         chip?.insertAdjacentElement("afterend", badge);
       } else {
-        chip?.appendChild(badge);
+        card.appendChild(badge);
       }
     }
   }
@@ -4208,11 +4211,7 @@
       const reachBadge = document.createElement("div");
       reachBadge.className = "dltracker-best-reach-badge";
       reachBadge.textContent = `本次可到${Math.round(insight.bestReach.totalRate)}% OFF`;
-      if (isProductDetailPage) {
-        card.appendChild(reachBadge);
-      } else {
-        chip.appendChild(reachBadge);
-      }
+      card.appendChild(reachBadge);
     }
     if (discounted) {
       const button = document.createElement("a");
@@ -4644,7 +4643,7 @@
 .${UI_CLASSNAME}.dltracker-wishlist-inline {
   flex-direction: row;
   align-items: center;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   margin-top: -10px;
   margin-bottom: 10px;
 }
@@ -4756,24 +4755,29 @@
 .${UI_CLASSNAME} .dltracker-best-reach-badge {
   display: inline-flex;
   align-items: center;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: #fff;
-  color: #9f3412;
-  font-size: 11px;
-  font-weight: 750;
-  line-height: 1.25;
-  white-space: nowrap;
-}
-
-.${UI_CLASSNAME}.dltracker-product-wide > .dltracker-best-reach-badge {
-  width: 100%;
-  justify-content: center;
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
   box-sizing: border-box;
   padding: 4px 8px;
   border: 1px solid #f0cf94;
   border-radius: 6px;
   background: #fff4de;
+  color: #9f3412;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.${UI_CLASSNAME}.dltracker-wishlist-inline > .dltracker-best-reach-badge {
+  flex-basis: 100%;
+}
+
+.${UI_CLASSNAME}.dltracker-product-wide > .dltracker-best-reach-badge {
+  width: 100%;
+  justify-content: center;
 }
 
 .dltracker-jpy-price {
