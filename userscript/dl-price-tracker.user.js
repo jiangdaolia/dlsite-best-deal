@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.24
+// @version      0.6.25
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.24";
+  const APP_VERSION = "0.6.25";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -60,6 +60,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.25": [
+      "保留 DLsite 横向卡为封面预留的原生内容缩进，避免优惠框挤入图片区域",
+      "仅用自动宽度消除整宽与缩进相加造成的越界，不改动原生图片列",
+    ],
     "0.6.24": [
       "清除助手宿主继承的 DLsite 横向卡内容缩进，修复本次可到与史低框仍然越界",
       "宿主宽度改由原生卡片自动计算，不使用固定像素且不改变原生作品布局",
@@ -8375,10 +8379,6 @@ dl > .dltracker-browse-analysis-host {
   grid-column: 1 / -1;
   width: auto;
   max-width: 100%;
-  margin-left: 0 !important;
-  margin-right: 0 !important;
-  padding-left: 0 !important;
-  padding-right: 0 !important;
   align-self: stretch;
 }
 
