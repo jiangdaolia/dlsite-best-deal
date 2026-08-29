@@ -86,3 +86,14 @@ test("微信分享使用系统文件分享面板", () => {
   assert.match(shareSource, /navigator\.canShare/);
   assert.match(shareSource, /navigator\.share\s*\(/);
 });
+
+test("购物车诊断面板固定悬浮在 body 右下角", () => {
+  const panelSource = functionSource("injectCartDiagnosticPanel");
+  assert.match(panelSource, /document\.body\s*\|\|\s*document\.documentElement/);
+  assert.match(panelSource, /\.appendChild\(panel\)/);
+  assert.doesNotMatch(panelSource, /insertBefore\(panel/);
+  assert.match(
+    source,
+    /\.dltracker-cart-diagnostic\s*\{[\s\S]*?position:\s*fixed;[\s\S]*?right:[\s\S]*?bottom:/,
+  );
+});

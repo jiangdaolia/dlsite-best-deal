@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.4
+// @version      0.6.5
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.4";
+  const APP_VERSION = "0.6.5";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -58,6 +58,9 @@
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.5": [
+      "购物车诊断改为右下角固定悬浮面板，避免被页面重绘移除",
+    ],
     "0.6.4": [
       "购物车诊断支持下载 JSON 文件和调起系统面板分享到微信",
     ],
@@ -2405,15 +2408,7 @@
       }
     });
     panel.append(copyButton, downloadButton, shareButton, status);
-    const anchor = document.querySelector(
-      "div.buy_now, section.buy_now, #cart, .cart_list",
-    );
-    if (anchor?.parentElement) {
-      anchor.parentElement.insertBefore(panel, anchor);
-    } else {
-      const host = document.querySelector("#main_inner, #main, main") || document.body;
-      host.prepend(panel);
-    }
+    (document.body || document.documentElement).appendChild(panel);
   }
 
   async function ensureCartSnapshot() {
@@ -6830,16 +6825,22 @@
 }
 
 .dltracker-cart-diagnostic {
+  position: fixed;
+  z-index: 2147483000;
+  right: max(12px, env(safe-area-inset-right));
+  bottom: max(12px, env(safe-area-inset-bottom));
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  margin: 8px 0 12px;
-  padding: 8px 10px;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 7px;
+  width: min(210px, calc(100vw - 24px));
+  margin: 0;
+  padding: 10px;
   color: #52616b;
-  background: #f5f8fa;
+  background: rgba(245, 248, 250, .98);
   border: 1px solid #d6e0e5;
-  border-radius: 7px;
+  border-radius: 9px;
+  box-shadow: 0 5px 22px rgba(25, 39, 47, .24);
   font-size: 12px;
   box-sizing: border-box;
 }
@@ -6856,6 +6857,12 @@
 .dltracker-cart-diagnostic button:disabled {
   opacity: .55;
   cursor: wait;
+}
+
+.dltracker-cart-diagnostic span {
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .dltracker-mobile-product-host {
