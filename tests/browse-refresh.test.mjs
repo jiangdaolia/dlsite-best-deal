@@ -83,6 +83,20 @@ test("浏览排序只在实际顺序变化时移动作品节点", () => {
   assert.match(sortSource, /sortedNodes\.forEach\(\(node\) => parent\.appendChild\(node\)\)/);
 });
 
+test("从详情页返回列表时恢复已选筛选和排序", () => {
+  const restoreSource = functionSource("restoreBrowseStateOnPageShow");
+  const listenerSource = functionSource("installSpaListeners");
+  assert.match(restoreSource, /if \(!event\?\.persisted\) return/);
+  assert.match(restoreSource, /lastUrl = currentUrl/);
+  assert.match(restoreSource, /resetBrowseOriginalOrder\(\)/);
+  assert.match(restoreSource, /await bootstrap\(\)/);
+  assert.match(restoreSource, /await applyBrowseSortAndFilter\(\)/);
+  assert.match(
+    listenerSource,
+    /window\.addEventListener\("pageshow", restoreBrowseStateOnPageShow\)/,
+  );
+});
+
 test("手机版控件挂到作品一览而不是页顶排行", () => {
   const collectSource = functionSource("collectBrowseCards");
   const enhanceSource = functionSource("enhanceGenericBrowseCards");
@@ -151,6 +165,8 @@ test("普通作品卡在标签后使用三框和简洁优惠行", () => {
   assert.match(renderSource, /dltracker-browse-analysis-amount/);
   assert.match(renderSource, /可用优惠券：/);
   assert.match(renderSource, /平台活动：/);
+  assert.match(renderSource, /dltracker-browse-analysis-offer-group/);
+  assert.match(renderSource, /dltracker-browse-analysis-offer-item/);
   assert.match(frameSource, /dltracker-browse-analysis-frame/);
   assert.match(
     source,
@@ -170,5 +186,17 @@ test("普通作品卡在标签后使用三框和简洁优惠行", () => {
   assert.match(
     source,
     /@media \(max-width: 768px\)[\s\S]*?\.\$\{UI_CLASSNAME\}\.dltracker-browse-analysis \{\s*margin: 2px 0 12px/,
+  );
+  assert.match(
+    source,
+    /@media \(max-width: 768px\)[\s\S]*?\.dltracker-browse-analysis-grid \{\s*grid-template-columns: minmax\(0, 1fr\)/,
+  );
+  assert.match(
+    source,
+    /\.dltracker-browse-analysis-offers \{[\s\S]*?flex-wrap: wrap[\s\S]*?overflow-wrap: normal/,
+  );
+  assert.match(
+    source,
+    /\.dltracker-browse-analysis-offer-group \{[\s\S]*?flex-wrap: wrap/,
   );
 });

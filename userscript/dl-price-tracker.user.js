@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.21
+// @version      0.6.22
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -60,6 +60,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.22": [
+      "手机普通作品卡的本次可到、史低与趋势改为一行一个框",
+      "优惠券与平台活动拆为可自适应换行的独立内容组",
+      "修复从作品详情返回浏览列表后已选筛选未重新生效",
+    ],
     "0.6.21": [
       "调整手机普通作品卡的优惠分析间距，使其更贴近本卡并远离下一张卡",
     ],
@@ -4956,20 +4961,43 @@
       const couponLabels = insight.couponOptions
         .slice(0, 2)
         .map(compactCouponListLabel);
-      const offerLabels = [];
+      const offerGroups = [];
       if (couponLabels.length) {
-        const extra = insight.couponOptions.length > 2
-          ? `｜+${insight.couponOptions.length - 2}种`
-          : "";
-        offerLabels.push(`可用优惠券：${couponLabels.join("｜")}${extra}`);
+        const labels = [...couponLabels];
+        if (insight.couponOptions.length > 2) {
+          labels.push(`+${insight.couponOptions.length - 2}种`);
+        }
+        offerGroups.push({ label: "可用优惠券：", values: labels });
       }
       if (insight.bulkRule) {
-        offerLabels.push(`平台活动：${insight.bulkRule.minCount}件${compactOff(insight.bulkRule.discountRate)}`);
+        offerGroups.push({
+          label: "平台活动：",
+          values: [`${insight.bulkRule.minCount}件${compactOff(insight.bulkRule.discountRate)}`],
+        });
       }
-      if (offerLabels.length || insight.partial) {
+      if (offerGroups.length || insight.partial) {
         const offers = document.createElement("div");
         offers.className = "dltracker-browse-analysis-offers";
-        offers.textContent = offerLabels.join("｜") || "部分优惠未确认";
+        for (const offerGroup of offerGroups) {
+          const group = document.createElement("span");
+          group.className = "dltracker-browse-analysis-offer-group";
+          const title = document.createElement("strong");
+          title.textContent = offerGroup.label;
+          group.appendChild(title);
+          offerGroup.values.forEach((value) => {
+            const item = document.createElement("span");
+            item.className = "dltracker-browse-analysis-offer-item";
+            item.textContent = value;
+            group.appendChild(item);
+          });
+          offers.appendChild(group);
+        }
+        if (insight.partial) {
+          const partial = document.createElement("span");
+          partial.className = "dltracker-browse-analysis-offer-group";
+          partial.textContent = "部分优惠未确认";
+          offers.appendChild(partial);
+        }
         layout.appendChild(offers);
       }
     }
@@ -8416,6 +8444,10 @@ a.dltracker-browse-analysis-frame {
 }
 
 .dltracker-browse-analysis-offers {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 2px 8px;
   width: 100%;
   padding: 3px 5px;
   border-radius: 5px;
@@ -8424,7 +8456,20 @@ a.dltracker-browse-analysis-frame {
   background: #fff4de;
   font-size: 9px;
   line-height: 1.3;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+}
+
+.dltracker-browse-analysis-offer-group {
+  display: inline-flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: 1px 4px;
+}
+
+.dltracker-browse-analysis-offer-group strong,
+.dltracker-browse-analysis-offer-item {
+  white-space: nowrap;
 }
 
 .dltracker-deal-compact {
@@ -9558,6 +9603,14 @@ a.dltracker-cart-deal-frame:focus-visible {
     margin: 2px 0 12px;
   }
 
+  .dltracker-browse-analysis-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dltracker-browse-analysis-frame {
+    width: 100%;
+  }
+
   .dltracker-mobile-product-host .${UI_CLASSNAME} .dltracker-chip,
   .dltracker-mobile-product-host .${UI_CLASSNAME} .dltracker-btn {
     width: 100%;
@@ -9665,6 +9718,21 @@ a.dltracker-cart-deal-frame:focus-visible {
     });
   }
 
+  function restoreBrowseStateOnPageShow(event) {
+    if (!event?.persisted) return;
+    const currentUrl = location.href;
+    lastUrl = currentUrl;
+    resetBrowseOriginalOrder();
+    waitForElement(currentUrl)
+      .then(async () => {
+        await bootstrap();
+        await applyBrowseSortAndFilter();
+      })
+      .catch((error) => {
+        console.warn(`[${APP_NAME}] restore browse state failed:`, error);
+      });
+  }
+
   function mutationIsInsideReachDialog(mutation) {
     const target = mutation?.target;
     const element = target instanceof Element
@@ -9688,6 +9756,7 @@ a.dltracker-cart-deal-frame:focus-visible {
     };
 
     window.addEventListener("popstate", () => onUrlChange());
+    window.addEventListener("pageshow", restoreBrowseStateOnPageShow);
     setInterval(() => onUrlChange(), 500);
 
     let domDebounceTimer = null;
