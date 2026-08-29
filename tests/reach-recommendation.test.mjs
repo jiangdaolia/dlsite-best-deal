@@ -313,8 +313,11 @@ test("推荐明细按优惠对象分摊券额且总计不画表格", () => {
   assert.match(functionSource("appendRecommendationTable"), /appendRecommendationDiscounts/);
   assert.doesNotMatch(functionSource("appendRecommendationTable"), /`现在 /);
   assert.match(functionSource("appendRecommendationDiscounts"), /is-strongest/);
-  assert.match(source, /table-layout: fixed/);
-  assert.match(source, /min-width: 0/);
+  assert.match(source, /\.dltracker-reach-recommendation-table-wrap \{[\s\S]*?overflow-x: auto/);
+  assert.match(source, /\.dltracker-reach-recommendation-table \{[\s\S]*?width: max-content/);
+  assert.match(source, /\.dltracker-reach-recommendation-table \{[\s\S]*?min-width: 100%/);
+  assert.match(source, /table-layout: auto/);
+  assert.doesNotMatch(source, /\.dltracker-reach-recommendation-table th:nth-child/);
   assert.match(functionSource("appendRecommendationTable"), /优惠前/);
   assert.match(functionSource("appendRecommendationTable"), /优惠后/);
   assert.match(
@@ -461,9 +464,18 @@ test("满额固定减免券的理论计算改用门槛等效折扣", () => {
 });
 
 test("当前作品弹窗过滤不适用券并锁定背景滚动", () => {
+  const dialogSource = functionSource("renderReachDialog");
   assert.match(
-    functionSource("renderReachDialog"),
+    dialogSource,
     /couponMatchesDealProduct\(offer\.coupon, insight\.product\)/,
+  );
+  assert.match(dialogSource, /比史低便宜 \$\{cartLocalizedMoney\(-historyDifference, cnyRate\)\}/);
+  assert.match(dialogSource, /比史低贵 \$\{cartLocalizedMoney\(historyDifference, cnyRate\)\}/);
+  assert.match(dialogSource, /与史低相同/);
+  assert.match(dialogSource, /"比平台当前折扣价节省"/);
+  assert.match(
+    dialogSource,
+    /cartLocalizedMoney\(Math\.max\(0, currentPrice - targetPrice\), cnyRate\)/,
   );
   assert.match(functionSource("openReachDialog"), /lockReachDialogScroll\(\)/);
   assert.match(functionSource("closeReachDialog"), /unlockReachDialogScroll\(\)/);
@@ -490,14 +502,34 @@ test("购物车使用五框、两类表格和双入口弹窗", () => {
   assert.match(layoutSource, /"本次可到"/);
   assert.match(layoutSource, /label: "平台折扣"/);
   assert.match(layoutSource, /label: "史低折扣"/);
+  assert.ok(
+    layoutSource.indexOf('label: "史低折扣"') <
+      layoutSource.indexOf('label: "平台折扣"'),
+  );
+  assert.match(
+    layoutSource,
+    /className: hasPriceComparison && reachPrice <= record\.lowestPrice[\s\S]*?"dltracker-best-reach-gold"/,
+  );
+  assert.match(
+    layoutSource,
+    /record\.lowestPrice <= reachPrice[\s\S]*?historyClassNames\.push\("dltracker-best-reach-gold"\)/,
+  );
   assert.match(layoutSource, /openReachDialog\(insight, record\.lowestPrice, "price"\)/);
   assert.match(layoutSource, /openReachDialog\(insight, record\.lowestPrice, "status"\)/);
   assert.match(functionSource("appendCartCouponTable"),
     /\["折扣", "使用条件", "可用次数", "到期（中国时间）"\]/);
+  assert.match(functionSource("appendCartCouponTable"), /if \(index >= 2\)/);
+  assert.match(functionSource("appendCartCouponTable"), /dltracker-cart-coupon-extra/);
+  assert.match(functionSource("appendCartCouponTable"), /展开其余 \$\{insight\.couponOptions\.length - 2\} 种优惠券/);
+  assert.match(functionSource("appendCartCouponTable"), /收起到前 2 种/);
   assert.match(functionSource("appendCartActivityTable"),
     /\["活动条件", "到期（中国时间）"\]/);
   assert.doesNotMatch(dialogSource, /appendOrderDetails/);
   assert.doesNotMatch(dialogSource, /自动拆单/);
   assert.match(source, /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\) max-content max-content/);
   assert.match(source, /@media \(max-width: 900px\)[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(
+    functionSource("enhanceGenericBrowseCards"),
+    /if \(cartPage\) \{\s*priceHost\.querySelector\("\.dltracker-jpy-price"\)\?\.remove\(\)/,
+  );
 });
