@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.12
+// @version      0.6.13
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.12";
+  const APP_VERSION = "0.6.13";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -60,6 +60,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.13": [
+      "修正人民币估算混用其他作品换算比例的问题",
+      "优先使用当前作品同源的结构化 CNY/JPY 现价",
+      "避免购物车划线原价或含糊的 ¥ 数值污染汇率",
+    ],
     "0.6.12": [
       "重写拼单推荐：限定范围、史低门槛与券层高低严格匹配",
       "件数券和平台活动改为六列候选清单，默认显示前10部",
@@ -1355,6 +1360,18 @@
     return matches.length ? Number(matches.at(-1)[1]) : null;
   }
 
+  function lastCnyPriceFromText(value) {
+    const text = String(value || "").replace(/,/g, "");
+    const explicit = [...text.matchAll(
+      /(?:RMB|CNY|CN\s*[¥￥]|人民币)\s*(\d{1,8}(?:\.\d{1,2})?)/gi,
+    )];
+    if (explicit.length) return Number(explicit.at(-1)[1]);
+    // 中文站点有时只显示货币符号。只接受带小数的本地价，避免把
+    // “¥1100”一类日元原价或划线价误当成人民币。
+    const symbolic = [...text.matchAll(/[¥￥]\s*(\d{1,8}\.\d{1,2})/g)];
+    return symbolic.length ? Number(symbolic.at(-1)[1]) : null;
+  }
+
   function dealNormalizedSite(value) {
     return String(value || "")
       .toLowerCase()
@@ -2142,9 +2159,7 @@
       if (seen.has(id)) continue;
       seen.add(id);
       const priceText = node.querySelector(".work_price, .n_work_price_wrap, [class*='price']")?.textContent || "";
-      const cnyMatch = priceText.replace(/,/g, "").match(
-        /(?:RMB|CNY|CN\s*[¥￥]|人民币|[¥￥])\s*(\d{1,8}(?:\.\d{1,2})?)/i,
-      );
+      const cnyPrice = lastCnyPriceFromText(priceText);
       const price = cartCurrentPriceFromNode(node);
       products.push({
         id,
@@ -2157,7 +2172,7 @@
           node.getAttribute("data-bulkbuy_origin_price"),
           price,
         ),
-        cnyPrice: cnyMatch ? Number(cnyMatch[1]) : 0,
+        cnyPrice: Number.isFinite(cnyPrice) ? cnyPrice : 0,
         bulkbuyKey: node.getAttribute("data-bulkbuy_key") || "",
       });
     }
@@ -3232,23 +3247,13 @@
   }
   // </deal-insight-format-core>
 
-  function median(values) {
-    const sorted = values
-      .filter((value) => Number.isFinite(value) && value > 0)
-      .sort((a, b) => a - b);
-    if (!sorted.length) return null;
-    const middle = Math.floor(sorted.length / 2);
-    return sorted.length % 2
-      ? sorted[middle]
-      : (sorted[middle - 1] + sorted[middle]) / 2;
-  }
-
   function currencyRateFromProducts(products) {
-    return median((Array.isArray(products) ? products : []).map((product) => {
+    for (const product of Array.isArray(products) ? products : []) {
       const yen = dealNumber(product?.price);
       const cny = dealNumber(product?.cnyPrice);
-      return yen > 0 && cny > 0 ? cny / yen : NaN;
-    }));
+      if (yen > 0 && cny > 0) return cny / yen;
+    }
+    return null;
   }
 
   function dealMoney(value, cnyRate = null) {
@@ -4779,7 +4784,10 @@
         officialPrice: item.officialPrice ||
           cartMetadata.get(String(item.id).toUpperCase())?.officialPrice || item.price || 0,
         title: item.title || cartMetadata.get(String(item.id).toUpperCase())?.title || item.id,
-        cnyPrice: item.cnyPrice || cartMetadata.get(String(item.id).toUpperCase())?.cnyPrice || 0,
+        // 接口的 currency_price.CNY 与精确 JPY 现价同源，优先级高于
+        // 购物车 DOM 中可能同时包含划线原价的“¥”文本。
+        cnyPrice: cartMetadata.get(String(item.id).toUpperCase())?.cnyPrice ||
+          item.cnyPrice || 0,
       });
       const cartSnapshot = {
         ...rawCartSnapshot,

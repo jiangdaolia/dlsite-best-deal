@@ -30,7 +30,6 @@ vm.runInNewContext(
   ${functionSource("dealProductIds")}
   ${functionSource("couponMatchesDealProduct")}
   ${functionSource("couponEquivalentRate")}
-  ${functionSource("median")}
   ${functionSource("currencyRateFromProducts")}
   ${functionSource("dealMoney")}
   ${functionSource("compareRecommendationOrder")}
@@ -99,10 +98,28 @@ test("385日元对16.23元时统一使用当页换算比例", () => {
   const rate = currencyRateFromProducts([{
     price: 385,
     cnyPrice: 16.23,
+  }, {
+    price: 990,
+    cnyPrice: 41.83,
   }]);
 
   assert.ok(Math.abs(rate - 16.23 / 385) < 1e-12);
   assert.equal(dealMoney(385, rate), "385円｜约16.23元");
+});
+
+test("人民币换算优先当前作品，缺失时才回退购物车样本", () => {
+  const current = { price: 385, cnyPrice: 16.23 };
+  const cart = { price: 990, cnyPrice: 41.83 };
+  assert.equal(currencyRateFromProducts([current, cart]), 16.23 / 385);
+  assert.equal(currencyRateFromProducts([{ price: 385, cnyPrice: 0 }, cart]), 41.83 / 990);
+});
+
+test("购物车结构化人民币价优先于可能含划线原价的DOM文本", () => {
+  const enrichSource = functionSource("enhanceDealInsights");
+  assert.match(
+    enrichSource,
+    /cartMetadata\.get\(String\(item\.id\)\.toUpperCase\(\)\)\?\.cnyPrice \|\|\s*item\.cnyPrice/,
+  );
 });
 
 test("满额组合先少超额，超额相同时优先更多作品", () => {

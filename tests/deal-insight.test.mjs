@@ -42,6 +42,7 @@ vm.runInNewContext(
     cartAreaFromMarkerText,
     dealDateMillis,
     lastYenPriceFromText,
+    lastCnyPriceFromText,
     compactCouponCondition,
     compactCouponExpiry,
     compactCouponUsage,
@@ -67,6 +68,7 @@ const {
   cartAreaFromMarkerText,
   dealDateMillis,
   lastYenPriceFromText,
+  lastCnyPriceFromText,
   compactCouponCondition,
   compactCouponExpiry,
   compactCouponUsage,
@@ -209,6 +211,12 @@ test("购物车价格文字同时含原价和现价时取最后的日元现价",
   assert.equal(lastYenPriceFromText("1,320円 70%OFF 385円"), 385);
   assert.equal(lastYenPriceFromText("RMB 18.72｜396 JPY"), 396);
   assert.equal(lastYenPriceFromText("RMB 18.72"), null);
+});
+
+test("人民币价格忽略含糊的整数日元符号并取最后的明确现价", () => {
+  assert.equal(lastCnyPriceFromText("¥1100 RMB 18.72 RMB 16.23"), 16.23);
+  assert.equal(lastCnyPriceFromText("¥1100 ￥16.23"), 16.23);
+  assert.equal(lastCnyPriceFromText("¥1100"), null);
 });
 
 test("活动优先读取结构化结束时间且不为纯日期虚构 23:59", () => {
