@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.0
+// @version      0.6.1
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.0";
+  const APP_VERSION = "0.6.1";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -53,11 +53,15 @@
   const DLSITE_PRODUCT_INFO_PATH = "/maniax/product/info/ajax";
   const PRODUCT_METADATA_TTL_MS = 30 * 60 * 1000;
   const DEAL_CACHE_STORAGE_KEY = "dltracker-deal-insight-cache-v3";
-  const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v3";
+  const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v4";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.1": [
+      "修正折扣商品原价被误计入购物车满减门槛",
+      "移除与价格栏重复的‘当前 N円’标签",
+    ],
     "0.6.0": [
       "点击‘本次可到’查看作品与购物车计算、拆单和拼单建议",
       "浏览列表新增最高可达折扣、理论低价排序和凑件优惠筛选",
@@ -1271,6 +1275,13 @@
       .trim();
   }
 
+  function lastYenPriceFromText(value) {
+    const matches = [...String(value || "")
+      .replace(/,/g, "")
+      .matchAll(/(\d{1,8}(?:\.\d{1,2})?)\s*(?:円|JPY)/gi)];
+    return matches.length ? Number(matches.at(-1)[1]) : null;
+  }
+
   function dealNormalizedSite(value) {
     return String(value || "")
       .toLowerCase()
@@ -1976,6 +1987,42 @@
     return snapshot;
   }
 
+  function cartCurrentPriceFromNode(node) {
+    const priceHost = firstElementBySelectors([
+      ".n_work_price_wrap",
+      ".work_price",
+      "[class*='price']",
+    ], node);
+    if (priceHost) {
+      const clean = priceHost.cloneNode(true);
+      for (const injected of clean.querySelectorAll([
+        `.${UI_CLASSNAME}`,
+        `.${DEAL_INSIGHT_CLASSNAME}`,
+        ".dltracker-jpy-price",
+        "[class^='dltracker-']",
+        "[class*=' dltracker-']",
+        "[class^='dlcr-']",
+        "[class*=' dlcr-']",
+      ].join(","))) {
+        injected.remove();
+      }
+      const textPrice = lastYenPriceFromText(clean.textContent);
+      if (Number.isFinite(textPrice) && textPrice >= 0) return textPrice;
+    }
+    for (const name of [
+      "data-price",
+      "data-sale-price",
+      "data-bulkbuy_price",
+      "data-bulk-price",
+    ]) {
+      const raw = node.getAttribute(name) ||
+        node.querySelector(`[${name}]`)?.getAttribute(name);
+      const parsed = dealNumber(raw, NaN);
+      if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+    }
+    return 0;
+  }
+
   function cartProductsFromRoot(root, area = "active") {
     const nodes = root.querySelectorAll([
       "li.cart_list_item._cart_items",
@@ -2003,13 +2050,10 @@
       if (seen.has(id)) continue;
       seen.add(id);
       const priceText = node.querySelector(".work_price, .n_work_price_wrap, [class*='price']")?.textContent || "";
-      const priceMatch = priceText.replace(/,/g, "").match(/(\d{1,8})\s*(?:円|JPY)/i);
       const cnyMatch = priceText.replace(/,/g, "").match(
         /(?:RMB|CNY|CN\s*[¥￥]|人民币|[¥￥])\s*(\d{1,8}(?:\.\d{1,2})?)/i,
       );
-      const price = priceMatch ? Number(priceMatch[1]) : dealNumber(
-        node.getAttribute("data-price") || node.getAttribute("data-bulkbuy_origin_price"),
-      );
+      const price = cartCurrentPriceFromNode(node);
       products.push({
         id,
         title: dealPlainText(
@@ -5369,13 +5413,6 @@
       typeof compareCurrent === "number" &&
       typeof record.lowestPrice === "number" &&
       Math.abs(compareCurrent - record.lowestPrice) < 0.01;
-
-    if (typeof compareCurrent === "number" && !isAtLowest) {
-      const currentChip = document.createElement("span");
-      currentChip.className = "dltracker-chip dltracker-chip-current";
-      currentChip.textContent = `当前 ${toYen(compareCurrent)}`;
-      card.appendChild(currentChip);
-    }
 
     const text = document.createElement("span");
     text.className = "dltracker-chip-text";

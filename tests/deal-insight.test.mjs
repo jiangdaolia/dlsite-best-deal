@@ -39,6 +39,7 @@ vm.runInNewContext(
     activeCartFingerprint,
     cartSnapshotFingerprint,
     dealDateMillis,
+    lastYenPriceFromText,
     compactCouponCondition,
     compactCouponExpiry,
     compactCouponUsage,
@@ -61,6 +62,7 @@ const {
   activeCartFingerprint,
   cartSnapshotFingerprint,
   dealDateMillis,
+  lastYenPriceFromText,
   compactCouponCondition,
   compactCouponExpiry,
   compactCouponUsage,
@@ -197,6 +199,12 @@ test("指定作品、社团、站点与隐藏分类分别匹配", () => {
 test("日本时间到期字段会转换为绝对时间并可按中国时间显示", () => {
   const value = dealDateMillis("2026-09-13 23:59:00");
   assert.equal(new Date(value).toISOString(), "2026-09-13T14:59:00.000Z");
+});
+
+test("购物车价格文字同时含原价和现价时取最后的日元现价", () => {
+  assert.equal(lastYenPriceFromText("1,320円 70%OFF 385円"), 385);
+  assert.equal(lastYenPriceFromText("RMB 18.72｜396 JPY"), 396);
+  assert.equal(lastYenPriceFromText("RMB 18.72"), null);
 });
 
 test("活动优先读取结构化结束时间且不为纯日期虚构 23:59", () => {
