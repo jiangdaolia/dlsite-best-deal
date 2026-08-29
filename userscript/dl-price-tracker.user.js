@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.17
+// @version      0.6.18
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -60,6 +60,12 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.18": [
+      "手机端优惠信息移到完整原生作品行之后，不再改变 DLsite 原生布局",
+      "手机端状态按钮与价格趋势改为同一行",
+      "需凑单推荐表新增看详情与单作品放回购物车按钮",
+      "本单优惠券移到方案总结，其他同档券与适用活动并入备注",
+    ],
     "0.6.17": [
       "调整购物车价格框顺序为史低优先于平台折扣",
       "需凑单推荐表改为按内容自适应列宽并支持横向滚动",
@@ -275,6 +281,7 @@
   let dbPromise = null;
   const recordInFlight = new Map();
   const canonicalRjCache = new Map();
+  const pendingRecommendationRestoreIds = new Set();
   let couponImportInFlight = null;
   let dealCouponFetchInFlight = null;
   let importedCouponPageUrl = "";
@@ -1026,45 +1033,31 @@
       item.querySelector(".__buy_later_target .cart_list_item_inner") ||
       item.querySelector(".cart_list_item_inner") ||
       item;
-    const direct = firstElementBySelectors([
-      ".cart_list_item_control",
-      ".cart_list_item_controls",
-      ".cart_list_item_action",
-      ".cart_list_item_actions",
-      ".n_work_cart_btn",
-      ".work_cart_btn",
-      ".cart_action",
-    ], inner);
-    const textAction = [...inner.querySelectorAll("a, button")].find((node) =>
-      /放回购物车|カート(?:に|へ)戻す|稍后再买|あとで買う|あとで購入/i.test(
-        dealPlainText(node.textContent),
-      ));
-    const target = direct || textAction;
-    if (!target || target === inner) return { parent: inner, before: null };
-    let anchor = target;
-    while (anchor.parentElement && anchor.parentElement !== inner) {
-      anchor = anchor.parentElement;
+    if (inner !== item && inner.parentElement) {
+      return { parent: inner.parentElement, before: inner.nextSibling };
     }
-    return anchor.parentElement === inner
-      ? { parent: inner, before: anchor }
-      : { parent: inner, before: null };
+    return { parent: item, before: null };
   }
 
   function ensureCartRenderHost(item) {
     const existed = item.querySelector(".dltracker-cart-host");
     const placement = findCartOperationAnchor(item);
     if (existed) {
-      if (placement.parent && existed.parentElement !== placement.parent) {
+      const oldParent = existed.parentElement;
+      oldParent?.classList.remove("dltracker-cart-layout-parent");
+      const needsMove = placement.parent && placement.before !== existed && (
+        oldParent !== placement.parent ||
+        existed.nextSibling !== placement.before
+      );
+      if (needsMove) {
         placement.parent.insertBefore(existed, placement.before);
       }
-      placement.parent?.classList.add("dltracker-cart-layout-parent");
       return existed;
     }
 
     const host = document.createElement("div");
     host.className = "dltracker-cart-host";
     if (placement.parent) {
-      placement.parent.classList.add("dltracker-cart-layout-parent");
       placement.parent.insertBefore(host, placement.before);
       return host;
     }
@@ -3794,17 +3787,11 @@
       return Math.round(platformPrice * (1 - rate / 100)) === recommendationPrice;
     });
     const alternativeLabels = equalCouponPaths.length
-      ? [`另有${equalCouponPaths.map((item) => compactCouponListLabel({
+      ? [`同档券：${equalCouponPaths.map((item) => compactCouponListLabel({
           ...item,
           equivalentRate: couponEquivalentRate(item, product),
         })).join("、")}`]
       : [];
-    if (!useActivity && activityRate > 0 &&
-      Math.abs(activityRate - saleRate) < 0.001) {
-      alternativeLabels.push(
-        `另有${dealNumber(rule.minCount, 3)}件${compactOff(activityRate)}`,
-      );
-    }
     return {
       recommendationPrice,
       totalRate,
@@ -3818,6 +3805,9 @@
         equivalentRate: couponEquivalentRate(coupon, product),
       }) : "—",
       activityLabel: useActivity
+        ? `${dealNumber(rule.minCount, 3)}件${compactOff(activityRate)}`
+        : "—",
+      applicableActivityLabel: rule && product.bulkbuyKey && activityRate > 0
         ? `${dealNumber(rule.minCount, 3)}件${compactOff(activityRate)}`
         : "—",
       alternativeLabels,
@@ -3866,6 +3856,10 @@
       const activityLabel = line?.dealApplied && rule
         ? `${dealNumber(rule.minCount, 3)}件${compactOff(rule.discountRate)}`
         : "—";
+      const applicableActivityLabel = rule && product.bulkbuyKey &&
+        dealNumber(rule.discountRate) > 0
+        ? `${dealNumber(rule.minCount, 3)}件${compactOff(rule.discountRate)}`
+        : "—";
       return {
         ...product,
         recommendationPrice: finalPrice,
@@ -3879,9 +3873,9 @@
           ? activityLabel
           : saleRate > 0 ? `当前${compactOff(saleRate)}` : "无折扣",
         activityLabel,
+        applicableActivityLabel,
         couponLabel: line?.couponTarget ? product.couponLabel : "—",
-        alternativeLabels: offer.coupon?.discountType === "fixed" &&
-          offer.coupon?.minSpend > 0 ? [] : product.alternativeLabels,
+        alternativeLabels: product.alternativeLabels,
       };
     });
   }
@@ -4058,6 +4052,106 @@
     });
   }
 
+  function buyLaterOwnerForRecommendation(productId) {
+    const expected = String(productId || "").toUpperCase();
+    if (!expected) return null;
+    return getBuyLaterOwnerItems().find((item) =>
+      extractRjCodeFromCartItem(item) === expected) || null;
+  }
+
+  function recommendationProductHref(productId) {
+    const owner = buyLaterOwnerForRecommendation(productId);
+    return owner?.querySelector('a[href*="product_id/"]')?.href || "";
+  }
+
+  function nativeRestoreCartAction(productId) {
+    const owner = buyLaterOwnerForRecommendation(productId);
+    if (!owner) return null;
+    return [...owner.querySelectorAll(
+      'a, button, input[type="button"], input[type="submit"]',
+    )].find((node) => {
+      if (node.closest("[class^='dltracker-'], [class*=' dltracker-']")) {
+        return false;
+      }
+      const label = dealPlainText([
+        node.textContent,
+        node.value,
+        node.getAttribute("aria-label"),
+        node.getAttribute("title"),
+      ].filter(Boolean).join(" "));
+      return /放回购物车|カート(?:に|へ)戻す/i.test(label);
+    }) || null;
+  }
+
+  function restoreRecommendationToCart(productId, control) {
+    const id = String(productId || "").toUpperCase();
+    if (pendingRecommendationRestoreIds.has(id)) return;
+    const action = nativeRestoreCartAction(id);
+    if (!action) {
+      showDealToast(`${id} 未找到 DLsite 原生放回按钮`, true, 6000);
+      return;
+    }
+    pendingRecommendationRestoreIds.add(id);
+    control.disabled = true;
+    control.textContent = "处理中";
+    action.click();
+    showDealToast(`${id} 已交给 DLsite 放回购物车`, false, 4000);
+    setTimeout(() => {
+      pendingRecommendationRestoreIds.delete(id);
+      if (!control.isConnected) return;
+      const stillLater = Boolean(buyLaterOwnerForRecommendation(id));
+      control.disabled = !stillLater;
+      control.textContent = stillLater ? "加购物车" : "已加入";
+    }, 2500);
+  }
+
+  function recommendationRemarkLines(product) {
+    const lines = [...(product.alternativeLabels || [])];
+    const activity = product.applicableActivityLabel || product.activityLabel;
+    if (activity && activity !== "—") {
+      lines.push(`适用活动：${activity}`);
+    }
+    return lines.length ? lines : ["—"];
+  }
+
+  function appendRecommendationActions(row, product) {
+    const detailCell = document.createElement("td");
+    detailCell.className = "dltracker-reach-recommendation-action-cell";
+    const href = recommendationProductHref(product.id);
+    if (href) {
+      const detail = document.createElement("a");
+      detail.className = "dltracker-reach-recommendation-action";
+      detail.href = href;
+      detail.target = "_blank";
+      detail.rel = "noopener noreferrer";
+      detail.textContent = "看详情";
+      detailCell.appendChild(detail);
+    } else {
+      detailCell.textContent = "—";
+    }
+
+    const cartCell = document.createElement("td");
+    cartCell.className = "dltracker-reach-recommendation-action-cell";
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "dltracker-reach-recommendation-action";
+    add.textContent = "加购物车";
+    const pending = pendingRecommendationRestoreIds.has(
+      String(product.id || "").toUpperCase(),
+    );
+    const nativeAction = nativeRestoreCartAction(product.id);
+    add.disabled = pending || !nativeAction;
+    if (pending) {
+      add.textContent = "处理中";
+    } else if (!nativeAction) {
+      add.title = "未找到 DLsite 原生放回购物车按钮";
+    }
+    add.addEventListener("click", () =>
+      restoreRecommendationToCart(product.id, add));
+    cartCell.appendChild(add);
+    row.append(detailCell, cartCell);
+  }
+
   function appendRecommendationTable(
     parent,
     recommendation,
@@ -4074,7 +4168,7 @@
     table.className = "dltracker-reach-recommendation-table";
     const head = document.createElement("thead");
     const headRow = document.createElement("tr");
-    ["作品", "人民币（日元）", "现在折扣/平台折扣/史低折扣", "本单适用优惠券", "本单适用平台活动", "备注"]
+    ["作品", "人民币（日元）", "现在折扣/平台折扣/史低折扣", "备注", "看详情", "加购物车"]
       .forEach((label) => {
         const cell = document.createElement("th");
         cell.textContent = label;
@@ -4115,11 +4209,7 @@
         product.id || product.title || `作品${index + 1}`,
         recommendationMoneyLines(finalPrice, cnyRate),
         discounts,
-        product.couponLabel || "—",
-        product.activityLabel || "—",
-        product.alternativeLabels?.length
-          ? product.alternativeLabels
-          : "—",
+        recommendationRemarkLines(product),
       ];
       values.forEach((value, cellIndex) => {
         const cell = document.createElement(cellIndex === 0 ? "th" : "td");
@@ -4133,6 +4223,7 @@
         }
         row.appendChild(cell);
       });
+      appendRecommendationActions(row, product);
       body.appendChild(row);
     });
     table.append(head, body);
@@ -4476,18 +4567,21 @@
             const offer = recommendation.offer;
             const offerLabels = [];
             if (offer.coupon) {
-              offerLabels.push(compactCouponListLabel({
+              offerLabels.push(`本单适用优惠券：${compactCouponListLabel({
                 ...offer.coupon,
                 equivalentRate: couponEquivalentRate(
                   offer.coupon,
                   insight.product,
                 ),
-              }));
+              })}`);
             }
             if (offer.needsActivity) {
-              offerLabels.push(`${dealNumber(offer.activityRule?.minCount, 3)}件${compactOff(offer.activityRule?.discountRate)}`);
+              offerLabels.push(`本单适用平台活动：${dealNumber(offer.activityRule?.minCount, 3)}件${compactOff(offer.activityRule?.discountRate)}`);
             }
-            summary.textContent = `${offerLabels.join("＋")}｜${recommendation.kind === "spend" ? "满额拼单方案" : `候选 ${recommendation.candidates.length} 部`}`;
+            const offerSummary = offerLabels.length
+              ? `${offerLabels.join("＋")}｜`
+              : "";
+            summary.textContent = `${offerSummary}${recommendation.kind === "spend" ? "满额拼单方案" : `候选 ${recommendation.candidates.length} 部`}`;
             details.appendChild(summary);
             if (recommendation.kind === "candidates") {
               appendRecommendationTable(details, recommendation, cnyRate, {
@@ -8215,6 +8309,36 @@
   font-size: 11px;
 }
 
+.dltracker-reach-recommendation-action-cell {
+  text-align: center !important;
+  vertical-align: middle !important;
+}
+
+.dltracker-reach-recommendation-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+  padding: 4px 8px;
+  border: 1px solid #b8cbd5;
+  border-radius: 5px;
+  box-sizing: border-box;
+  color: #315f7d;
+  background: #fff;
+  font: inherit;
+  font-weight: 700;
+  line-height: 1.2;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dltracker-reach-recommendation-action:disabled {
+  color: #8a979e;
+  background: #f2f5f6;
+  cursor: default;
+}
+
 .dltracker-reach-alternatives h5 {
   margin: 9px 0 0;
   color: #52616b;
@@ -8295,15 +8419,6 @@
   margin-top: 6px;
   width: 100%;
   box-sizing: border-box;
-}
-
-.dltracker-cart-layout-parent {
-  flex-wrap: wrap !important;
-}
-
-.dltracker-cart-layout-parent > .dltracker-cart-host {
-  flex: 0 0 100%;
-  min-width: 0;
 }
 
 .${UI_CLASSNAME}.dltracker-cart-layout {
@@ -8949,11 +9064,27 @@ a.dltracker-cart-deal-frame:focus-visible {
 
 @media (max-width: 900px) {
   .dltracker-cart-deal-grid {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) max-content;
+  }
+
+  .dltracker-cart-price-frame {
+    grid-column: 1 / -1;
+  }
+
+  .dltracker-cart-status {
+    grid-column: 1;
+  }
+
+  .dltracker-cart-trend {
+    grid-column: 2;
   }
 
   .dltracker-cart-deal-frame {
     width: 100%;
+  }
+
+  .dltracker-cart-deal-frame.dltracker-cart-trend {
+    width: auto;
   }
 
   .dltracker-cart-price-frame strong,

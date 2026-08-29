@@ -305,12 +305,16 @@ test("推荐明细按优惠对象分摊券额且总计不画表格", () => {
   assert.equal(prices.get("C"), 300);
   assert.match(functionSource("appendRecommendationTable"), /人民币（日元）/);
   assert.match(functionSource("appendRecommendationTable"), /现在折扣\/平台折扣\/史低折扣/);
-  assert.match(functionSource("appendRecommendationTable"), /本单适用优惠券/);
-  assert.match(functionSource("appendRecommendationTable"), /本单适用平台活动/);
   assert.match(functionSource("appendRecommendationTable"), /备注/);
+  assert.match(functionSource("appendRecommendationTable"), /看详情/);
+  assert.match(functionSource("appendRecommendationTable"), /加购物车/);
+  assert.doesNotMatch(functionSource("appendRecommendationTable"), /本单适用优惠券/);
+  assert.doesNotMatch(functionSource("appendRecommendationTable"), /本单适用平台活动/);
   assert.match(functionSource("appendRecommendationTable"), /product\.id \|\| product\.title/);
   assert.match(functionSource("appendRecommendationTable"), /recommendationMoneyLines/);
   assert.match(functionSource("appendRecommendationTable"), /appendRecommendationDiscounts/);
+  assert.match(functionSource("appendRecommendationTable"), /recommendationRemarkLines/);
+  assert.match(functionSource("appendRecommendationTable"), /appendRecommendationActions/);
   assert.doesNotMatch(functionSource("appendRecommendationTable"), /`现在 /);
   assert.match(functionSource("appendRecommendationDiscounts"), /is-strongest/);
   assert.match(source, /\.dltracker-reach-recommendation-table-wrap \{[\s\S]*?overflow-x: auto/);
@@ -332,6 +336,28 @@ test("推荐明细按优惠对象分摊券额且总计不画表格", () => {
     functionSource("appendRecommendationTable"),
     /dltracker-reach-recommendation-summary/,
   );
+});
+
+test("拼单表仅代理原生单件放回并把替代优惠写入备注", () => {
+  const restoreSource = functionSource("restoreRecommendationToCart");
+  const nativeSource = functionSource("nativeRestoreCartAction");
+  const actionSource = functionSource("appendRecommendationActions");
+  const pricingSource = functionSource("recommendationCandidatePricing");
+  const dialogSource = functionSource("renderReachDialog");
+  assert.match(
+    functionSource("buyLaterOwnerForRecommendation"),
+    /getBuyLaterOwnerItems/,
+  );
+  assert.match(nativeSource, /放回购物车\|カート/);
+  assert.match(restoreSource, /pendingRecommendationRestoreIds\.add\(id\)/);
+  assert.match(restoreSource, /action\.click\(\)/);
+  assert.doesNotMatch(restoreSource, /fetch\(|GM_xmlhttpRequest/);
+  assert.match(actionSource, /target = "_blank"/);
+  assert.match(actionSource, /restoreRecommendationToCart\(product\.id, add\)/);
+  assert.match(pricingSource, /同档券：/);
+  assert.match(functionSource("recommendationRemarkLines"), /适用活动：/);
+  assert.match(dialogSource, /本单适用优惠券：/);
+  assert.match(dialogSource, /本单适用平台活动：/);
 });
 
 test("拼单候选必须当前已达或低于史低", () => {
@@ -527,9 +553,42 @@ test("购物车使用五框、两类表格和双入口弹窗", () => {
   assert.doesNotMatch(dialogSource, /appendOrderDetails/);
   assert.doesNotMatch(dialogSource, /自动拆单/);
   assert.match(source, /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\) max-content max-content/);
-  assert.match(source, /@media \(max-width: 900px\)[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(
+    source,
+    /@media \(max-width: 900px\)[\s\S]*?grid-template-columns: minmax\(0, 1fr\) max-content/,
+  );
+  assert.match(
+    source,
+    /@media \(max-width: 900px\)[\s\S]*?\.dltracker-cart-price-frame \{\s*grid-column: 1 \/ -1/,
+  );
+  assert.match(
+    source,
+    /@media \(max-width: 900px\)[\s\S]*?\.dltracker-cart-status \{\s*grid-column: 1[\s\S]*?\.dltracker-cart-trend \{\s*grid-column: 2/,
+  );
+  assert.match(
+    source,
+    /@media \(max-width: 900px\)[\s\S]*?\.dltracker-cart-deal-frame\.dltracker-cart-trend \{\s*width: auto/,
+  );
   assert.match(
     functionSource("enhanceGenericBrowseCards"),
     /if \(cartPage\) \{\s*priceHost\.querySelector\("\.dltracker-jpy-price"\)\?\.remove\(\)/,
   );
+});
+
+test("购物车优惠信息挂在完整原生作品行后且不改变原生布局", () => {
+  const anchorSource = functionSource("findCartOperationAnchor");
+  const hostSource = functionSource("ensureCartRenderHost");
+  assert.match(
+    anchorSource,
+    /return \{ parent: inner\.parentElement, before: inner\.nextSibling \}/,
+  );
+  assert.doesNotMatch(anchorSource, /放回购物车|あとで買う/);
+  assert.doesNotMatch(anchorSource, /cart_list_item_control/);
+  assert.match(
+    hostSource,
+    /oldParent\?\.classList\.remove\("dltracker-cart-layout-parent"\)/,
+  );
+  assert.match(hostSource, /placement\.before !== existed/);
+  assert.doesNotMatch(hostSource, /classList\.add\("dltracker-cart-layout-parent"\)/);
+  assert.doesNotMatch(source, /\.dltracker-cart-layout-parent\s*\{/);
 });
