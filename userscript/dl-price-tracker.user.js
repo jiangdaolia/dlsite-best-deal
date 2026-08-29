@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.10
+// @version      0.6.12
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.10";
+  const APP_VERSION = "0.6.12";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -60,6 +60,18 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.12": [
+      "重写拼单推荐：限定范围、史低门槛与券层高低严格匹配",
+      "件数券和平台活动改为六列候选清单，默认显示前10部",
+      "满额券改为少超额优先，同超额优先更多作品并提供3个方案",
+      "同时需要平台活动与优惠券时只推荐逐部都命中的交集作品",
+      "修正 macOS Chrome 排序下拉菜单展开后立即关闭的问题",
+    ],
+    "0.6.11": [
+      "修正点击‘本次可到’后计算弹窗频繁闪烁的问题",
+      "弹窗改为后台计算完成后一次更新，相同数据不重复渲染",
+      "修正稍后再买作品缺少本次可到和可用优惠券的问题",
+    ],
     "0.6.10": [
       "拼单只推荐当前已达或低于史低的稍后再买作品",
       "推荐总计改为简洁文字行，不再使用表格",
@@ -2701,12 +2713,14 @@
     if (/\/mypage\/(?:order|purchase|library|download)/i.test(location.pathname)) return [];
     // 手机版作品页会在主列表前插入一组热门排行。有明确的
     // “作品一览”容器时只采集该容器，避免把控件挂到排行区。
-    const primaryList = firstElementBySelectors([
-      "#search_result_img_box",
-      "#search_result_list",
-      "form#works .n_work_list_container",
-      ".n_work_list_container",
-    ], document);
+    const primaryList = isCartPage(location.href) || isProductPage(location.href)
+      ? null
+      : firstElementBySelectors([
+          "#search_result_img_box",
+          "#search_result_list",
+          "form#works .n_work_list_container",
+          ".n_work_list_container",
+        ], document);
     const scope = primaryList || document;
     const selectors = [
       "li.search_result_img_box_inner[data-workno]",
@@ -2745,6 +2759,13 @@
       ].join(","));
       if (!node || !findBrowsePriceHost(node)) continue;
       addCard(node);
+    }
+    if (isCartPage(location.href)) {
+      // 购物车的“立即购买”和“稍后再买”结构不完全等同普通列表。
+      // 直接从购物车条目补采，避免某一区因外层 class 不同而漏掉。
+      for (const item of getCartItems()) {
+        addCard(item.closest("li.cart_list_item, li.n_work_list_item") || item);
+      }
     }
     return cards;
   }
@@ -2974,6 +2995,11 @@
     return options;
   }
 
+  function browseControlsInsertionBefore(group, controls) {
+    const next = group?.nextSibling || null;
+    return next === controls ? controls.nextSibling : next;
+  }
+
   function findBrowseControlsAnchor(cards) {
     const nativeSort = [...document.querySelectorAll([
       "select[name*='sort']",
@@ -2986,7 +3012,11 @@
         ".sort_box, .search_result_sort, [class*='sort'], label",
       ) || nativeSort.parentElement;
       if (group.parentElement) {
-        return { parent: group.parentElement, before: group.nextSibling };
+        const controls = document.querySelector(".dltracker-browse-controls");
+        return {
+          parent: group.parentElement,
+          before: browseControlsInsertionBefore(group, controls),
+        };
       }
     }
     const first = cards[0]?.node;
@@ -3063,7 +3093,9 @@
       filterLabel.appendChild(filter);
       controls.append(sortLabel, filterLabel);
     }
-    if (controls.parentElement !== anchor.parent || controls.nextSibling !== anchor.before) {
+    if (anchor.before !== controls &&
+      (controls.parentElement !== anchor.parent ||
+        controls.nextSibling !== anchor.before)) {
       anchor.parent.insertBefore(controls, anchor.before);
     }
     const sort = controls.querySelector(".dltracker-browse-sort");
@@ -3413,41 +3445,27 @@
     return offers;
   }
 
-  function limitedCombinations(items, count, limit = 30) {
-    if (count <= 0) return [[]];
-    const result = [];
-    const pick = (start, chosen) => {
-      if (result.length >= limit) return;
-      if (chosen.length === count) {
-        result.push([...chosen]);
-        return;
-      }
-      for (let index = start; index < items.length; index += 1) {
-        chosen.push(items[index]);
-        pick(index + 1, chosen);
-        chosen.pop();
-        if (result.length >= limit) return;
-      }
-    };
-    pick(0, []);
-    return result;
-  }
-
-  function compareSpendCombinationTie(a, b) {
-    const historyDifference =
-      b.filter((item) => item.atLowest).length -
-      a.filter((item) => item.atLowest).length;
-    if (historyDifference) return historyDifference;
-    const reachDifference =
-      b.reduce((sum, item) => sum + dealNumber(item.reachRank, -1), 0) -
-      a.reduce((sum, item) => sum + dealNumber(item.reachRank, -1), 0);
-    if (reachDifference) return reachDifference;
+  function compareRecommendationOrder(a, b) {
     const aOrders = a.map((item) => dealNumber(item.order)).sort((x, y) => x - y);
     const bOrders = b.map((item) => dealNumber(item.order)).sort((x, y) => x - y);
     for (let index = 0; index < Math.min(aOrders.length, bOrders.length); index += 1) {
       if (aOrders[index] !== bOrders[index]) return aOrders[index] - bOrders[index];
     }
     return aOrders.length - bOrders.length;
+  }
+
+  function recommendationCombinationFinalTotal(items) {
+    return items.reduce((sum, item) =>
+      sum + Math.max(0, dealNumber(item.recommendationPrice, item.price)), 0);
+  }
+
+  function recommendationCombinationRate(items) {
+    const regular = items.reduce((sum, item) => sum + Math.max(
+      dealNumber(item.price),
+      dealNumber(item.officialPrice, item.price),
+    ), 0);
+    const final = recommendationCombinationFinalTotal(items);
+    return regular > 0 ? (1 - final / regular) * 100 : 0;
   }
 
   function spendThresholdCombinations(
@@ -3462,84 +3480,56 @@
       .filter((item) => dealNumber(item?.price) > 0);
     if (!candidates.length) return [];
 
-    const descendingPrices = candidates
-      .map((item) => Math.round(dealNumber(item.price)))
-      .sort((a, b) => b - a);
-    let largestTotal = 0;
-    let spendMinimumCount = 0;
-    while (spendMinimumCount < descendingPrices.length && largestTotal < target) {
-      largestTotal += descendingPrices[spendMinimumCount];
-      spendMinimumCount += 1;
-    }
-    if (largestTotal < target) return [];
-    const minimumCount = Math.max(
-      1,
-      Math.ceil(dealNumber(minimumItems)),
-      spendMinimumCount,
-    );
+    const minimumCount = Math.max(1, Math.ceil(dealNumber(minimumItems)));
     if (minimumCount > candidates.length) return [];
-    // 保留最少件数优先，同时多探索两个件数层级：单部能补满时，
-    // 仍可以比较两部或三部合计达标且整体更优的方案。
-    const maximumCount = Math.min(candidates.length, minimumCount + 2);
-
-    const states = Array.from(
-      { length: maximumCount + 1 },
-      () => new Map(),
-    );
+    // 正价格组合第一次越过门槛时，超额一定小于候选最高价；更大的
+    // 小计不可能进入“少超额优先”的前三名，无需保留其 DP 状态。
+    const maximumPrice = Math.max(...candidates.map((item) =>
+      Math.round(dealNumber(item.price))));
+    const maximumSubtotal = target + maximumPrice;
+    const states = Array.from({ length: candidates.length + 1 }, () => new Map());
     states[0].set(0, []);
     candidates.forEach((item, itemIndex) => {
       const price = Math.round(dealNumber(item.price));
-      for (let count = Math.min(maximumCount, itemIndex + 1); count >= 1; count -= 1) {
+      for (let count = itemIndex + 1; count >= 1; count -= 1) {
         for (const [subtotal, combination] of states[count - 1]) {
           const nextSubtotal = subtotal + price;
+          if (nextSubtotal > maximumSubtotal) continue;
           const nextCombination = [...combination, item];
           const existing = states[count].get(nextSubtotal);
-          if (!existing || compareSpendCombinationTie(nextCombination, existing) < 0) {
+          if (!existing ||
+            recommendationCombinationFinalTotal(nextCombination) <
+              recommendationCombinationFinalTotal(existing) ||
+            (recommendationCombinationFinalTotal(nextCombination) ===
+              recommendationCombinationFinalTotal(existing) &&
+              recommendationCombinationRate(nextCombination) >
+                recommendationCombinationRate(existing)) ||
+            (recommendationCombinationFinalTotal(nextCombination) ===
+              recommendationCombinationFinalTotal(existing) &&
+              Math.abs(recommendationCombinationRate(nextCombination) -
+                recommendationCombinationRate(existing)) < 0.001 &&
+              compareRecommendationOrder(nextCombination, existing) < 0)) {
             states[count].set(nextSubtotal, nextCombination);
           }
         }
       }
     });
-
-    const countLevels = maximumCount - minimumCount + 1;
-    const perCountLimit = Math.max(1, Math.floor(limit / countLevels));
     const result = [];
-    for (let count = minimumCount; count <= maximumCount; count += 1) {
+    for (let count = minimumCount; count <= candidates.length; count += 1) {
       result.push(...[...states[count].entries()]
         .filter(([subtotal]) => subtotal >= target)
-        .sort((a, b) => a[0] - b[0] || compareSpendCombinationTie(a[1], b[1]))
-        .slice(0, perCountLimit)
         .map(([, combination]) => combination));
     }
-    return result.slice(0, limit);
-  }
-
-  function productsReachingOwnBest(products, coupons, rules) {
-    const combined = Array.isArray(products) ? products : [];
-    return combined.filter((product) => {
-      const rule = rules.get(String(product.bulkbuyKey || ""));
-      const options = buildDealCouponOptions(coupons, product, combined);
-      const reach = calculateBestReach(product, options, rule);
-      const bulkReady = !(reach.bulkRate > reach.saleRate + 0.001) ||
-        combined.filter((item) => item.bulkbuyKey === product.bulkbuyKey).length >=
-          dealNumber(rule?.minCount, 3);
-      const couponReady = !reach.bestCoupon || Boolean(reach.bestCoupon.ready);
-      return bulkReady && couponReady;
-    });
-  }
-
-  function bundleRecommendationKey(recommendation) {
-    return recommendation.added
-      .map((item) => String(item.id).toUpperCase())
-      .sort()
-      .join("|");
-  }
-
-  function bundleRecommendationAddedCost(recommendation) {
-    return recommendation.added.reduce(
-      (sum, product) => sum + Math.max(0, dealNumber(product.price)),
-      0,
-    );
+    return result.sort((a, b) => {
+      const aSubtotal = a.reduce((sum, item) => sum + dealNumber(item.price), 0);
+      const bSubtotal = b.reduce((sum, item) => sum + dealNumber(item.price), 0);
+      return (aSubtotal - target) - (bSubtotal - target) ||
+        b.length - a.length ||
+        recommendationCombinationFinalTotal(a) -
+          recommendationCombinationFinalTotal(b) ||
+        recommendationCombinationRate(b) - recommendationCombinationRate(a) ||
+        compareRecommendationOrder(a, b);
+    }).slice(0, limit);
   }
 
   function calculationUsesCoupon(calculation, couponKey) {
@@ -3550,40 +3540,267 @@
     return orders.some((order) => String(order.couponId || "") === expected);
   }
 
-  function selectBundleRecommendations(recommendations, activeCount) {
-    const unique = [];
-    const seen = new Set();
-    for (const recommendation of recommendations) {
-      const key = bundleRecommendationKey(recommendation);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      unique.push(recommendation);
+  function couponIsCurrent(coupon, now = Date.now()) {
+    return !dealNumber(coupon?.earliestExpiry || coupon?.expiresAt) ||
+      dealNumber(coupon?.earliestExpiry || coupon?.expiresAt) > now;
+  }
+
+  function highestRecommendationCoupons(coupons, product) {
+    const applicable = (Array.isArray(coupons) ? coupons : [])
+      .filter((coupon) => couponIsCurrent(coupon) &&
+        couponMatchesDealProduct(coupon, product))
+      .map((coupon) => ({
+        coupon,
+        rate: couponEquivalentRate(coupon, product),
+      }));
+    const highest = Math.max(0, ...applicable.map((entry) => entry.rate));
+    return applicable
+      .filter((entry) => Math.abs(entry.rate - highest) < 0.001)
+      .map((entry) => entry.coupon);
+  }
+
+  function recommendationCouponEligibility(targetCoupon, coupons, product) {
+    if (!targetCoupon || !couponIsCurrent(targetCoupon) ||
+      !couponMatchesDealProduct(targetCoupon, product)) {
+      return { eligible: false, targetRate: 0, tied: [] };
     }
-    const allOptimal = unique
-      .filter((recommendation) =>
-        recommendation.reachedCount === activeCount + recommendation.added.length)
-      .sort((a, b) =>
-        a.added.length - b.added.length ||
-        a.spendOverage - b.spendOverage ||
-        a.total - b.total ||
-        b.historyHits - a.historyHits ||
-        Math.min(...a.added.map((item) => item.order)) -
-          Math.min(...b.added.map((item) => item.order)))[0];
-    const lowestTotal = [...unique].sort((a, b) =>
-      a.total - b.total ||
-      a.added.length - b.added.length ||
-      bundleRecommendationAddedCost(a) - bundleRecommendationAddedCost(b) ||
-      b.reachedCount - a.reachedCount ||
-      Math.min(...a.added.map((item) => item.order)) -
-        Math.min(...b.added.map((item) => item.order)))[0];
-    if (allOptimal && lowestTotal &&
-      bundleRecommendationKey(allOptimal) === bundleRecommendationKey(lowestTotal)) {
-      return [{ ...allOptimal, recommendationKind: "all-optimal-lowest" }];
+    const targetRate = couponEquivalentRate(targetCoupon, product);
+    const applicable = (Array.isArray(coupons) ? coupons : [])
+      .filter((coupon) => couponIsCurrent(coupon) &&
+        couponMatchesDealProduct(coupon, product));
+    const higher = applicable.some((coupon) =>
+      couponEquivalentRate(coupon, product) > targetRate + 0.001);
+    return {
+      eligible: !higher,
+      targetRate,
+      tied: applicable.filter((coupon) =>
+        (coupon.groupKey || coupon.id) !==
+          (targetCoupon.groupKey || targetCoupon.id) &&
+        Math.abs(couponEquivalentRate(coupon, product) - targetRate) < 0.001),
+    };
+  }
+
+  function targetRecommendationOffers(active, coupons, rules, targetProduct) {
+    if (!targetProduct) return [];
+    const cart = Array.isArray(active) ? active : [];
+    const subtotal = cart.reduce((sum, product) =>
+      sum + Math.max(0, dealNumber(product?.price)), 0);
+    const targetRule = rules.get(String(targetProduct.bulkbuyKey || ""));
+    const officialPrice = Math.max(
+      dealNumber(targetProduct.price),
+      dealNumber(targetProduct.officialPrice, targetProduct.price),
+    );
+    const saleRate = officialPrice > 0
+      ? Math.max(0, (1 - dealNumber(targetProduct.price) / officialPrice) * 100)
+      : 0;
+    const activityCount = targetProduct.bulkbuyKey
+      ? cart.filter((product) =>
+        product.bulkbuyKey === targetProduct.bulkbuyKey).length
+      : 0;
+    const activityMissing = targetRule &&
+      dealNumber(targetRule.discountRate) > saleRate + 0.001
+      ? Math.max(0, dealNumber(targetRule.minCount, 3) - activityCount)
+      : 0;
+    const couponOffers = highestRecommendationCoupons(coupons, targetProduct)
+      .map((coupon) => {
+        const eligibleCount = cart.filter((product) =>
+          couponMatchesDealProduct(coupon, product)).length;
+        const missing = Math.max(0, dealNumber(coupon.minCount, 1) - eligibleCount);
+        const missingSpend = Math.max(0, dealNumber(coupon.minSpend) - subtotal);
+        if (!missing && !missingSpend) return null;
+        return {
+          type: missingSpend > 0 ? "spend" : "candidates",
+          key: coupon.groupKey || coupon.id,
+          coupon,
+          missing,
+          missingSpend,
+          targetSpend: dealNumber(coupon.minSpend),
+          needsActivity: activityMissing > 0,
+          activityKey: activityMissing > 0 ? targetProduct.bulkbuyKey : "",
+          activityRule: activityMissing > 0 ? targetRule : null,
+          activityMissing,
+        };
+      })
+      .filter(Boolean);
+    if (couponOffers.length) return couponOffers;
+    if (activityMissing > 0) {
+      return [{
+        type: "candidates",
+        key: targetProduct.bulkbuyKey,
+        coupon: null,
+        missing: activityMissing,
+        missingSpend: 0,
+        targetSpend: 0,
+        needsActivity: true,
+        activityKey: targetProduct.bulkbuyKey,
+        activityRule: targetRule,
+        activityMissing,
+      }];
     }
-    return [
-      allOptimal ? { ...allOptimal, recommendationKind: "all-optimal" } : null,
-      lowestTotal ? { ...lowestTotal, recommendationKind: "lowest" } : null,
-    ].filter(Boolean);
+    return [];
+  }
+
+  function recommendationCandidateMatchesOffer(product, offer, coupons) {
+    if (!product?.id || !(dealNumber(product.price) > 0)) return false;
+    if (offer.needsActivity && product.bulkbuyKey !== offer.activityKey) return false;
+    if (!offer.coupon) return true;
+    return recommendationCouponEligibility(
+      offer.coupon,
+      coupons,
+      product,
+    ).eligible;
+  }
+
+  function recommendationRuleForProduct(product, rules, offer) {
+    if (offer?.needsActivity && product.bulkbuyKey === offer.activityKey) {
+      return offer.activityRule;
+    }
+    return rules.get(String(product.bulkbuyKey || "")) ||
+      dealInsightById.get(String(product.id || "").toUpperCase())?.bulkRule ||
+      null;
+  }
+
+  function recommendationCouponRateAtPrice(coupon, product, platformPrice) {
+    if (!coupon) return 0;
+    if (coupon.discountType === "percent") {
+      const rawDiscount = platformPrice * Math.min(100, coupon.discount) / 100;
+      const discount = coupon.maxDiscount > 0
+        ? Math.min(rawDiscount, coupon.maxDiscount)
+        : rawDiscount;
+      return platformPrice > 0 ? discount / platformPrice * 100 : 0;
+    }
+    if (!(coupon.minSpend > 0)) {
+      return platformPrice > 0
+        ? Math.min(100, coupon.discount / platformPrice * 100)
+        : 0;
+    }
+    return couponEquivalentRate(coupon, product);
+  }
+
+  function recommendationCandidatePricing(product, offer, coupons, rules) {
+    const officialPrice = Math.max(
+      dealNumber(product.price),
+      dealNumber(product.officialPrice, product.price),
+    );
+    const saleRate = officialPrice > 0
+      ? Math.max(0, (1 - dealNumber(product.price) / officialPrice) * 100)
+      : 0;
+    const rule = recommendationRuleForProduct(product, rules, offer);
+    const activityRate = rule && product.bulkbuyKey
+      ? Math.max(0, dealNumber(rule.discountRate))
+      : 0;
+    const useActivity = Boolean(rule) &&
+      (offer.needsActivity || activityRate > saleRate + 0.001);
+    const platformRate = useActivity ? activityRate : saleRate;
+    const platformPrice = Math.round(officialPrice * (1 - platformRate / 100));
+    const coupon = offer.coupon || highestRecommendationCoupons(coupons, product)[0] || null;
+    const couponRate = recommendationCouponRateAtPrice(
+      coupon,
+      product,
+      platformPrice,
+    );
+    const recommendationPrice = Math.max(
+      0,
+      Math.round(platformPrice * (1 - couponRate / 100)),
+    );
+    const totalRate = officialPrice > 0
+      ? Math.max(0, (1 - recommendationPrice / officialPrice) * 100)
+      : 0;
+    const couponState = coupon
+      ? recommendationCouponEligibility(coupon, coupons, product)
+      : { tied: [] };
+    const equalCouponPaths = (couponState.tied || []).filter((item) => {
+      const rate = recommendationCouponRateAtPrice(item, product, platformPrice);
+      return Math.round(platformPrice * (1 - rate / 100)) === recommendationPrice;
+    });
+    const alternativeLabels = equalCouponPaths.length
+      ? [`另有${equalCouponPaths.map((item) => compactCouponListLabel({
+          ...item,
+          equivalentRate: couponEquivalentRate(item, product),
+        })).join("、")}`]
+      : [];
+    if (!useActivity && activityRate > 0 &&
+      Math.abs(activityRate - saleRate) < 0.001) {
+      alternativeLabels.push(
+        `另有${dealNumber(rule.minCount, 3)}件${compactOff(activityRate)}`,
+      );
+    }
+    return {
+      recommendationPrice,
+      totalRate,
+      platformRate,
+      platformLabel: useActivity
+        ? `${dealNumber(rule.minCount, 3)}件${compactOff(activityRate)}`
+        : saleRate > 0 ? `当前${compactOff(saleRate)}` : "无折扣",
+      coupon,
+      couponLabel: coupon ? compactCouponListLabel({
+        ...coupon,
+        equivalentRate: couponEquivalentRate(coupon, product),
+      }) : "—",
+      activityLabel: useActivity
+        ? `${dealNumber(rule.minCount, 3)}件${compactOff(activityRate)}`
+        : "—",
+      alternativeLabels,
+    };
+  }
+
+  function sortRecommendationCandidates(candidates) {
+    return [...candidates].sort((a, b) =>
+      dealNumber(b.totalRate) - dealNumber(a.totalRate) ||
+      dealNumber(a.recommendationPrice, Infinity) -
+        dealNumber(b.recommendationPrice, Infinity) ||
+      dealNumber(a.order) - dealNumber(b.order));
+  }
+
+  function targetedRecommendationCalculation(products, coupon, rules) {
+    const items = plannerItemsFromProducts(products, rules, false);
+    const plannerCoupon = coupon
+      ? plannerCouponsFromDeals([coupon], products, false)
+      : [];
+    const quote = quoteBestSingleOrder(items, plannerCoupon);
+    return {
+      products,
+      singleQuote: quote,
+      currentPlan: { orders: [quote] },
+      currentBestTotal: quote.total,
+    };
+  }
+
+  function productsWithRecommendationQuote(products, calculation, offer, rules) {
+    const finalPrices = recommendationFinalPriceMap(calculation);
+    const quote = calculation.currentPlan?.orders?.[0] || calculation.singleQuote;
+    const lines = new Map((quote?.lines || []).map((line) =>
+      [String(line.id).toUpperCase(), line]));
+    return products.map((product) => {
+      const id = String(product.id).toUpperCase();
+      const line = lines.get(id);
+      const officialPrice = Math.max(
+        dealNumber(product.price),
+        dealNumber(product.officialPrice, product.price),
+      );
+      const finalPrice = finalPrices.get(id) ?? dealNumber(product.price);
+      const saleRate = officialPrice > 0
+        ? Math.max(0, (1 - dealNumber(product.price) / officialPrice) * 100)
+        : 0;
+      const rule = recommendationRuleForProduct(product, rules, offer);
+      const activityLabel = line?.dealApplied && rule
+        ? `${dealNumber(rule.minCount, 3)}件${compactOff(rule.discountRate)}`
+        : "—";
+      return {
+        ...product,
+        recommendationPrice: finalPrice,
+        totalRate: officialPrice > 0
+          ? Math.max(0, (1 - finalPrice / officialPrice) * 100)
+          : 0,
+        platformLabel: line?.dealApplied
+          ? activityLabel
+          : saleRate > 0 ? `当前${compactOff(saleRate)}` : "无折扣",
+        activityLabel,
+        couponLabel: line?.couponTarget ? product.couponLabel : "—",
+        alternativeLabels: offer.coupon?.discountType === "fixed" &&
+          offer.coupon?.minSpend > 0 ? [] : product.alternativeLabels,
+      };
+    });
   }
 
   async function buildBundleRecommendations(
@@ -3593,99 +3810,85 @@
     rules,
     targetProduct = null,
   ) {
-    const recommendations = [];
-    const offers = unmetBundleOffers(active, coupons, rules).filter((offer) => {
-      if (!targetProduct) return true;
-      return offer.type === "activity"
-        ? Boolean(targetProduct.bulkbuyKey) && targetProduct.bulkbuyKey === offer.key
-        : couponMatchesDealProduct(offer.coupon, targetProduct);
-    });
+    const recommendationRules = new Map(rules);
+    const targetRules = targetProduct
+      ? await bulkRuleMapForProducts([targetProduct])
+      : new Map();
+    for (const [key, rule] of targetRules) recommendationRules.set(key, rule);
+    const offers = targetRecommendationOffers(
+      active,
+      coupons,
+      recommendationRules,
+      targetProduct,
+    );
+    const results = [];
     for (const offer of offers) {
-      const candidates = later.filter((product) => offer.type === "spend"
-        ? dealNumber(product?.price) > 0
-        : offer.type === "activity"
-          ? product.bulkbuyKey === offer.key
-          : couponMatchesDealProduct(offer.coupon, product));
-      if (offer.type !== "spend" && candidates.length < offer.missing) continue;
-      const rankedCandidates = [];
-      for (let order = 0; order < candidates.length; order += 1) {
-        const product = candidates[order];
+      const matching = (Array.isArray(later) ? later : [])
+        .map((product, order) => ({ product, order }))
+        .filter(({ product }) =>
+          recommendationCandidateMatchesOffer(product, offer, coupons));
+      const withHistory = await Promise.all(matching.map(async ({ product, order }) => {
         const record = await getPriceRecord(String(product.id).toUpperCase());
-        const atLowest = isRecordNewLowest(record, product.price);
-        if (!atLowest) continue;
-        const insight = dealInsightById.get(String(product.id).toUpperCase());
-        rankedCandidates.push({
+        if (!isRecordNewLowest(record, product.price)) return null;
+        return {
           ...product,
+          ...recommendationCandidatePricing(
+            product,
+            offer,
+            coupons,
+            recommendationRules,
+          ),
           order,
-          atLowest,
+          atLowest: true,
           lowestPrice: safeNumber(record?.lowestPrice),
           historyRegularPrice: safeNumber(record?.regularPrice),
-          reachRank: dealNumber(insight?.bestReach?.totalRate, -1),
-        });
+        };
+      }));
+      const candidates = sortRecommendationCandidates(withHistory.filter(Boolean));
+      if (!candidates.length) continue;
+      if (offer.type !== "spend") {
+        results.push({ kind: "candidates", offer, candidates });
+        continue;
       }
-      rankedCandidates.sort((a, b) =>
-        Number(b.atLowest) - Number(a.atLowest) ||
-        b.reachRank - a.reachRank ||
-        dealNumber(a.price) - dealNumber(b.price) ||
-        a.order - b.order);
-      const combinations = offer.type === "spend" || offer.missingSpend > 0
-        ? spendThresholdCombinations(
-            rankedCandidates,
-            offer.missingSpend,
-            30,
-            offer.type === "coupon" ? offer.missing : 0,
-          )
-        : limitedCombinations(rankedCandidates.slice(0, 10), offer.missing);
+      const combinations = spendThresholdCombinations(
+        candidates,
+        offer.missingSpend,
+        3,
+        Math.max(offer.missing, offer.activityMissing),
+      );
+      const alternatives = [];
       for (const added of combinations) {
         const combined = [...active, ...added];
-        const calculation = await calculateCartPlans(combined, coupons);
-        if (!calculation.exact) continue;
-        if (offer.type !== "activity" &&
-          !calculationUsesCoupon(calculation, offer.key)) continue;
-        const reachedIds = new Set(productsReachingOwnBest(
+        const combinedRules = new Map(recommendationRules);
+        for (const product of added) {
+          const rule = recommendationRuleForProduct(product, combinedRules, offer);
+          if (rule && product.bulkbuyKey) combinedRules.set(product.bulkbuyKey, rule);
+        }
+        const calculation = targetedRecommendationCalculation(
           combined,
-          coupons,
-          calculation.rules,
-        ).map((product) => String(product.id).toUpperCase()));
-        recommendations.push({
-          offer,
+          offer.coupon,
+          combinedRules,
+        );
+        if (!calculationUsesCoupon(calculation, offer.key)) continue;
+        const quotedAdded = productsWithRecommendationQuote(
           added,
-          reachedCount: reachedIds.size,
-          addedReachedCount: added.filter((product) =>
-            reachedIds.has(String(product.id).toUpperCase())).length,
-          historyHits: added.filter((product) => product.atLowest).length,
-          total: calculation.currentBestTotal,
-          spendSubtotal: offer.targetSpend > 0
-            ? combined.reduce((sum, product) => sum + dealNumber(product.price), 0)
-            : 0,
-          spendOverage: offer.targetSpend > 0
-            ? Math.max(0, combined.reduce(
-                (sum, product) => sum + dealNumber(product.price),
-                0,
-              ) - offer.targetSpend)
-            : Number.POSITIVE_INFINITY,
           calculation,
+          offer,
+          combinedRules,
+        );
+        alternatives.push({
+          added: quotedAdded,
+          calculation,
+          total: calculation.currentBestTotal,
+          spendOverage: Math.max(0, combined.reduce((sum, product) =>
+            sum + dealNumber(product.price), 0) - offer.targetSpend),
         });
       }
-    }
-    recommendations.sort((a, b) => {
-      const aSpend = a.offer.targetSpend > 0;
-      const bSpend = b.offer.targetSpend > 0;
-      if (aSpend !== bSpend) return aSpend ? -1 : 1;
-      if (aSpend && bSpend) {
-        const spendDifference =
-          a.added.length - b.added.length ||
-          a.spendOverage - b.spendOverage;
-        if (spendDifference) return spendDifference;
+      if (alternatives.length) {
+        results.push({ kind: "spend", offer, alternatives });
       }
-      return b.reachedCount - a.reachedCount ||
-        b.addedReachedCount - a.addedReachedCount ||
-        b.historyHits - a.historyHits ||
-        a.total - b.total ||
-        Math.min(...a.added.map((item) => item.order)) -
-          Math.min(...b.added.map((item) => item.order));
-    });
-    return selectBundleRecommendations(recommendations, active.length);
+    }
+    return results;
   }
 
   function recommendationFinalPriceMap(calculation) {
@@ -3726,20 +3929,38 @@
     return compactOff((1 - final / regular) * 100);
   }
 
+  function recommendationMoney(value, cnyRate = null) {
+    const yen = toYen(value);
+    return Number.isFinite(cnyRate) && cnyRate > 0
+      ? `约${(Math.round(value) * cnyRate).toFixed(2)}元（${yen}）`
+      : yen;
+  }
+
+  function appendRecommendationCellLines(cell, lines) {
+    (Array.isArray(lines) ? lines : [lines]).forEach((value) => {
+      const line = document.createElement("div");
+      line.textContent = value;
+      cell.appendChild(line);
+    });
+  }
+
   function appendRecommendationTable(
     parent,
     recommendation,
-    calculation,
     cnyRate,
+    options = {},
   ) {
-    const finalPrices = recommendationFinalPriceMap(recommendation.calculation);
+    const products = recommendation.candidates || recommendation.added || [];
+    const finalPrices = recommendation.calculation
+      ? recommendationFinalPriceMap(recommendation.calculation)
+      : new Map();
     const wrapper = document.createElement("div");
     wrapper.className = "dltracker-reach-recommendation-table-wrap";
     const table = document.createElement("table");
     table.className = "dltracker-reach-recommendation-table";
     const head = document.createElement("thead");
     const headRow = document.createElement("tr");
-    ["推荐作品", "当前平台价", "平台折扣", "拼单后价", "拼单后折扣", "史低折扣"]
+    ["作品", "人民币（日元）", "现在折扣/平台折扣/史低折扣", "本单适用优惠券", "本单适用平台活动", "备注"]
       .forEach((label) => {
         const cell = document.createElement("th");
         cell.textContent = label;
@@ -3747,31 +3968,39 @@
       });
     head.appendChild(headRow);
     const body = document.createElement("tbody");
-    recommendation.added.forEach((product, index) => {
+    products.forEach((product, index) => {
       const row = document.createElement("tr");
+      if (options.collapseAfter > 0 && index >= options.collapseAfter) {
+        row.hidden = true;
+        row.className = "dltracker-reach-recommendation-extra";
+      }
       const officialPrice = Math.max(
         dealNumber(product.price),
         dealNumber(product.officialPrice, product.price),
       );
       const finalPrice = finalPrices.get(String(product.id).toUpperCase()) ??
-        dealNumber(product.price);
+        dealNumber(product.recommendationPrice, product.price);
       const historyRegularPrice = Math.max(
         officialPrice,
         dealNumber(product.historyRegularPrice, officialPrice),
       );
       const values = [
-        `推荐凑单作品${index + 1}：${product.title || product.id}`,
-        dealMoney(product.price, cnyRate),
-        recommendationDiscountText(officialPrice, product.price),
-        dealMoney(finalPrice, cnyRate),
-        recommendationDiscountText(officialPrice, finalPrice),
-        Number.isFinite(product.lowestPrice)
-          ? recommendationDiscountText(historyRegularPrice, product.lowestPrice)
-          : "未取得",
+        [`作品${index + 1}`, product.title || product.id],
+        recommendationMoney(finalPrice, cnyRate),
+        [
+          `现在 ${recommendationDiscountText(officialPrice, finalPrice)}`,
+          `平台 ${product.platformLabel || "无折扣"}`,
+          `史低 ${recommendationDiscountText(historyRegularPrice, product.lowestPrice)}`,
+        ],
+        product.couponLabel || "—",
+        product.activityLabel || "—",
+        product.alternativeLabels?.length
+          ? product.alternativeLabels
+          : "—",
       ];
       values.forEach((value, cellIndex) => {
         const cell = document.createElement(cellIndex === 0 ? "th" : "td");
-        cell.textContent = value;
+        appendRecommendationCellLines(cell, value);
         row.appendChild(cell);
       });
       body.appendChild(row);
@@ -3780,14 +4009,32 @@
     wrapper.appendChild(table);
     parent.appendChild(wrapper);
 
-    const addedBefore = recommendation.added.reduce(
+    if (options.collapseAfter > 0 && products.length > options.collapseAfter) {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "dltracker-reach-recommendation-toggle";
+      toggle.textContent = `查看全部 ${products.length} 部`;
+      toggle.addEventListener("click", () => {
+        const expanded = toggle.dataset.expanded === "true";
+        wrapper.querySelectorAll(".dltracker-reach-recommendation-extra")
+          .forEach((row) => { row.hidden = expanded; });
+        toggle.dataset.expanded = expanded ? "false" : "true";
+        toggle.textContent = expanded
+          ? `查看全部 ${products.length} 部`
+          : "收起到前 10 部";
+      });
+      parent.appendChild(toggle);
+    }
+
+    if (!recommendation.calculation) return;
+    const addedBefore = products.reduce(
       (sum, product) => sum + Math.max(
         dealNumber(product.price),
         dealNumber(product.officialPrice, product.price),
       ),
       0,
     );
-    const addedAfter = recommendation.added.reduce((sum, product) =>
+    const addedAfter = products.reduce((sum, product) =>
       sum + (finalPrices.get(String(product.id).toUpperCase()) ??
         Math.max(0, dealNumber(product.price))), 0);
     const totals = document.createElement("div");
@@ -3810,14 +4057,6 @@
       `优惠前 ${dealMoney(combinedBefore, cnyRate)}｜优惠后 ${dealMoney(recommendation.total, cnyRate)}`,
     );
     parent.appendChild(totals);
-
-    const delta = recommendation.total - calculation.currentBestTotal;
-    const note = document.createElement("div");
-    note.className = "dltracker-reach-muted";
-    note.textContent = Math.abs(delta) < 0.01
-      ? "与当前购物车相比：总支出不变"
-      : `与当前购物车相比：总支出${delta > 0 ? "增加" : "减少"} ${dealMoney(Math.abs(delta), cnyRate)}`;
-    parent.appendChild(note);
   }
 
   function appendOrderDetails(parent, order, index, cnyRate) {
@@ -3874,12 +4113,59 @@
     return lines;
   }
 
+  function reachDialogDataSignature(insight, lowestPrice) {
+    const snapshot = latestDealContext.cartSnapshot || {};
+    const summarizeProducts = (products) => (Array.isArray(products) ? products : [])
+      .map((product) => [
+        String(product?.id || "").toUpperCase(),
+        dealNumber(product?.price),
+        dealNumber(product?.officialPrice),
+        dealNumber(product?.cnyPrice),
+        String(product?.bulkbuyKey || ""),
+      ])
+      .sort((a, b) => a[0].localeCompare(b[0]));
+    const couponSignature = (latestDealContext.coupons || [])
+      .map((coupon) => JSON.stringify([
+        String(coupon?.groupKey || coupon?.id || ""),
+        coupon?.discountType,
+        dealNumber(coupon?.discount),
+        dealNumber(coupon?.minCount, 1),
+        dealNumber(coupon?.minSpend),
+        dealNumber(coupon?.maxDiscount),
+        dealNumber(coupon?.instances),
+        dealNumber(coupon?.usageCount),
+        dealNumber(coupon?.earliestExpiry),
+      ]))
+      .sort();
+    return JSON.stringify({
+      id: String(insight?.product?.id || "").toUpperCase(),
+      product: summarizeProducts([insight?.product]),
+      lowestPrice: Number.isFinite(lowestPrice) ? lowestPrice : null,
+      reach: [
+        dealNumber(insight?.bestReach?.saleRate),
+        dealNumber(insight?.bestReach?.bulkRate),
+        dealNumber(insight?.bestReach?.totalRate),
+        String(insight?.bestReach?.bestCoupon?.groupKey ||
+          insight?.bestReach?.bestCoupon?.id || ""),
+      ],
+      active: summarizeProducts(snapshot.active || snapshot.products),
+      later: summarizeProducts(snapshot.later),
+      coupons: couponSignature,
+      partial: Boolean(insight?.partial || latestDealContext.partial || !snapshot.loaded),
+    });
+  }
+
   async function renderReachDialog(insight, lowestPrice) {
-    const renderToken = ++openReachRenderToken;
     const overlay = document.querySelector(".dltracker-reach-overlay");
     const body = overlay?.querySelector(".dltracker-reach-dialog-body");
     if (!body || !insight) return;
-    body.replaceChildren();
+    const signature = reachDialogDataSignature(insight, lowestPrice);
+    if (body.dataset.dltrackerReachSignature === signature ||
+      body.dataset.dltrackerReachPending === signature) return;
+    body.dataset.dltrackerReachPending = signature;
+    const renderToken = ++openReachRenderToken;
+    const renderRoot = document.createElement("div");
+    try {
     const snapshot = latestDealContext.cartSnapshot;
     const partialData = Boolean(insight.partial || latestDealContext.partial || !snapshot.loaded);
     const active = snapshot.active || snapshot.products || [];
@@ -3924,7 +4210,7 @@
     if (Number.isFinite(lowestPrice)) {
       appendReachRow(work, "史低对比", targetPrice <= lowestPrice ? "本次可到不高于史低" : `比史低高${toYen(targetPrice - lowestPrice)}`);
     }
-    body.appendChild(work);
+    renderRoot.appendChild(work);
 
     const cart = document.createElement("section");
     cart.className = "dltracker-reach-section";
@@ -3984,7 +4270,7 @@
         note.textContent = "理论总价未计入尚未加入的凑单作品价格";
         cart.appendChild(note);
       }
-      if (calculation.exact && later.length) {
+      if (later.length) {
         const recommendations = await buildBundleRecommendations(
           active,
           later,
@@ -4002,18 +4288,44 @@
             details.className = "dltracker-reach-recommendation";
             details.open = index === 0;
             const summary = document.createElement("summary");
-            summary.textContent = recommendation.recommendationKind === "all-optimal-lowest"
-              ? "全员最优且预计总价最低方案"
-              : recommendation.recommendationKind === "all-optimal"
-                ? "全员最优方案"
-                : "预计总价最低方案";
+            const offer = recommendation.offer;
+            const offerLabels = [];
+            if (offer.coupon) {
+              offerLabels.push(compactCouponListLabel({
+                ...offer.coupon,
+                equivalentRate: couponEquivalentRate(
+                  offer.coupon,
+                  insight.product,
+                ),
+              }));
+            }
+            if (offer.needsActivity) {
+              offerLabels.push(`${dealNumber(offer.activityRule?.minCount, 3)}件${compactOff(offer.activityRule?.discountRate)}`);
+            }
+            summary.textContent = `${offerLabels.join("＋")}｜${recommendation.kind === "spend" ? "满额拼单方案" : `候选 ${recommendation.candidates.length} 部`}`;
             details.appendChild(summary);
-            appendRecommendationTable(
-              details,
-              recommendation,
-              calculation,
-              cnyRate,
-            );
+            if (recommendation.kind === "candidates") {
+              appendRecommendationTable(details, recommendation, cnyRate, {
+                collapseAfter: 10,
+              });
+            } else {
+              const [best, ...alternatives] = recommendation.alternatives;
+              appendRecommendationTable(details, best, cnyRate);
+              if (alternatives.length) {
+                const more = document.createElement("details");
+                more.className = "dltracker-reach-alternatives";
+                const moreSummary = document.createElement("summary");
+                moreSummary.textContent = `查看其他方案（${alternatives.length}）`;
+                more.appendChild(moreSummary);
+                alternatives.forEach((alternative, alternativeIndex) => {
+                  const heading = document.createElement("h5");
+                  heading.textContent = `备选方案 ${alternativeIndex + 2}｜超出门槛 ${toYen(alternative.spendOverage)}`;
+                  more.appendChild(heading);
+                  appendRecommendationTable(more, alternative, cnyRate);
+                });
+                details.appendChild(more);
+              }
+            }
             parent.appendChild(details);
           };
           recommendations.forEach((recommendation, index) =>
@@ -4021,7 +4333,7 @@
         }
       }
     }
-    body.appendChild(cart);
+    renderRoot.appendChild(cart);
 
     const disclaimer = document.createElement("details");
     disclaimer.className = "dltracker-reach-disclaimer";
@@ -4040,7 +4352,15 @@
       notes.appendChild(item);
     });
     disclaimer.append(disclaimerSummary, notes);
-    body.appendChild(disclaimer);
+    renderRoot.appendChild(disclaimer);
+    if (renderToken !== openReachRenderToken || !body.isConnected) return;
+    body.replaceChildren(...renderRoot.childNodes);
+    body.dataset.dltrackerReachSignature = signature;
+    } finally {
+      if (body.dataset.dltrackerReachPending === signature) {
+        delete body.dataset.dltrackerReachPending;
+      }
+    }
   }
 
   function lockReachDialogScroll() {
@@ -7283,7 +7603,7 @@
 }
 
 .dltracker-reach-recommendation-table {
-  min-width: 720px;
+  min-width: 920px;
 }
 
 .dltracker-reach-recommendation-table th,
@@ -7309,6 +7629,23 @@
   padding: 6px 8px;
   border-radius: 6px;
   background: #f3f7f9;
+}
+
+.dltracker-reach-recommendation-toggle {
+  margin-top: 7px;
+  padding: 5px 9px;
+  border: 1px solid #bccbd3;
+  border-radius: 6px;
+  color: #3f5967;
+  background: #fff;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.dltracker-reach-alternatives h5 {
+  margin: 9px 0 0;
+  color: #52616b;
+  font-size: 11px;
 }
 
 .dltracker-reach-order ul,
@@ -7950,6 +8287,14 @@
     });
   }
 
+  function mutationIsInsideReachDialog(mutation) {
+    const target = mutation?.target;
+    const element = target instanceof Element
+      ? target
+      : target?.parentElement;
+    return Boolean(element?.closest?.(".dltracker-reach-overlay"));
+  }
+
   function installSpaListeners() {
     const originalPushState = history.pushState.bind(history);
     const originalReplaceState = history.replaceState.bind(history);
@@ -7968,7 +8313,10 @@
     setInterval(() => onUrlChange(), 500);
 
     let domDebounceTimer = null;
-    const domObserver = new MutationObserver(() => {
+    const domObserver = new MutationObserver((mutations) => {
+      // 弹窗是脚本自己渲染的 UI，其内部变动不代表 DLsite 页面数据变了。
+      // 忽略这类变动，避免反复启动整页增强和弹窗重算。
+      if (mutations.length && mutations.every(mutationIsInsideReachDialog)) return;
       if (domDebounceTimer) return;
       domDebounceTimer = setTimeout(() => {
         domDebounceTimer = null;

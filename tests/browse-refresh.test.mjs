@@ -41,6 +41,24 @@ test("筛选选项未变化时不重建 select", () => {
   );
 });
 
+test("浏览排序控件已在原生排序区后方时不重复插入自身", () => {
+  const sandbox = {};
+  vm.runInNewContext(
+    `${functionSource("browseControlsInsertionBefore")}
+    globalThis.insertionBefore = browseControlsInsertionBefore;`,
+    sandbox,
+  );
+  const afterControls = { id: "list" };
+  const controls = { id: "controls", nextSibling: afterControls };
+  const nativeGroup = { nextSibling: controls };
+
+  assert.equal(sandbox.insertionBefore(nativeGroup, controls), afterControls);
+  assert.match(
+    functionSource("injectBrowseControls"),
+    /anchor\.before !== controls/,
+  );
+});
+
 test("稍后再买复用浏览列表的凑单筛选", () => {
   const controlsSource = functionSource("injectBuyLaterSortToggle");
   const filterSource = functionSource("applyBuyLaterBundleFilter");
@@ -74,4 +92,14 @@ test("手机版控件挂到作品一览而不是页顶排行", () => {
   assert.match(enhanceSource, /injectBrowseControls\(false\)/);
   assert.match(functionSource("bootstrap"), /injectBrowseControls\(false\)/);
   assert.match(functionSource("installSpaListeners"), /!document\.querySelector\("\.dltracker-browse-controls"\)/);
+});
+
+test("购物车不用普通浏览页的主列表限域", () => {
+  const collectSource = functionSource("collectBrowseCards");
+  assert.match(
+    collectSource,
+    /isCartPage\(location\.href\) \|\| isProductPage\(location\.href\)\s*\? null/,
+  );
+  assert.match(collectSource, /if \(isCartPage\(location\.href\) && !isRenderableCartItem\(node\)\) return/);
+  assert.match(collectSource, /for \(const item of getCartItems\(\)\)/);
 });
