@@ -175,6 +175,21 @@ test("三件 60% 与 1200-400 的理论值约为 73%", () => {
   assert.equal(options[0].spendShortfall, 400);
 });
 
+test("RJ01437715 的平台30OFF与券33OFF叠加后约为155日元", () => {
+  const product = { id: "RJ01437715", price: 231, officialPrice: 330 };
+  const reach = calculateBestReach(product, [{
+    id: "C33",
+    discountType: "percent",
+    discount: 33,
+    maxDiscount: 0,
+    equivalentRate: 33,
+  }], null);
+
+  assert.ok(Math.abs(reach.saleRate - 30) < 0.001);
+  assert.ok(Math.abs(reach.totalRate - 53.1) < 0.001);
+  assert.equal(calculateHypotheticalPrice(product, reach), 155);
+});
+
 test("指定作品、社团、站点与隐藏分类分别匹配", () => {
   const raw = [
     ["id_all", { product_all: ["VJ01000001"] }],

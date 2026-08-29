@@ -43,6 +43,7 @@ vm.runInNewContext(
   ${functionSource("recommendationCandidateMatchesOffer")}
   ${functionSource("sortRecommendationCandidates")}
   ${functionSource("recommendationFinalPriceMap")}
+  ${functionSource("recommendationStrongestDiscountRate")}
   ${functionSource("isRecordNewLowest")}
   ${functionSource("plannerCouponsFromDeals")}
   globalThis.reachRecommendation = {
@@ -54,6 +55,7 @@ vm.runInNewContext(
     recommendationCandidateMatchesOffer,
     sortRecommendationCandidates,
     recommendationFinalPriceMap,
+    recommendationStrongestDiscountRate,
     isRecordNewLowest,
     plannerCouponsFromDeals,
   };`,
@@ -69,9 +71,21 @@ const {
   recommendationCandidateMatchesOffer,
   sortRecommendationCandidates,
   recommendationFinalPriceMap,
+  recommendationStrongestDiscountRate,
   isRecordNewLowest,
   plannerCouponsFromDeals,
 } = sandbox.reachRecommendation;
+
+test("三种折扣只把力度最大的数值作为高亮基准", () => {
+  assert.equal(recommendationStrongestDiscountRate([33, 30, 30]), 33);
+  assert.equal(recommendationStrongestDiscountRate([53.1, 30, 30]), 53.1);
+});
+
+test("推荐表现在折扣按最终结算价相对原价计算", () => {
+  const currentRate = (1 - 155 / 330) * 100;
+  assert.ok(currentRate > 53 && currentRate < 54);
+  assert.equal(recommendationStrongestDiscountRate([currentRate, 30, 30]), currentRate);
+});
 
 function coupon(overrides = {}) {
   return {
@@ -119,6 +133,10 @@ test("购物车结构化人民币价优先于可能含划线原价的DOM文本",
   assert.match(
     enrichSource,
     /cartMetadata\.get\(String\(item\.id\)\.toUpperCase\(\)\)\?\.cnyPrice \|\|\s*item\.cnyPrice/,
+  );
+  assert.match(
+    enrichSource,
+    /officialPrice: cartMetadata\.get\(String\(item\.id\)\.toUpperCase\(\)\)\?\.officialPrice \|\|\s*item\.officialPrice/,
   );
 });
 
@@ -194,6 +212,13 @@ test("推荐明细按优惠对象分摊券额且总计不画表格", () => {
   assert.match(functionSource("appendRecommendationTable"), /本单适用优惠券/);
   assert.match(functionSource("appendRecommendationTable"), /本单适用平台活动/);
   assert.match(functionSource("appendRecommendationTable"), /备注/);
+  assert.match(functionSource("appendRecommendationTable"), /product\.id \|\| product\.title/);
+  assert.match(functionSource("appendRecommendationTable"), /recommendationMoneyLines/);
+  assert.match(functionSource("appendRecommendationTable"), /appendRecommendationDiscounts/);
+  assert.doesNotMatch(functionSource("appendRecommendationTable"), /`现在 /);
+  assert.match(functionSource("appendRecommendationDiscounts"), /is-strongest/);
+  assert.match(source, /table-layout: fixed/);
+  assert.match(source, /min-width: 0/);
   assert.match(functionSource("appendRecommendationTable"), /优惠前/);
   assert.match(functionSource("appendRecommendationTable"), /优惠后/);
   assert.doesNotMatch(

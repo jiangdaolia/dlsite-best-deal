@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.13
+// @version      0.6.14
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.13";
+  const APP_VERSION = "0.6.14";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -60,6 +60,13 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.14": [
+      "修正购物车占位原价覆盖接口真实原价的问题",
+      "平台折扣优先使用结构化 official_price 与当前日元价计算",
+      "修正拼单表把平台30OFF错误显示为无折扣的问题",
+      "压缩拼单表内容并让六列随弹窗宽度自适应",
+      "合并三种折扣并高亮其中折扣力度最大的项目",
+    ],
     "0.6.13": [
       "修正人民币估算混用其他作品换算比例的问题",
       "优先使用当前作品同源的结构化 CNY/JPY 现价",
@@ -3797,6 +3804,9 @@
         totalRate: officialPrice > 0
           ? Math.max(0, (1 - finalPrice / officialPrice) * 100)
           : 0,
+        platformRate: line?.dealApplied && rule
+          ? Math.max(0, dealNumber(rule.discountRate))
+          : saleRate,
         platformLabel: line?.dealApplied
           ? activityLabel
           : saleRate > 0 ? `当前${compactOff(saleRate)}` : "无折扣",
@@ -3927,18 +3937,11 @@
     return result;
   }
 
-  function recommendationDiscountText(regularPrice, finalPrice) {
-    const regular = Math.max(0, dealNumber(regularPrice));
-    const final = Math.max(0, dealNumber(finalPrice));
-    if (!(regular > 0) || final >= regular) return "无折扣";
-    return compactOff((1 - final / regular) * 100);
-  }
-
-  function recommendationMoney(value, cnyRate = null) {
+  function recommendationMoneyLines(value, cnyRate = null) {
     const yen = toYen(value);
     return Number.isFinite(cnyRate) && cnyRate > 0
-      ? `约${(Math.round(value) * cnyRate).toFixed(2)}元（${yen}）`
-      : yen;
+      ? [`约${(Math.round(value) * cnyRate).toFixed(2)}元`, `（${yen}）`]
+      : [yen];
   }
 
   function appendRecommendationCellLines(cell, lines) {
@@ -3946,6 +3949,28 @@
       const line = document.createElement("div");
       line.textContent = value;
       cell.appendChild(line);
+    });
+  }
+
+  function recommendationStrongestDiscountRate(rates) {
+    return Math.max(0, ...(Array.isArray(rates) ? rates : []).map((rate) =>
+      Math.max(0, dealNumber(rate))));
+  }
+
+  function appendRecommendationDiscounts(cell, discounts) {
+    const strongest = recommendationStrongestDiscountRate(
+      discounts.map((item) => item.rate),
+    );
+    cell.classList.add("dltracker-reach-recommendation-discounts");
+    cell.title = "现在折扣 / 平台折扣 / 史低折扣";
+    discounts.forEach((item, index) => {
+      if (index > 0) cell.appendChild(document.createTextNode("/"));
+      const value = document.createElement("span");
+      value.textContent = item.text;
+      if (strongest > 0 && Math.abs(dealNumber(item.rate) - strongest) < 0.001) {
+        value.className = "is-strongest";
+      }
+      cell.appendChild(value);
     });
   }
 
@@ -3989,14 +4014,23 @@
         officialPrice,
         dealNumber(product.historyRegularPrice, officialPrice),
       );
+      const platformRate = Math.max(0, dealNumber(product.platformRate));
+      const currentRate = officialPrice > 0
+        ? Math.max(0, (1 - finalPrice / officialPrice) * 100)
+        : 0;
+      const historyRate = historyRegularPrice > 0 &&
+        dealNumber(product.lowestPrice) < historyRegularPrice
+        ? Math.max(0, (1 - dealNumber(product.lowestPrice) / historyRegularPrice) * 100)
+        : 0;
+      const discounts = [
+        { rate: currentRate, text: currentRate > 0 ? compactOff(currentRate) : "无折扣" },
+        { rate: platformRate, text: platformRate > 0 ? compactOff(platformRate) : "无折扣" },
+        { rate: historyRate, text: historyRate > 0 ? compactOff(historyRate) : "无折扣" },
+      ];
       const values = [
-        [`作品${index + 1}`, product.title || product.id],
-        recommendationMoney(finalPrice, cnyRate),
-        [
-          `现在 ${recommendationDiscountText(officialPrice, finalPrice)}`,
-          `平台 ${product.platformLabel || "无折扣"}`,
-          `史低 ${recommendationDiscountText(historyRegularPrice, product.lowestPrice)}`,
-        ],
+        product.id || product.title || `作品${index + 1}`,
+        recommendationMoneyLines(finalPrice, cnyRate),
+        discounts,
         product.couponLabel || "—",
         product.activityLabel || "—",
         product.alternativeLabels?.length
@@ -4005,7 +4039,14 @@
       ];
       values.forEach((value, cellIndex) => {
         const cell = document.createElement(cellIndex === 0 ? "th" : "td");
-        appendRecommendationCellLines(cell, value);
+        if (cellIndex === 2) {
+          appendRecommendationDiscounts(cell, value);
+        } else {
+          appendRecommendationCellLines(cell, value);
+        }
+        if (cellIndex === 0 && product.title && product.title !== product.id) {
+          cell.title = product.title;
+        }
         row.appendChild(cell);
       });
       body.appendChild(row);
@@ -4781,8 +4822,10 @@
         ...item,
         id: String(item.id).toUpperCase(),
         price: item.price || cartMetadata.get(String(item.id).toUpperCase())?.price || 0,
-        officialPrice: item.officialPrice ||
-          cartMetadata.get(String(item.id).toUpperCase())?.officialPrice || item.price || 0,
+        // 购物车 DOM 缺少原价时会以当前价占位；结构化接口的
+        // official_price 才能区分“231/330”这类平台 30OFF。
+        officialPrice: cartMetadata.get(String(item.id).toUpperCase())?.officialPrice ||
+          item.officialPrice || item.price || 0,
         title: item.title || cartMetadata.get(String(item.id).toUpperCase())?.title || item.id,
         // 接口的 currency_price.CNY 与精确 JPY 现价同源，优先级高于
         // 购物车 DOM 中可能同时包含划线原价的“¥”文本。
@@ -7599,37 +7642,71 @@
 
 .dltracker-reach-recommendation-table-wrap {
   margin-top: 7px;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 .dltracker-reach-recommendation-table {
   width: 100%;
+  min-width: 0;
+  table-layout: fixed;
   border-collapse: collapse;
   color: #34434c;
-  font-size: 11px;
-}
-
-.dltracker-reach-recommendation-table {
-  min-width: 920px;
+  font-size: clamp(9px, 1.7vw, 11px);
 }
 
 .dltracker-reach-recommendation-table th,
 .dltracker-reach-recommendation-table td {
-  padding: 6px;
+  padding: clamp(3px, 0.8vw, 6px);
   border: 1px solid #dbe4e9;
   text-align: right;
   vertical-align: top;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .dltracker-reach-recommendation-table th:first-child {
   text-align: left;
-  white-space: normal;
+  width: 13%;
+}
+
+.dltracker-reach-recommendation-table th:nth-child(2) {
+  width: 14%;
+}
+
+.dltracker-reach-recommendation-table th:nth-child(3) {
+  width: 19%;
+}
+
+.dltracker-reach-recommendation-table th:nth-child(4) {
+  width: 18%;
+}
+
+.dltracker-reach-recommendation-table th:nth-child(5) {
+  width: 18%;
+}
+
+.dltracker-reach-recommendation-table th:nth-child(6) {
+  width: 18%;
 }
 
 .dltracker-reach-recommendation-table thead th {
   background: #eef4f7;
+}
+
+.dltracker-reach-recommendation-discounts {
+  letter-spacing: -0.02em;
+  overflow-wrap: normal !important;
+  word-break: keep-all;
+}
+
+.dltracker-reach-recommendation-discounts .is-strongest {
+  padding: 1px 2px;
+  border-radius: 3px;
+  color: #6d4700;
+  background: #ffd75a;
+  font-weight: 800;
 }
 
 .dltracker-reach-recommendation-summary {
