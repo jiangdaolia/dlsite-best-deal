@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.23
+// @version      0.6.24
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.23";
+  const APP_VERSION = "0.6.24";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -60,6 +60,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.24": [
+      "清除助手宿主继承的 DLsite 横向卡内容缩进，修复本次可到与史低框仍然越界",
+      "宿主宽度改由原生卡片自动计算，不使用固定像素且不改变原生作品布局",
+    ],
     "0.6.23": [
       "按 DLsite 移动路由和触控输入特征适配普通作品卡，不再扩大固定像素断点",
       "普通作品卡沿用 DLsite 的自然收缩与长文案换行，修复手机横向卡片溢出",
@@ -8363,10 +8367,19 @@
   box-sizing: border-box;
   clear: both;
   container-type: inline-size;
+  overflow: hidden;
 }
 
+.n_work_item > .dltracker-browse-analysis-host,
 dl > .dltracker-browse-analysis-host {
   grid-column: 1 / -1;
+  width: auto;
+  max-width: 100%;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  align-self: stretch;
 }
 
 .${UI_CLASSNAME}.dltracker-browse-analysis {

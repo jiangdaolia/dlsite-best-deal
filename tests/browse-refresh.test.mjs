@@ -183,6 +183,11 @@ test("普通作品卡在标签后使用三框和简洁优惠行", () => {
   );
   assert.match(source, /\.dltracker-browse-analysis-trend \{\s*padding-inline: 5px/);
   assert.match(source, /\.dltracker-browse-analysis-host \{[\s\S]*?container-type: inline-size/);
+  assert.match(source, /\.dltracker-browse-analysis-host \{[\s\S]*?overflow: hidden/);
+  assert.match(
+    source,
+    /\.n_work_item > \.dltracker-browse-analysis-host,\s*dl > \.dltracker-browse-analysis-host \{[\s\S]*?width: auto;[\s\S]*?margin-left: 0 !important;[\s\S]*?margin-right: 0 !important;[\s\S]*?padding-left: 0 !important;[\s\S]*?padding-right: 0 !important;[\s\S]*?align-self: stretch/,
+  );
   assert.match(source, /\.dltracker-browse-analysis-amount \{\s*display: none/);
   assert.match(
     source,
