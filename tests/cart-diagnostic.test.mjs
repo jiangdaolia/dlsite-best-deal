@@ -10,7 +10,7 @@ const source = readFileSync(
 
 function functionSource(name) {
   const matched = source.match(new RegExp(
-    `  function ${name}\\([\\s\\S]*?(?=\\n  (?:async )?function )`,
+    `  (?:async )?function ${name}\\([\\s\\S]*?(?=\\n  (?:async )?function )`,
   ));
   if (!matched) throw new Error(`${name} not found`);
   return matched[0];
@@ -77,4 +77,12 @@ test("诊断构建器不读取整页 HTML、Cookie 或请求头", () => {
   const diagnosticSource = functionSource("buildCartDiagnostic");
   assert.doesNotMatch(diagnosticSource, /outerHTML|innerHTML|document\.cookie/i);
   assert.doesNotMatch(diagnosticSource, /fetch\s*\(|GM_xmlhttpRequest/i);
+});
+
+test("微信分享使用系统文件分享面板", () => {
+  const shareSource = functionSource("shareCartDiagnosticPayload");
+  assert.match(shareSource, /new File\s*\(/);
+  assert.match(shareSource, /files:\s*\[file\]/);
+  assert.match(shareSource, /navigator\.canShare/);
+  assert.match(shareSource, /navigator\.share\s*\(/);
 });

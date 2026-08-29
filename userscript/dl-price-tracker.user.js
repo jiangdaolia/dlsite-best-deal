@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.3
+// @version      0.6.4
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.3";
+  const APP_VERSION = "0.6.4";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -58,6 +58,9 @@
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.4": [
+      "购物车诊断支持下载 JSON 文件和调起系统面板分享到微信",
+    ],
     "0.6.3": [
       "购物车页新增一键复制脱敏诊断 JSON",
     ],
@@ -2289,39 +2292,119 @@
     return copied;
   }
 
+  function createCartDiagnosticPayload() {
+    const diagnostic = buildCartDiagnostic();
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    return {
+      text: JSON.stringify(diagnostic, null, 2),
+      filename: `dltracker-cart-diagnostic-${timestamp}.json`,
+    };
+  }
+
+  function downloadCartDiagnosticPayload(payload) {
+    downloadText(
+      payload.filename,
+      payload.text,
+      "application/json;charset=utf-8",
+    );
+  }
+
+  async function shareCartDiagnosticPayload(payload) {
+    if (typeof navigator.share !== "function" || typeof File !== "function") {
+      return false;
+    }
+    const file = new File(
+      [payload.text],
+      payload.filename,
+      { type: "application/json" },
+    );
+    const shareData = {
+      title: "DLsite 购物车诊断 JSON",
+      text: "脱敏的 DLsite 购物车区域、价格和计算数据",
+      files: [file],
+    };
+    if (typeof navigator.canShare === "function" &&
+      !navigator.canShare(shareData)) {
+      return false;
+    }
+    await navigator.share(shareData);
+    return true;
+  }
+
   function injectCartDiagnosticPanel() {
     if (!isCartPage(location.href) ||
       document.querySelector(".dltracker-cart-diagnostic")) return;
     const panel = document.createElement("section");
     panel.className = "dltracker-cart-diagnostic";
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = "复制购物车诊断 JSON";
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.textContent = "复制 JSON";
+    const downloadButton = document.createElement("button");
+    downloadButton.type = "button";
+    downloadButton.textContent = "下载 JSON 文件";
+    const shareButton = document.createElement("button");
+    shareButton.type = "button";
+    shareButton.textContent = "微信分享";
     const status = document.createElement("span");
     status.textContent = "仅包含脱敏的区域、价格和计算信息";
-    button.addEventListener("click", async () => {
-      button.disabled = true;
+    const buttons = [copyButton, downloadButton, shareButton];
+    const setBusy = (busy) => {
+      buttons.forEach((button) => {
+        button.disabled = busy;
+      });
+    };
+    copyButton.addEventListener("click", async () => {
+      setBusy(true);
       status.textContent = "正在生成…";
       try {
-        const text = JSON.stringify(buildCartDiagnostic(), null, 2);
-        const copied = await copyCartDiagnosticText(text);
+        const payload = createCartDiagnosticPayload();
+        const copied = await copyCartDiagnosticText(payload.text);
         if (copied) {
           status.textContent = "已复制，请直接粘贴发给我";
         } else {
-          downloadText(
-            `dltracker-cart-diagnostic-${Date.now()}.json`,
-            text,
-            "application/json;charset=utf-8",
-          );
+          downloadCartDiagnosticPayload(payload);
           status.textContent = "无法复制，已改为下载 JSON 文件";
         }
       } catch (error) {
         status.textContent = `生成失败：${error instanceof Error ? error.message : String(error)}`;
       } finally {
-        button.disabled = false;
+        setBusy(false);
       }
     });
-    panel.append(button, status);
+    downloadButton.addEventListener("click", () => {
+      try {
+        downloadCartDiagnosticPayload(createCartDiagnosticPayload());
+        status.textContent = "JSON 文件已生成并下载";
+      } catch (error) {
+        status.textContent = `下载失败：${error instanceof Error ? error.message : String(error)}`;
+      }
+    });
+    shareButton.addEventListener("click", async () => {
+      setBusy(true);
+      status.textContent = "正在生成分享文件…";
+      let payload = null;
+      try {
+        payload = createCartDiagnosticPayload();
+        if (await shareCartDiagnosticPayload(payload)) {
+          status.textContent = "已打开系统分享面板，请选择微信";
+        } else {
+          downloadCartDiagnosticPayload(payload);
+          status.textContent = "浏览器不支持文件分享，已下载 JSON，请在微信中选择该文件";
+        }
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          status.textContent = "已取消分享";
+        } else {
+          if (payload) downloadCartDiagnosticPayload(payload);
+          status.textContent = payload
+            ? "分享失败，已下载 JSON，请在微信中选择该文件"
+            : `生成失败：${error instanceof Error ? error.message : String(error)}`;
+        }
+      } finally {
+        setBusy(false);
+      }
+    });
+    panel.append(copyButton, downloadButton, shareButton, status);
     const anchor = document.querySelector(
       "div.buy_now, section.buy_now, #cart, .cart_list",
     );
