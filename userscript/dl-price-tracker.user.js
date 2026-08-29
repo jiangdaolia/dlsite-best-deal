@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.18
+// @version      0.6.19
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -60,6 +60,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.19": [
+      "修复部分语言和手机端拼单推荐的加购物车按钮无法点击",
+      "优先复用 DLsite 原生 link_move_cart 操作，按钮文字仅作兼容兜底",
+      "购物车底部推荐卡新增史低、本次可到、优惠券和平台活动分析",
+    ],
     "0.6.18": [
       "手机端优惠信息移到完整原生作品行之后，不再改变 DLsite 原生布局",
       "手机端状态按钮与价格趋势改为同一行",
@@ -2770,6 +2775,10 @@
     return node.getAttribute(DEAL_PROCESSED_ATTRIBUTE) !== String(id).toUpperCase();
   }
 
+  function isCartRecommendationCard(node) {
+    return Boolean(node?.closest?.(".__cart_recommend, .recommend_list"));
+  }
+
   function collectBrowseCards() {
     if (/\/mypage\/(?:order|purchase|library|download)/i.test(location.pathname)) return [];
     // 手机版作品页会在主列表前插入一组热门排行。有明确的
@@ -2796,7 +2805,10 @@
     const seen = new Set();
     const addCard = (node) => {
       if (!node || seen.has(node)) return;
-      if (isCartPage(location.href) && !isRenderableCartItem(node)) return;
+      const cartPage = isCartPage(location.href);
+      const cartItem = cartPage && isRenderableCartItem(node);
+      const cartRecommendation = cartPage && isCartRecommendationCard(node);
+      if (cartPage && !cartItem && !cartRecommendation) return;
       const id = productIdFromNode(node);
       if (!id ||
         id === currentId ||
@@ -2804,7 +2816,7 @@
           (entry.node.contains(node) || node.contains(entry.node))) ||
         node.closest("#work_buy, .c-purchaseBox")) return;
       seen.add(node);
-      cards.push({ id, node });
+      cards.push({ id, node, cartItem, cartRecommendation });
     };
     for (const node of scope.querySelectorAll(selectors.join(","))) {
       addCard(node);
@@ -2839,6 +2851,59 @@
       ".work_price",
       '[class*="price"]',
     ], card);
+  }
+
+  function findBrowseTagAnchor(card) {
+    const selectors = [
+      ".work_genre",
+      ".n_work_genre",
+      ".work_tags",
+      ".work_tag",
+      ".work_deals",
+      ".work_labels",
+      "[class*='genre_list']",
+      "[class*='tag_list']",
+    ];
+    const candidates = selectors.flatMap((selector) =>
+      [...card.querySelectorAll(selector)]
+        .filter((node) => !node.closest(".dltracker-browse-analysis-host")));
+    return candidates.at(-1) || null;
+  }
+
+  function ensureBrowseAnalysisHost(card) {
+    const existed = card.querySelector(":scope > .dltracker-browse-analysis-host") ||
+      card.querySelector(".dltracker-browse-analysis-host");
+    if (existed) return existed;
+    const anchor = findBrowseTagAnchor(card);
+    const parent = anchor?.parentElement || firstElementBySelectors([
+      ".work_info",
+      ".n_work_info",
+      "dl.work_img_main",
+      "dl",
+    ], card) || card;
+    const host = document.createElement(parent.tagName === "DL" ? "dd" : "div");
+    host.className = "dltracker-browse-analysis-host";
+    if (anchor?.parentElement === parent) {
+      anchor.insertAdjacentElement("afterend", host);
+    } else {
+      parent.appendChild(host);
+    }
+    return host;
+  }
+
+  function removeLegacyBrowseAnalysis(card, keepHost) {
+    for (const ui of card.querySelectorAll(`.${UI_CLASSNAME}`)) {
+      if (keepHost.contains(ui) || ui.closest(".dltracker-cart-host")) continue;
+      const wrapper = ui.parentElement;
+      ui.remove();
+      if (wrapper?.matches(".dltracker-inline-host, .dltracker-wishlist-host") &&
+        !wrapper.childNodes.length) {
+        wrapper.remove();
+      }
+    }
+    for (const insight of card.querySelectorAll(`.${DEAL_INSIGHT_CLASSNAME}`)) {
+      if (!keepHost.contains(insight)) insight.remove();
+    }
   }
 
   function browseCardWorkType(card) {
@@ -4067,6 +4132,10 @@
   function nativeRestoreCartAction(productId) {
     const owner = buyLaterOwnerForRecommendation(productId);
     if (!owner) return null;
+    const nativeClassAction = owner.querySelector(
+      "a.link_move_cart, button.link_move_cart",
+    );
+    if (nativeClassAction) return nativeClassAction;
     return [...owner.querySelectorAll(
       'a, button, input[type="button"], input[type="submit"]',
     )].find((node) => {
@@ -4734,6 +4803,128 @@
     return badge;
   }
 
+  function createBrowseAnalysisFrame({
+    tag = "div",
+    className = "",
+    label,
+    value = "",
+    rate = null,
+    href = "",
+    onActivate = null,
+  }) {
+    const frame = document.createElement(href ? "a" : tag);
+    frame.className = `dltracker-browse-analysis-frame ${className}`.trim();
+    if (frame.tagName === "BUTTON") frame.type = "button";
+    if (href) {
+      frame.href = href;
+      frame.target = "_blank";
+      frame.rel = "noopener noreferrer";
+    }
+    const title = document.createElement("strong");
+    title.textContent = label;
+    frame.appendChild(title);
+    if (value) {
+      const price = document.createElement("span");
+      price.className = "dltracker-browse-analysis-price";
+      price.textContent = value;
+      frame.appendChild(price);
+    }
+    if (Number.isFinite(rate) && rate > 0) {
+      const off = document.createElement("span");
+      off.className = "dltracker-browse-analysis-off";
+      off.textContent = compactOff(rate);
+      frame.appendChild(off);
+    }
+    if (onActivate) {
+      frame.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onActivate();
+      });
+    } else if (href) {
+      frame.addEventListener("click", (event) => event.stopPropagation());
+    }
+    return frame;
+  }
+
+  function renderBrowseCardAnalysis(host, record, insight) {
+    if (!host) return;
+    const layout = document.createElement("section");
+    layout.className = `${UI_CLASSNAME} dltracker-browse-analysis`;
+    const id = String(record?.rjCode || insight?.product?.id || "").toUpperCase();
+    if (id) layout.dataset.productId = id;
+    if (Number.isFinite(record?.lowestPrice)) {
+      layout.dataset.lowestPrice = String(record.lowestPrice);
+    }
+    const grid = document.createElement("div");
+    grid.className = "dltracker-browse-analysis-grid";
+    const reachPrice = insight
+      ? calculateHypotheticalPrice(insight.product, insight.bestReach)
+      : Number.POSITIVE_INFINITY;
+    const lowestPrice = safeNumber(record?.lowestPrice);
+    const comparable = Number.isFinite(reachPrice) &&
+      Number.isFinite(lowestPrice);
+    grid.appendChild(createBrowseAnalysisFrame({
+      tag: insight ? "button" : "div",
+      className: comparable && reachPrice <= lowestPrice
+        ? "dltracker-browse-analysis-best"
+        : "",
+      label: "本次可到",
+      value: insight && Number.isFinite(reachPrice)
+        ? toYen(reachPrice)
+        : "读取中",
+      rate: insight ? insight.bestReach.totalRate : null,
+      onActivate: insight
+        ? () => openReachDialog(insight, lowestPrice, "price")
+        : null,
+    }));
+    const historyRegular = Math.max(
+      dealNumber(record?.regularPrice),
+      dealNumber(insight?.product?.officialPrice),
+    );
+    const historyRate = Number.isFinite(lowestPrice) && historyRegular > 0 &&
+      lowestPrice < historyRegular
+      ? (1 - lowestPrice / historyRegular) * 100
+      : 0;
+    grid.appendChild(createBrowseAnalysisFrame({
+      className: comparable && lowestPrice <= reachPrice
+        ? "dltracker-browse-analysis-best"
+        : "",
+      label: "史低",
+      value: Number.isFinite(lowestPrice) ? toYen(lowestPrice) : "暂无",
+      rate: historyRate,
+    }));
+    grid.appendChild(createBrowseAnalysisFrame({
+      className: record?.dlwatcherUrl ? "" : "is-disabled",
+      label: "价格趋势",
+      href: record?.dlwatcherUrl || "",
+    }));
+    layout.appendChild(grid);
+
+    if (insight) {
+      const couponLabels = insight.couponOptions
+        .slice(0, 2)
+        .map(compactCouponListLabel);
+      const offerLabels = [];
+      if (couponLabels.length) {
+        const extra = insight.couponOptions.length > 2
+          ? `｜+${insight.couponOptions.length - 2}种`
+          : "";
+        offerLabels.push(`可用优惠券：${couponLabels.join("｜")}${extra}`);
+      }
+      if (insight.bulkRule) {
+        offerLabels.push(`平台活动：${insight.bulkRule.minCount}件${compactOff(insight.bulkRule.discountRate)}`);
+      }
+      if (offerLabels.length || insight.partial) {
+        const offers = document.createElement("div");
+        offers.className = "dltracker-browse-analysis-offers";
+        offers.textContent = offerLabels.join("｜") || "部分优惠未确认";
+        layout.appendChild(offers);
+      }
+    }
+    host.replaceChildren(layout);
+  }
+
   function renderCompactInsight(host, insight) {
     if (!host) return;
     host.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`)?.remove();
@@ -5170,9 +5361,14 @@
       `.${UI_CLASSNAME}[data-product-id="${String(id).toUpperCase()}"]`,
     )) {
       const cartHost = card.closest(".dltracker-cart-host");
+      const browseHost = card.closest(".dltracker-browse-analysis-host");
       const cartRecord = browseRecordById.get(String(id).toUpperCase());
       if (cartHost && cartRecord) {
         renderCartDealLayout(cartHost, cartRecord, insight);
+        continue;
+      }
+      if (browseHost) {
+        if (cartRecord) renderBrowseCardAnalysis(browseHost, cartRecord, insight);
         continue;
       }
       card.querySelector(".dltracker-best-reach-badge")?.remove();
@@ -5240,7 +5436,7 @@
       price: item.price || metadata.get(item.id)?.price || 0,
     }));
     // 活动页同源请求也保持串行，避免列表上出现并发访问。
-    await mapWithConcurrency(cards, 1, async ({ id, node }) => {
+    await mapWithConcurrency(cards, 1, async ({ id, node, cartItem }) => {
       const priceHost = findBrowsePriceHost(node);
       if (!priceHost) {
         markDealProcessed(node, id);
@@ -5276,9 +5472,14 @@
       } else {
         appendJpyPrice(priceHost, product);
       }
+      const analysisHost = cartItem ? null : ensureBrowseAnalysisHost(node);
+      if (analysisHost) {
+        removeLegacyBrowseAnalysis(node, analysisHost);
+        renderBrowseCardAnalysis(analysisHost, { rjCode: id }, null);
+      }
       renderBrowseVoiceActors(node, product);
       const insight = await buildInsight(product, usableCoupons, enrichedCartProducts, partial);
-      const cartHost = cartPage
+      const cartHost = cartItem
         ? node.querySelector(".dltracker-cart-host") ||
           ensureCartRenderHost(node)
         : null;
@@ -5289,21 +5490,17 @@
         renderCartDealLayout(cartHost, record, insight);
       }
 
-      if (/^[RB]J/i.test(id) &&
-        (cartHost || !node.querySelector(`.${UI_CLASSNAME}`))) {
-        const historyHost = cartHost || document.createElement("div");
-        if (!cartHost) {
-          historyHost.className = "dltracker-inline-host";
-          priceHost.appendChild(historyHost);
-          renderLoadingCard(historyHost);
-        }
+      let record = browseRecordById.get(String(id).toUpperCase()) || {
+        rjCode: id,
+      };
+      if (/^[RB]J/i.test(id)) {
         const link = node.querySelector('a[href*="product_id/"]');
-        const record = await buildOrUpdateRecord({
+        record = await buildOrUpdateRecord({
           rjCode: id,
           title: link?.textContent?.trim() || id,
           currentPrice: product.price || undefined,
           forceFetch: false,
-        });
+        }) || { rjCode: id };
         browseRecordById.set(String(id).toUpperCase(), record || { rjCode: id });
         if (record?.voiceActors?.length) {
           renderBrowseVoiceActors(node, {
@@ -5314,10 +5511,11 @@
             ]),
           });
         }
-        renderPriceCard(record || { rjCode: id }, historyHost);
       }
-      if (!cartPage) {
-        renderCompactInsight(priceHost, insight);
+      if (cartHost) {
+        renderPriceCard(record, cartHost);
+      } else if (analysisHost) {
+        renderBrowseCardAnalysis(analysisHost, record, insight);
       }
       markDealProcessed(node, id);
     });
@@ -7683,6 +7881,15 @@
       )
     ) {
       scheduleCartBootstrap();
+      return true;
+    }
+    const recommendationCards = collectBrowseCards().filter(
+      ({ cartRecommendation }) => cartRecommendation,
+    );
+    if (recommendationCards.some(({ id, node }) =>
+      !node.querySelector(`.${UI_CLASSNAME}`) ||
+      needsDealProcessing(node, id))) {
+      scheduleCartBootstrap();
     }
     return true;
   }
@@ -8036,6 +8243,109 @@
   color: #444;
   font-size: 11px;
   line-height: 1.45;
+}
+
+.dltracker-browse-analysis-host {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  clear: both;
+}
+
+dl > .dltracker-browse-analysis-host {
+  grid-column: 1 / -1;
+}
+
+.${UI_CLASSNAME}.dltracker-browse-analysis {
+  width: 100%;
+  max-width: 100%;
+  margin: 5px 0 0;
+  gap: 4px;
+  color: #40515b;
+  font-size: 9px;
+}
+
+.dltracker-browse-analysis-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+}
+
+.dltracker-browse-analysis-frame {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 0;
+  min-height: 25px;
+  padding: 3px 5px;
+  border: 1px solid #d4dee4;
+  border-radius: 5px;
+  box-sizing: border-box;
+  color: #40515b;
+  background: #fff;
+  font: inherit;
+  line-height: 1.15;
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+button.dltracker-browse-analysis-frame,
+a.dltracker-browse-analysis-frame {
+  cursor: pointer;
+}
+
+.dltracker-browse-analysis-frame strong,
+.dltracker-browse-analysis-price,
+.dltracker-browse-analysis-off {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dltracker-browse-analysis-off {
+  flex: 0 0 auto;
+  padding: 1px 3px;
+  border-radius: 999px;
+  color: #51616b;
+  background: #edf2f5;
+  font-weight: 800;
+}
+
+.dltracker-browse-analysis-frame.dltracker-browse-analysis-best {
+  border-color: #dfb84f;
+  color: #4b3a12;
+  background: #fffdf6;
+}
+
+.dltracker-browse-analysis-frame.dltracker-browse-analysis-best .dltracker-browse-analysis-off {
+  color: #6d4700;
+  background: #ffd75a;
+}
+
+.dltracker-browse-analysis-frame.is-disabled {
+  color: #89959b;
+  background: #f5f7f8;
+}
+
+.dltracker-browse-analysis-offers {
+  width: 100%;
+  padding: 3px 5px;
+  border-radius: 5px;
+  box-sizing: border-box;
+  color: #80500d;
+  background: #fff4de;
+  font-size: 9px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .dltracker-deal-compact {

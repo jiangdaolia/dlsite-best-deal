@@ -348,6 +348,8 @@ test("拼单表仅代理原生单件放回并把替代优惠写入备注", () =>
     functionSource("buyLaterOwnerForRecommendation"),
     /getBuyLaterOwnerItems/,
   );
+  assert.match(nativeSource, /a\.link_move_cart, button\.link_move_cart/);
+  assert.match(nativeSource, /if \(nativeClassAction\) return nativeClassAction/);
   assert.match(nativeSource, /放回购物车\|カート/);
   assert.match(restoreSource, /pendingRecommendationRestoreIds\.add\(id\)/);
   assert.match(restoreSource, /action\.click\(\)/);

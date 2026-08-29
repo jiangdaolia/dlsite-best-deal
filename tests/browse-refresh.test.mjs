@@ -100,6 +100,50 @@ test("购物车不用普通浏览页的主列表限域", () => {
     collectSource,
     /isCartPage\(location\.href\) \|\| isProductPage\(location\.href\)\s*\? null/,
   );
-  assert.match(collectSource, /if \(isCartPage\(location\.href\) && !isRenderableCartItem\(node\)\) return/);
+  assert.match(collectSource, /const cartItem = cartPage && isRenderableCartItem\(node\)/);
+  assert.match(collectSource, /const cartRecommendation = cartPage && isCartRecommendationCard\(node\)/);
+  assert.match(collectSource, /if \(cartPage && !cartItem && !cartRecommendation\) return/);
   assert.match(collectSource, /for \(const item of getCartItems\(\)\)/);
+});
+
+test("购物车底部推荐卡显示分析但不作为购物车作品", () => {
+  const collectSource = functionSource("collectBrowseCards");
+  const enhanceSource = functionSource("enhanceGenericBrowseCards");
+  const mutationSource = functionSource("maybeBootstrapForCartMutation");
+  assert.match(
+    functionSource("isCartRecommendationCard"),
+    /\.__cart_recommend, \.recommend_list/,
+  );
+  assert.match(collectSource, /cards\.push\(\{ id, node, cartItem, cartRecommendation \}\)/);
+  assert.match(enhanceSource, /async \(\{ id, node, cartItem \}\)/);
+  assert.match(enhanceSource, /const cartHost = cartItem/);
+  assert.match(enhanceSource, /const analysisHost = cartItem \? null : ensureBrowseAnalysisHost\(node\)/);
+  assert.match(enhanceSource, /renderBrowseCardAnalysis\(analysisHost, record, insight\)/);
+  assert.match(mutationSource, /\(\{ cartRecommendation \}\) => cartRecommendation/);
+  assert.match(mutationSource, /scheduleCartBootstrap\(\)/);
+  assert.doesNotMatch(functionSource("cartProductsFromRoot"), /cartRecommendation/);
+});
+
+test("普通作品卡在标签后使用三框和简洁优惠行", () => {
+  const hostSource = functionSource("ensureBrowseAnalysisHost");
+  const renderSource = functionSource("renderBrowseCardAnalysis");
+  const frameSource = functionSource("createBrowseAnalysisFrame");
+  assert.match(functionSource("findBrowseTagAnchor"), /\.work_genre/);
+  assert.match(functionSource("findBrowseTagAnchor"), /\.work_labels/);
+  assert.match(hostSource, /anchor\.insertAdjacentElement\("afterend", host\)/);
+  assert.match(hostSource, /parent\.appendChild\(host\)/);
+  assert.match(renderSource, /label: "本次可到"/);
+  assert.match(renderSource, /label: "史低"/);
+  assert.match(renderSource, /label: "价格趋势"/);
+  assert.match(renderSource, /可用优惠券：/);
+  assert.match(renderSource, /平台活动：/);
+  assert.match(frameSource, /dltracker-browse-analysis-frame/);
+  assert.match(
+    source,
+    /\.dltracker-browse-analysis-grid \{[\s\S]*?grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/,
+  );
+  assert.match(
+    source,
+    /\.dltracker-browse-analysis \{[\s\S]*?font-size: 9px/,
+  );
 });
