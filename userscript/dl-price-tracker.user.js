@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.19
+// @version      0.6.20
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -60,6 +60,15 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.20": [
+      "压缩普通作品卡的趋势框，为本次可到和史低释放更多宽度",
+      "横向普通作品卡显示本次可到与史低的人民币（日元），窄卡只显示折扣",
+      "三框字体、间距与内边距进一步缩小，避免金额和折扣文字被截断",
+      "修复指定条件搜索页误选加载骨架，恢复优惠筛选和横向卡片分析",
+      "手机购物车五框改为两行摘要条，弱化边框与整块高亮",
+      "需凑单推荐表改用人民币/日元与现在/平台/史低的紧凑斜杠格式",
+      "需凑单推荐表的表头与内容统一垂直居中、左对齐",
+    ],
     "0.6.19": [
       "修复部分语言和手机端拼单推荐的加购物车按钮无法点击",
       "优先复用 DLsite 原生 link_move_cart 操作，按钮文字仅作兼容兜底",
@@ -2756,6 +2765,7 @@
   function productIdFromNode(node) {
     const values = [
       node?.getAttribute?.("data-workno"),
+      node?.getAttribute?.("data-list_item_product_id"),
       node?.getAttribute?.("data-product_id"),
       node?.getAttribute?.("data-product-id"),
       node?.id,
@@ -2779,22 +2789,47 @@
     return Boolean(node?.closest?.(".__cart_recommend, .recommend_list"));
   }
 
+  function findBrowsePrimaryList() {
+    const selectors = [
+      "#search_result_img_box",
+      "#search_result_list",
+      "form#works .n_work_list_container",
+      ".n_work_list_container",
+    ];
+    const candidates = selectors.flatMap((selector) =>
+      [...document.querySelectorAll(selector)]);
+    let best = null;
+    let bestCount = 0;
+    for (const candidate of candidates) {
+      if (candidate.matches(".search_skeleton_box") ||
+        candidate.querySelector(".search_skeleton_box") &&
+          !candidate.querySelector('a[href*="product_id/"]')) continue;
+      const count = candidate.querySelectorAll([
+        "[data-workno]",
+        "[data-list_item_product_id]",
+        '[data-vue-component="product-item"][data-product_id]',
+        'a[href*="product_id/"]',
+      ].join(",")).length;
+      if (count > bestCount) {
+        best = candidate;
+        bestCount = count;
+      }
+    }
+    return best;
+  }
+
   function collectBrowseCards() {
     if (/\/mypage\/(?:order|purchase|library|download)/i.test(location.pathname)) return [];
     // 手机版作品页会在主列表前插入一组热门排行。有明确的
     // “作品一览”容器时只采集该容器，避免把控件挂到排行区。
     const primaryList = isCartPage(location.href) || isProductPage(location.href)
       ? null
-      : firstElementBySelectors([
-          "#search_result_img_box",
-          "#search_result_list",
-          "form#works .n_work_list_container",
-          ".n_work_list_container",
-        ], document);
+      : findBrowsePrimaryList();
     const scope = primaryList || document;
     const selectors = [
       "li.search_result_img_box_inner[data-workno]",
       ".search_result_img_box_inner[data-workno]",
+      "tr[data-list_item_product_id]",
       "article[data-workno]",
       "li[data-workno]",
       '[data-vue-component="product-item"][data-product_id]',
@@ -2825,6 +2860,8 @@
       const node = link.closest([
         "li",
         "article",
+        "tr[data-list_item_product_id]",
+        "tr[data-product_id]",
         ".search_result_img_box_inner",
         ".product-item",
         ".n_worklist_item",
@@ -2861,6 +2898,7 @@
       ".work_tag",
       ".work_deals",
       ".work_labels",
+      ".search_tag",
       "[class*='genre_list']",
       "[class*='tag_list']",
     ];
@@ -4083,7 +4121,7 @@
   function recommendationMoneyLines(value, cnyRate = null) {
     const yen = toYen(value);
     return Number.isFinite(cnyRate) && cnyRate > 0
-      ? [`约${(Math.round(value) * cnyRate).toFixed(2)}元`, `（${yen}）`]
+      ? [`约${(Math.round(value) * cnyRate).toFixed(2)}元/${yen}`]
       : [yen];
   }
 
@@ -4105,7 +4143,7 @@
       discounts.map((item) => item.rate),
     );
     cell.classList.add("dltracker-reach-recommendation-discounts");
-    cell.title = "现在折扣 / 平台折扣 / 史低折扣";
+    cell.title = "现在 / 平台 / 史低";
     discounts.forEach((item, index) => {
       if (index > 0) cell.appendChild(document.createTextNode("/"));
       const value = document.createElement("span");
@@ -4237,7 +4275,7 @@
     table.className = "dltracker-reach-recommendation-table";
     const head = document.createElement("thead");
     const headRow = document.createElement("tr");
-    ["作品", "人民币（日元）", "现在折扣/平台折扣/史低折扣", "备注", "看详情", "加购物车"]
+    ["作品", "人民币/日元", "现在/平台/史低", "备注", "看详情", "加购物车"]
       .forEach((label) => {
         const cell = document.createElement("th");
         cell.textContent = label;
@@ -4808,6 +4846,7 @@
     className = "",
     label,
     value = "",
+    valueClass = "",
     rate = null,
     href = "",
     onActivate = null,
@@ -4825,7 +4864,7 @@
     frame.appendChild(title);
     if (value) {
       const price = document.createElement("span");
-      price.className = "dltracker-browse-analysis-price";
+      price.className = `dltracker-browse-analysis-price ${valueClass}`.trim();
       price.textContent = value;
       frame.appendChild(price);
     }
@@ -4864,6 +4903,7 @@
     const lowestPrice = safeNumber(record?.lowestPrice);
     const comparable = Number.isFinite(reachPrice) &&
       Number.isFinite(lowestPrice);
+    const cnyRate = currencyRateFromProducts([insight?.product]);
     grid.appendChild(createBrowseAnalysisFrame({
       tag: insight ? "button" : "div",
       className: comparable && reachPrice <= lowestPrice
@@ -4871,8 +4911,11 @@
         : "",
       label: "本次可到",
       value: insight && Number.isFinite(reachPrice)
-        ? toYen(reachPrice)
+        ? cartLocalizedMoney(reachPrice, cnyRate)
         : "读取中",
+      valueClass: insight && Number.isFinite(reachPrice)
+        ? "dltracker-browse-analysis-amount"
+        : "",
       rate: insight ? insight.bestReach.totalRate : null,
       onActivate: insight
         ? () => openReachDialog(insight, lowestPrice, "price")
@@ -4891,12 +4934,17 @@
         ? "dltracker-browse-analysis-best"
         : "",
       label: "史低",
-      value: Number.isFinite(lowestPrice) ? toYen(lowestPrice) : "暂无",
+      value: Number.isFinite(lowestPrice)
+        ? cartLocalizedMoney(lowestPrice, cnyRate)
+        : "暂无",
+      valueClass: Number.isFinite(lowestPrice)
+        ? "dltracker-browse-analysis-amount"
+        : "",
       rate: historyRate,
     }));
     grid.appendChild(createBrowseAnalysisFrame({
-      className: record?.dlwatcherUrl ? "" : "is-disabled",
-      label: "价格趋势",
+      className: `dltracker-browse-analysis-trend${record?.dlwatcherUrl ? "" : " is-disabled"}`,
+      label: "趋势",
       href: record?.dlwatcherUrl || "",
     }));
     layout.appendChild(grid);
@@ -5237,6 +5285,7 @@
       Number.isFinite(record.lowestPrice);
     if (!insight) {
       grid.appendChild(createCartDealPriceFrame({
+        className: "dltracker-cart-reach",
         label: "本次可到",
         price: "价格读取中",
         rate: null,
@@ -5244,9 +5293,12 @@
     } else {
       grid.appendChild(createCartDealPriceFrame({
         tag: "button",
-        className: hasPriceComparison && reachPrice <= record.lowestPrice
-          ? "dltracker-best-reach-gold"
-          : "",
+        className: [
+          "dltracker-cart-reach",
+          hasPriceComparison && reachPrice <= record.lowestPrice
+            ? "dltracker-best-reach-gold"
+            : "",
+        ].filter(Boolean).join(" "),
         label: insight.partial ? "当前已知可到" : "本次可到",
         price: cartLocalizedMoney(reachPrice, cnyRate),
         rate: insight.bestReach.totalRate,
@@ -5261,7 +5313,7 @@
       dealNumber(record.lowestPrice, Infinity) < historyRegular
       ? (1 - dealNumber(record.lowestPrice) / historyRegular) * 100
       : 0;
-    const historyClassNames = [];
+    const historyClassNames = ["dltracker-cart-history"];
     if (!insight || !Number.isFinite(record.lowestPrice)) {
       historyClassNames.push("is-unavailable");
     } else if (record.lowestPrice <= reachPrice) {
@@ -5278,6 +5330,7 @@
       rate: insight && Number.isFinite(record.lowestPrice) ? historyRate : null,
     }));
     grid.appendChild(createCartDealPriceFrame({
+      className: "dltracker-cart-platform",
       label: "平台折扣",
       price: insight
         ? cartLocalizedMoney(insight.product.price, cnyRate)
@@ -7542,16 +7595,24 @@
       loading.className = `${UI_CLASSNAME} dltracker-cart-layout dltracker-cart-layout-loading`;
       const grid = document.createElement("div");
       grid.className = "dltracker-cart-deal-grid";
-      ["本次可到", "史低折扣", "平台折扣"].forEach((label) => {
+      [
+        ["本次可到", "dltracker-cart-reach"],
+        ["史低折扣", "dltracker-cart-history"],
+        ["平台折扣", "dltracker-cart-platform"],
+      ].forEach(([label, className]) => {
         grid.appendChild(createCartDealPriceFrame({
+          className,
           label,
           price: "价格读取中",
           rate: null,
         }));
       });
-      for (const label of ["价格读取中", "价格趋势"]) {
+      for (const [label, className] of [
+        ["价格读取中", "dltracker-cart-status is-loading"],
+        ["价格趋势", "dltracker-cart-trend"],
+      ]) {
         const frame = document.createElement("span");
-        frame.className = "dltracker-cart-deal-frame";
+        frame.className = `dltracker-cart-deal-frame ${className}`;
         frame.textContent = label;
         grid.appendChild(frame);
       }
@@ -8252,6 +8313,7 @@
   padding: 0;
   box-sizing: border-box;
   clear: both;
+  container-type: inline-size;
 }
 
 dl > .dltracker-browse-analysis-host {
@@ -8264,14 +8326,14 @@ dl > .dltracker-browse-analysis-host {
   margin: 5px 0 0;
   gap: 4px;
   color: #40515b;
-  font-size: 9px;
+  font-size: 8px;
 }
 
 .dltracker-browse-analysis-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr)) max-content;
   align-items: stretch;
-  gap: 3px;
+  gap: 2px;
   width: 100%;
   min-width: 0;
 }
@@ -8280,10 +8342,10 @@ dl > .dltracker-browse-analysis-host {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
-  min-height: 25px;
-  padding: 3px 5px;
+  min-height: 23px;
+  padding: 2px 3px;
   border: 1px solid #d4dee4;
   border-radius: 5px;
   box-sizing: border-box;
@@ -8295,6 +8357,10 @@ dl > .dltracker-browse-analysis-host {
   text-decoration: none;
   white-space: nowrap;
   overflow: hidden;
+}
+
+.dltracker-browse-analysis-trend {
+  padding-inline: 5px;
 }
 
 button.dltracker-browse-analysis-frame,
@@ -8309,6 +8375,16 @@ a.dltracker-browse-analysis-frame {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.dltracker-browse-analysis-amount {
+  display: none;
+}
+
+@container (min-width: 320px) {
+  .dltracker-browse-analysis-amount {
+    display: inline;
+  }
 }
 
 .dltracker-browse-analysis-off {
@@ -8572,8 +8648,8 @@ a.dltracker-browse-analysis-frame {
 .dltracker-reach-recommendation-table td {
   padding: clamp(3px, 0.8vw, 6px);
   border: 1px solid #dbe4e9;
-  text-align: right;
-  vertical-align: top;
+  text-align: left;
+  vertical-align: middle;
   white-space: nowrap;
   overflow-wrap: normal;
   line-height: 1.35;
@@ -8620,7 +8696,7 @@ a.dltracker-browse-analysis-frame {
 }
 
 .dltracker-reach-recommendation-action-cell {
-  text-align: center !important;
+  text-align: left !important;
   vertical-align: middle !important;
 }
 
@@ -9374,33 +9450,97 @@ a.dltracker-cart-deal-frame:focus-visible {
 
 @media (max-width: 900px) {
   .dltracker-cart-deal-grid {
-    grid-template-columns: minmax(0, 1fr) max-content;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-rows: auto auto;
+    column-gap: 4px;
+    row-gap: 1px;
+    padding: 3px 0;
+    border-top: 1px solid #edf1f3;
+    border-bottom: 1px solid #edf1f3;
   }
 
-  .dltracker-cart-price-frame {
-    grid-column: 1 / -1;
+  .dltracker-cart-reach {
+    grid-column: 1 / 4;
+    grid-row: 1;
+  }
+
+  .dltracker-cart-history {
+    grid-column: 1 / 4;
+    grid-row: 2;
+  }
+
+  .dltracker-cart-platform {
+    grid-column: 4 / 7;
+    grid-row: 2;
+    border-left: 1px solid #e5ebee;
   }
 
   .dltracker-cart-status {
-    grid-column: 1;
+    grid-column: 4 / 6;
+    grid-row: 1;
   }
 
   .dltracker-cart-trend {
-    grid-column: 2;
+    grid-column: 6;
+    grid-row: 1;
   }
 
   .dltracker-cart-deal-frame {
     width: 100%;
+    min-height: 25px;
+    justify-content: flex-start;
+    gap: 3px;
+    padding: 3px 4px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    overflow: hidden;
   }
 
-  .dltracker-cart-deal-frame.dltracker-cart-trend {
-    width: auto;
+  button.dltracker-cart-reach,
+  .dltracker-cart-status {
+    border-radius: 5px;
+    background: #f5f8f9;
+  }
+
+  .dltracker-cart-price-frame.dltracker-best-reach-gold,
+  .dltracker-cart-price-frame.dltracker-best-reach-bluegray {
+    border: 0;
+    background: transparent;
+  }
+
+  .dltracker-cart-status.is-needs {
+    color: #81500b;
+    background: #fff7e8;
+  }
+
+  .dltracker-cart-status.is-met,
+  .dltracker-cart-status.is-single {
+    color: #24623b;
+    background: #edf7f0;
+  }
+
+  .dltracker-cart-trend {
+    justify-content: flex-end;
+    padding-inline: 2px;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .dltracker-cart-deal-price {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .dltracker-cart-price-frame strong,
   .dltracker-cart-deal-price,
   .dltracker-cart-deal-off {
-    font-size: 11px;
+    font-size: 9px;
+  }
+
+  .dltracker-cart-status,
+  .dltracker-cart-trend {
+    font-size: 10px;
   }
 }
 

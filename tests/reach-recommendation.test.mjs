@@ -303,8 +303,8 @@ test("推荐明细按优惠对象分摊券额且总计不画表格", () => {
 
   assert.equal(prices.get("A") + prices.get("B") + prices.get("C"), 1100);
   assert.equal(prices.get("C"), 300);
-  assert.match(functionSource("appendRecommendationTable"), /人民币（日元）/);
-  assert.match(functionSource("appendRecommendationTable"), /现在折扣\/平台折扣\/史低折扣/);
+  assert.match(functionSource("appendRecommendationTable"), /人民币\/日元/);
+  assert.match(functionSource("appendRecommendationTable"), /现在\/平台\/史低/);
   assert.match(functionSource("appendRecommendationTable"), /备注/);
   assert.match(functionSource("appendRecommendationTable"), /看详情/);
   assert.match(functionSource("appendRecommendationTable"), /加购物车/);
@@ -313,6 +313,7 @@ test("推荐明细按优惠对象分摊券额且总计不画表格", () => {
   assert.match(functionSource("appendRecommendationTable"), /product\.id \|\| product\.title/);
   assert.match(functionSource("appendRecommendationTable"), /recommendationMoneyLines/);
   assert.match(functionSource("appendRecommendationTable"), /appendRecommendationDiscounts/);
+  assert.match(functionSource("recommendationMoneyLines"), /元\/\$\{yen\}/);
   assert.match(functionSource("appendRecommendationTable"), /recommendationRemarkLines/);
   assert.match(functionSource("appendRecommendationTable"), /appendRecommendationActions/);
   assert.doesNotMatch(functionSource("appendRecommendationTable"), /`现在 /);
@@ -322,6 +323,14 @@ test("推荐明细按优惠对象分摊券额且总计不画表格", () => {
   assert.match(source, /\.dltracker-reach-recommendation-table \{[\s\S]*?min-width: 100%/);
   assert.match(source, /table-layout: auto/);
   assert.doesNotMatch(source, /\.dltracker-reach-recommendation-table th:nth-child/);
+  assert.match(
+    source,
+    /\.dltracker-reach-recommendation-table th,\s*\.dltracker-reach-recommendation-table td \{[\s\S]*?text-align: left;[\s\S]*?vertical-align: middle/,
+  );
+  assert.match(
+    source,
+    /\.dltracker-reach-recommendation-action-cell \{\s*text-align: left !important;\s*vertical-align: middle !important/,
+  );
   assert.match(functionSource("appendRecommendationTable"), /优惠前/);
   assert.match(functionSource("appendRecommendationTable"), /优惠后/);
   assert.match(
@@ -536,7 +545,7 @@ test("购物车使用五框、两类表格和双入口弹窗", () => {
   );
   assert.match(
     layoutSource,
-    /className: hasPriceComparison && reachPrice <= record\.lowestPrice[\s\S]*?"dltracker-best-reach-gold"/,
+    /hasPriceComparison && reachPrice <= record\.lowestPrice[\s\S]*?\? "dltracker-best-reach-gold"/,
   );
   assert.match(
     layoutSource,
@@ -557,19 +566,26 @@ test("购物车使用五框、两类表格和双入口弹窗", () => {
   assert.match(source, /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\) max-content max-content/);
   assert.match(
     source,
-    /@media \(max-width: 900px\)[\s\S]*?grid-template-columns: minmax\(0, 1fr\) max-content/,
+    /@media \(max-width: 900px\)[\s\S]*?grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/,
+  );
+  assert.match(layoutSource, /dltracker-cart-reach/);
+  assert.match(layoutSource, /dltracker-cart-history/);
+  assert.match(layoutSource, /dltracker-cart-platform/);
+  assert.match(
+    source,
+    /@media \(max-width: 900px\)[\s\S]*?\.dltracker-cart-reach \{\s*grid-column: 1 \/ 4;\s*grid-row: 1/,
   );
   assert.match(
     source,
-    /@media \(max-width: 900px\)[\s\S]*?\.dltracker-cart-price-frame \{\s*grid-column: 1 \/ -1/,
+    /@media \(max-width: 900px\)[\s\S]*?\.dltracker-cart-history \{\s*grid-column: 1 \/ 4;\s*grid-row: 2[\s\S]*?\.dltracker-cart-platform \{\s*grid-column: 4 \/ 7;\s*grid-row: 2/,
   );
   assert.match(
     source,
-    /@media \(max-width: 900px\)[\s\S]*?\.dltracker-cart-status \{\s*grid-column: 1[\s\S]*?\.dltracker-cart-trend \{\s*grid-column: 2/,
+    /@media \(max-width: 900px\)[\s\S]*?\.dltracker-cart-status \{\s*grid-column: 4 \/ 6;\s*grid-row: 1[\s\S]*?\.dltracker-cart-trend \{\s*grid-column: 6;\s*grid-row: 1/,
   );
   assert.match(
     source,
-    /@media \(max-width: 900px\)[\s\S]*?\.dltracker-cart-deal-frame\.dltracker-cart-trend \{\s*width: auto/,
+    /@media \(max-width: 900px\)[\s\S]*?\.dltracker-cart-deal-frame \{[\s\S]*?border: 0;[\s\S]*?background: transparent/,
   );
   assert.match(
     functionSource("enhanceGenericBrowseCards"),

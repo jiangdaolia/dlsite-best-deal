@@ -86,12 +86,23 @@ test("浏览排序只在实际顺序变化时移动作品节点", () => {
 test("手机版控件挂到作品一览而不是页顶排行", () => {
   const collectSource = functionSource("collectBrowseCards");
   const enhanceSource = functionSource("enhanceGenericBrowseCards");
-  assert.match(collectSource, /form#works \.n_work_list_container/);
+  assert.match(functionSource("findBrowsePrimaryList"), /form#works \.n_work_list_container/);
   assert.match(collectSource, /const scope = primaryList \|\| document/);
   assert.match(collectSource, /scope\.querySelectorAll/);
   assert.match(enhanceSource, /injectBrowseControls\(false\)/);
   assert.match(functionSource("bootstrap"), /injectBrowseControls\(false\)/);
   assert.match(functionSource("installSpaListeners"), /!document\.querySelector\("\.dltracker-browse-controls"\)/);
+});
+
+test("指定条件搜索跳过加载骨架并采集横向表格作品", () => {
+  const primarySource = functionSource("findBrowsePrimaryList");
+  const collectSource = functionSource("collectBrowseCards");
+  assert.match(primarySource, /querySelectorAll\(selector\)/);
+  assert.match(primarySource, /search_skeleton_box/);
+  assert.match(primarySource, /data-list_item_product_id/);
+  assert.match(collectSource, /tr\[data-list_item_product_id\]/);
+  assert.match(functionSource("productIdFromNode"), /data-list_item_product_id/);
+  assert.match(functionSource("findBrowseTagAnchor"), /\.search_tag/);
 });
 
 test("购物车不用普通浏览页的主列表限域", () => {
@@ -134,16 +145,26 @@ test("普通作品卡在标签后使用三框和简洁优惠行", () => {
   assert.match(hostSource, /parent\.appendChild\(host\)/);
   assert.match(renderSource, /label: "本次可到"/);
   assert.match(renderSource, /label: "史低"/);
-  assert.match(renderSource, /label: "价格趋势"/);
+  assert.match(renderSource, /label: "趋势"/);
+  assert.match(renderSource, /cartLocalizedMoney\(reachPrice, cnyRate\)/);
+  assert.match(renderSource, /cartLocalizedMoney\(lowestPrice, cnyRate\)/);
+  assert.match(renderSource, /dltracker-browse-analysis-amount/);
   assert.match(renderSource, /可用优惠券：/);
   assert.match(renderSource, /平台活动：/);
   assert.match(frameSource, /dltracker-browse-analysis-frame/);
   assert.match(
     source,
-    /\.dltracker-browse-analysis-grid \{[\s\S]*?grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/,
+    /\.dltracker-browse-analysis-grid \{[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\) max-content/,
   );
   assert.match(
     source,
-    /\.dltracker-browse-analysis \{[\s\S]*?font-size: 9px/,
+    /\.dltracker-browse-analysis \{[\s\S]*?font-size: 8px/,
+  );
+  assert.match(source, /\.dltracker-browse-analysis-trend \{\s*padding-inline: 5px/);
+  assert.match(source, /\.dltracker-browse-analysis-host \{[\s\S]*?container-type: inline-size/);
+  assert.match(source, /\.dltracker-browse-analysis-amount \{\s*display: none/);
+  assert.match(
+    source,
+    /@container \(min-width: 320px\) \{\s*\.dltracker-browse-analysis-amount \{\s*display: inline/,
   );
 });
