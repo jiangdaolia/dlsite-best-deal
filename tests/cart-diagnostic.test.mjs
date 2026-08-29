@@ -137,3 +137,16 @@ test("购物车诊断面板固定悬浮在 body 右下角", () => {
     /\.dltracker-cart-diagnostic\s*\{[\s\S]*?position:\s*fixed;[\s\S]*?right:[\s\S]*?bottom:/,
   );
 });
+
+test("主脚本默认隐藏购物车诊断按钮", () => {
+  assert.match(source, /const ENABLE_CART_DIAGNOSTIC_PANEL = false;/);
+  const bootstrapSource = functionSource("bootstrap");
+  assert.match(
+    bootstrapSource,
+    /document\.querySelector\("\.dltracker-cart-diagnostic"\)\?\.remove\(\)/,
+  );
+  assert.match(
+    bootstrapSource,
+    /if \(ENABLE_CART_DIAGNOSTIC_PANEL\) injectCartDiagnosticPanel\(\)/,
+  );
+});

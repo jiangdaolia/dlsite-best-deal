@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.7
+// @version      0.6.8
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.7";
+  const APP_VERSION = "0.6.8";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -37,6 +37,7 @@
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   const MAX_FAVORITES = 500;
   const ENABLE_WISHLIST_ACTION_PANEL = false;
+  const ENABLE_CART_DIAGNOSTIC_PANEL = false;
   const BUY_LATER_SORT_STORAGE_KEY = "dltracker-buy-later-sort-enabled";
   const BUY_LATER_SORT_MODE_STORAGE_KEY = "dltracker-buy-later-sort-mode";
   const BUY_LATER_SORT_MODE_LOWEST = "lowest";
@@ -59,6 +60,9 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.8": [
+      "默认隐藏购物车右下角诊断按钮",
+    ],
     "0.6.7": [
       "满额券拼单优先用更少作品达到门槛，并尽量减少超额",
       "拼单分别推荐全员最优方案和预计总价最低方案",
@@ -6536,7 +6540,8 @@
       await enhanceWishlistCards();
     }
     if (isCartPage(url)) {
-      injectCartDiagnosticPanel();
+      document.querySelector(".dltracker-cart-diagnostic")?.remove();
+      if (ENABLE_CART_DIAGNOSTIC_PANEL) injectCartDiagnosticPanel();
       if (!lastCartSnapshotFingerprint) {
         lastCartSnapshotFingerprint = cartSnapshotFingerprint(
           cartSnapshotFromRoot(document),
