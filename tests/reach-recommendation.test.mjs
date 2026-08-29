@@ -31,6 +31,10 @@ vm.runInNewContext(
   ${functionSource("couponMatchesDealProduct")}
   ${functionSource("couponEquivalentRate")}
   ${functionSource("currencyRateFromProducts")}
+  ${functionSource("platformSubtotalWithBulkRules")}
+  ${functionSource("buildDealCouponOptions")}
+  ${functionSource("cartDealStatus")}
+  ${functionSource("cartCouponConditionText")}
   ${functionSource("dealMoney")}
   ${functionSource("compareRecommendationOrder")}
   ${functionSource("recommendationCombinationFinalTotal")}
@@ -49,6 +53,10 @@ vm.runInNewContext(
   ${functionSource("plannerCouponsFromDeals")}
   globalThis.reachRecommendation = {
     currencyRateFromProducts,
+    platformSubtotalWithBulkRules,
+    buildDealCouponOptions,
+    cartDealStatus,
+    cartCouponConditionText,
     dealMoney,
     spendThresholdCombinations,
     recommendationCouponEligibility,
@@ -66,6 +74,10 @@ vm.runInNewContext(
 
 const {
   currencyRateFromProducts,
+  platformSubtotalWithBulkRules,
+  buildDealCouponOptions,
+  cartDealStatus,
+  cartCouponConditionText,
   dealMoney,
   spendThresholdCombinations,
   recommendationCouponEligibility,
@@ -102,6 +114,27 @@ test("满额券优惠前总计使用平台折扣或活动后的行价格", () =>
     },
   });
   assert.equal(prices.get("SALE") + prices.get("BULK"), 363);
+
+  const products = ["A", "B", "C"].map((id) => ({
+    id,
+    price: 700,
+    officialPrice: 1000,
+    bulkbuyKey: "BULK",
+  }));
+  const subtotal = platformSubtotalWithBulkRules(products, new Map([
+    ["BULK", { minCount: 3, discountRate: 60 }],
+  ]));
+  assert.equal(subtotal, 1200);
+  const options = buildDealCouponOptions([
+    coupon({
+      discountType: "fixed",
+      discount: 400,
+      minSpend: 1200,
+      minCount: 1,
+    }),
+  ], products[0], products, subtotal);
+  assert.equal(options[0].cartSubtotal, 1200);
+  assert.equal(options[0].ready, true);
 });
 
 function coupon(overrides = {}) {
@@ -143,6 +176,52 @@ test("人民币换算优先当前作品，缺失时才回退购物车样本", ()
   const cart = { price: 990, cnyPrice: 41.83 };
   assert.equal(currencyRateFromProducts([current, cart]), 16.23 / 385);
   assert.equal(currencyRateFromProducts([{ price: 385, cnyPrice: 0 }, cart]), 41.83 / 990);
+});
+
+test("购物车固定满减显示完整条件并合并进度", () => {
+  assert.equal(cartCouponConditionText({
+    discountType: "fixed",
+    discount: 400,
+    minSpend: 1200,
+    minCount: 1,
+    spendShortfall: 300,
+  }), "满1200-400·还差300円");
+  assert.equal(cartCouponConditionText({
+    discountType: "fixed",
+    discount: 400,
+    minSpend: 1200,
+    minCount: 1,
+    spendShortfall: 0,
+  }), "满1200-400·可用");
+});
+
+test("购物车状态按单买、已满足和需凑单三态判定", () => {
+  assert.equal(cartDealStatus({ singleBuyOptimal: true }), "single");
+  const base = {
+    singleBuyOptimal: false,
+    product: { bulkbuyKey: "BULK" },
+    bulkRule: { minCount: 3 },
+    bestReach: {
+      saleRate: 30,
+      bulkRate: 60,
+      bestCoupon: { ready: true },
+    },
+  };
+  assert.equal(cartDealStatus({
+    ...base,
+    cartProducts: [
+      { bulkbuyKey: "BULK" },
+      { bulkbuyKey: "BULK" },
+    ],
+  }), "needs");
+  assert.equal(cartDealStatus({
+    ...base,
+    cartProducts: [
+      { bulkbuyKey: "BULK" },
+      { bulkbuyKey: "BULK" },
+      { bulkbuyKey: "BULK" },
+    ],
+  }), "met");
 });
 
 test("购物车结构化人民币价优先于可能含划线原价的DOM文本", () => {
@@ -394,7 +473,7 @@ test("当前作品弹窗过滤不适用券并锁定背景滚动", () => {
 test("本次可到弹窗原子更新并忽略自身 DOM 变动", () => {
   const renderSource = functionSource("renderReachDialog");
   const observerSource = functionSource("installSpaListeners");
-  assert.match(renderSource, /reachDialogDataSignature\(insight, lowestPrice\)/);
+  assert.match(renderSource, /reachDialogDataSignature\(insight, lowestPrice, mode\)/);
   assert.match(renderSource, /dltrackerReachPending === signature/);
   assert.match(renderSource, /const renderRoot = document\.createElement\("div"\)/);
   assert.match(renderSource, /body\.replaceChildren\(\.\.\.renderRoot\.childNodes\)/);
@@ -403,4 +482,22 @@ test("本次可到弹窗原子更新并忽略自身 DOM 变动", () => {
     observerSource,
     /mutations\.length && mutations\.every\(mutationIsInsideReachDialog\)/,
   );
+});
+
+test("购物车使用五框、两类表格和双入口弹窗", () => {
+  const layoutSource = functionSource("renderCartDealLayout");
+  const dialogSource = functionSource("renderReachDialog");
+  assert.match(layoutSource, /"本次可到"/);
+  assert.match(layoutSource, /label: "平台折扣"/);
+  assert.match(layoutSource, /label: "史低折扣"/);
+  assert.match(layoutSource, /openReachDialog\(insight, record\.lowestPrice, "price"\)/);
+  assert.match(layoutSource, /openReachDialog\(insight, record\.lowestPrice, "status"\)/);
+  assert.match(functionSource("appendCartCouponTable"),
+    /\["折扣", "使用条件", "可用次数", "到期（中国时间）"\]/);
+  assert.match(functionSource("appendCartActivityTable"),
+    /\["活动条件", "到期（中国时间）"\]/);
+  assert.doesNotMatch(dialogSource, /appendOrderDetails/);
+  assert.doesNotMatch(dialogSource, /自动拆单/);
+  assert.match(source, /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\) max-content max-content/);
+  assert.match(source, /@media \(max-width: 900px\)[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/);
 });

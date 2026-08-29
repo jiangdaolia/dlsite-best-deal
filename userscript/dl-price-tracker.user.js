@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.15
+// @version      0.6.16
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.15";
+  const APP_VERSION = "0.6.16";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -60,6 +60,12 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.16": [
+      "重做购物车作品卡片为五框价格状态行",
+      "优惠券与平台活动改为各自独立的自适应表格",
+      "把原计算弹窗拆为理论价格与购物车状态两个入口",
+      "移除自动拆单展示并新增窄屏单框单行布局",
+    ],
     "0.6.15": [
       "修正满额券方案的优惠前总计口径",
       "优惠前改为平台折扣或平台活动后的价格合计",
@@ -270,9 +276,11 @@
   let latestDealContext = {
     coupons: [],
     cartSnapshot: { loaded: false, active: [], later: [], updatedAt: 0 },
+    bulkRules: new Map(),
     partial: false,
   };
   let openReachProductId = "";
+  let openReachDialogMode = "price";
   let openReachRenderToken = 0;
   let reachDialogScrollLock = null;
   let browseNativeSortPending = false;
@@ -1003,34 +1011,52 @@
     return null;
   }
 
+  function findCartOperationAnchor(item) {
+    const inner =
+      item.querySelector(".__buy_now_target .cart_list_item_inner") ||
+      item.querySelector(".__buy_later_target .cart_list_item_inner") ||
+      item.querySelector(".cart_list_item_inner") ||
+      item;
+    const direct = firstElementBySelectors([
+      ".cart_list_item_control",
+      ".cart_list_item_controls",
+      ".cart_list_item_action",
+      ".cart_list_item_actions",
+      ".n_work_cart_btn",
+      ".work_cart_btn",
+      ".cart_action",
+    ], inner);
+    const textAction = [...inner.querySelectorAll("a, button")].find((node) =>
+      /放回购物车|カート(?:に|へ)戻す|稍后再买|あとで買う|あとで購入/i.test(
+        dealPlainText(node.textContent),
+      ));
+    const target = direct || textAction;
+    if (!target || target === inner) return { parent: inner, before: null };
+    let anchor = target;
+    while (anchor.parentElement && anchor.parentElement !== inner) {
+      anchor = anchor.parentElement;
+    }
+    return anchor.parentElement === inner
+      ? { parent: inner, before: anchor }
+      : { parent: inner, before: null };
+  }
+
   function ensureCartRenderHost(item) {
     const existed = item.querySelector(".dltracker-cart-host");
-    let priceHost = findCartPriceHost(item);
-    if (priceHost?.tagName === "SPAN" && priceHost.parentElement) {
-      priceHost = priceHost.parentElement;
-    }
+    const placement = findCartOperationAnchor(item);
     if (existed) {
-      if (priceHost && existed.parentElement !== priceHost) {
-        priceHost.appendChild(existed);
+      if (placement.parent && existed.parentElement !== placement.parent) {
+        placement.parent.insertBefore(existed, placement.before);
       }
+      placement.parent?.classList.add("dltracker-cart-layout-parent");
       return existed;
     }
 
     const host = document.createElement("div");
     host.className = "dltracker-cart-host";
-
-    if (priceHost?.parentElement) {
-      // 放在 work_price 内，和价格同一列纵向排列，避免横向挤压布局。
-      priceHost.appendChild(host);
-      return host;
-    }
-
-    const inner =
-      item.querySelector(".__buy_now_target .cart_list_item_inner") ||
-      item.querySelector(".__buy_later_target .cart_list_item_inner") ||
-      item.querySelector(".cart_list_item_inner");
-    if (inner) {
-      inner.appendChild(host);
+    if (placement.parent) {
+      placement.parent.classList.add("dltracker-cart-layout-parent");
+      placement.parent.insertBefore(host, placement.before);
       return host;
     }
 
@@ -1593,12 +1619,18 @@
     return Math.min(100, (coupon.discount / basis) * 100);
   }
 
-  function buildDealCouponOptions(coupons, product, cartProducts = []) {
+  function buildDealCouponOptions(
+    coupons,
+    product,
+    cartProducts = [],
+    cartSubtotalOverride = null,
+  ) {
     const cart = Array.isArray(cartProducts) ? cartProducts : [];
-    const cartSubtotal = cart.reduce(
-      (sum, item) => sum + Math.max(0, dealNumber(item?.price)),
-      0,
-    );
+    const fallbackSubtotal = cart.reduce((sum, item) =>
+      sum + Math.max(0, dealNumber(item?.price)), 0);
+    const cartSubtotal = Number.isFinite(cartSubtotalOverride)
+      ? Math.max(0, cartSubtotalOverride)
+      : fallbackSubtotal;
     return (Array.isArray(coupons) ? coupons : [])
       .filter((coupon) => couponMatchesDealProduct(coupon, product))
       .map((coupon) => {
@@ -3289,6 +3321,32 @@
     return rules;
   }
 
+  function platformSubtotalWithBulkRules(products, rules = new Map()) {
+    const cart = Array.isArray(products) ? products : [];
+    const counts = new Map();
+    for (const product of cart) {
+      const key = String(product?.bulkbuyKey || "");
+      if (key) counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return cart.reduce((sum, product) => {
+      const currentPrice = Math.max(0, dealNumber(product?.price));
+      const officialPrice = Math.max(
+        currentPrice,
+        dealNumber(product?.officialPrice, currentPrice),
+      );
+      const key = String(product?.bulkbuyKey || "");
+      const rule = rules.get(key);
+      if (!key || !rule ||
+        (counts.get(key) || 0) < dealNumber(rule.minCount, 3)) {
+        return sum + currentPrice;
+      }
+      const activityPrice = Math.round(
+        officialPrice * (1 - dealNumber(rule.discountRate) / 100),
+      );
+      return sum + Math.min(currentPrice, Math.max(0, activityPrice));
+    }, 0);
+  }
+
   function plannerItemsFromProducts(products, rules, theoretical = false) {
     return (Array.isArray(products) ? products : []).map((product) => {
       const currentPrice = Math.max(0, dealNumber(product?.price));
@@ -3423,10 +3481,7 @@
   function unmetBundleOffers(products, coupons, rules) {
     const offers = [];
     const active = Array.isArray(products) ? products : [];
-    const platformTotal = active.reduce(
-      (sum, product) => sum + Math.max(0, dealNumber(product?.price)),
-      0,
-    );
+    const platformTotal = platformSubtotalWithBulkRules(active, rules);
     for (const [key, rule] of rules.entries()) {
       const eligible = active.filter((product) => product.bulkbuyKey === key);
       const missing = Math.max(0, dealNumber(rule.minCount, 3) - eligible.length);
@@ -3600,8 +3655,7 @@
   function targetRecommendationOffers(active, coupons, rules, targetProduct) {
     if (!targetProduct) return [];
     const cart = Array.isArray(active) ? active : [];
-    const subtotal = cart.reduce((sum, product) =>
-      sum + Math.max(0, dealNumber(product?.price)), 0);
+    const subtotal = platformSubtotalWithBulkRules(cart, rules);
     const targetRule = rules.get(String(targetProduct.bulkbuyKey || ""));
     const officialPrice = Math.max(
       dealNumber(targetProduct.price),
@@ -4167,18 +4221,18 @@
       ? `${dealNumber(insight.bulkRule?.minCount, 3)}件${compactOff(reach.bulkRate)}`
       : reach.saleRate > 0 ? `当前平台${compactOff(reach.saleRate)}` : "当前平台价";
     const lines = [
-      `原价 ${dealMoney(officialPrice, cnyRate)}`,
-      `${platformLabel}后 ${dealMoney(platformPrice, cnyRate)}`,
+      `原价 ${cartLocalizedMoney(officialPrice, cnyRate)}`,
+      `${platformLabel}后 ${cartLocalizedMoney(platformPrice, cnyRate)}`,
     ];
     if (reach.bestCoupon) {
       const couponPrice = calculateHypotheticalPrice(product, reach);
-      lines.push(`${compactCouponListLabel(reach.bestCoupon)}后 ${dealMoney(couponPrice, cnyRate)}`);
+      lines.push(`${compactCouponListLabel(reach.bestCoupon)}后 ${cartLocalizedMoney(couponPrice, cnyRate)}`);
     }
-    lines.push(`${insight.partial ? "当前已知可到" : "本次可到"} ${dealMoney(calculateHypotheticalPrice(product, reach), cnyRate)}｜${compactOff(reach.totalRate)}`);
+    lines.push(`${insight.partial ? "当前已知可到" : "本次可到"} ${cartLocalizedMoney(calculateHypotheticalPrice(product, reach), cnyRate)}｜${compactOff(reach.totalRate)}`);
     return lines;
   }
 
-  function reachDialogDataSignature(insight, lowestPrice) {
+  function reachDialogDataSignature(insight, lowestPrice, mode = "price") {
     const snapshot = latestDealContext.cartSnapshot || {};
     const summarizeProducts = (products) => (Array.isArray(products) ? products : [])
       .map((product) => [
@@ -4203,6 +4257,7 @@
       ]))
       .sort();
     return JSON.stringify({
+      mode,
       id: String(insight?.product?.id || "").toUpperCase(),
       product: summarizeProducts([insight?.product]),
       lowestPrice: Number.isFinite(lowestPrice) ? lowestPrice : null,
@@ -4220,11 +4275,32 @@
     });
   }
 
-  async function renderReachDialog(insight, lowestPrice) {
+  function appendReachDisclaimer(parent) {
+    const disclaimer = document.createElement("details");
+    disclaimer.className = "dltracker-reach-disclaimer";
+    const summary = document.createElement("summary");
+    summary.textContent = "价格与方案仅供参考，以 DLsite 实际结算为准｜查看计算说明";
+    const notes = document.createElement("ul");
+    [
+      "本次可到可能依赖尚未满足的件数或金额门槛。",
+      "新增凑单作品的价格不计入未完成方案的理论总价。",
+      "每笔订单最多使用一张优惠券。",
+      "当前平台折扣与多件活动二选一，优惠券可与其中一项叠加。",
+      "人民币金额使用 DLsite 同一作品的 CNY/JPY 价格比例估算。",
+    ].forEach((text) => {
+      const item = document.createElement("li");
+      item.textContent = text;
+      notes.appendChild(item);
+    });
+    disclaimer.append(summary, notes);
+    parent.appendChild(disclaimer);
+  }
+
+  async function renderReachDialog(insight, lowestPrice, mode = "price") {
     const overlay = document.querySelector(".dltracker-reach-overlay");
     const body = overlay?.querySelector(".dltracker-reach-dialog-body");
     if (!body || !insight) return;
-    const signature = reachDialogDataSignature(insight, lowestPrice);
+    const signature = reachDialogDataSignature(insight, lowestPrice, mode);
     if (body.dataset.dltrackerReachSignature === signature ||
       body.dataset.dltrackerReachPending === signature) return;
     body.dataset.dltrackerReachPending = signature;
@@ -4259,29 +4335,50 @@
     }
     const currentPrice = dealNumber(insight.product.price);
     const targetPrice = calculateHypotheticalPrice(insight.product, insight.bestReach);
-    appendReachRow(work, "还可节省", dealMoney(Math.max(0, currentPrice - targetPrice), cnyRate));
-    if (insight.bulkRule) {
-      const count = active.filter((item) => item.bulkbuyKey === insight.product.bulkbuyKey).length;
-      const missing = Math.max(0, insight.bulkRule.minCount - count);
-      appendReachRow(work, "活动门槛", missing ? `还差${missing}件` : "已满足");
-    }
-    if (insight.bestReach.bestCoupon) {
-      const coupon = insight.bestReach.bestCoupon;
-      const missing = [];
-      if (coupon.countShortfall > 0) missing.push(`还差${coupon.countShortfall}部`);
-      if (coupon.spendShortfall > 0) missing.push(`还差${toYen(coupon.spendShortfall)}`);
-      appendReachRow(work, "优惠券门槛", missing.join("｜") || "已满足");
-    }
+    appendReachRow(work, "还可节省", cartLocalizedMoney(Math.max(0, currentPrice - targetPrice), cnyRate));
     if (Number.isFinite(lowestPrice)) {
       appendReachRow(work, "史低对比", targetPrice <= lowestPrice ? "本次可到不高于史低" : `比史低高${toYen(targetPrice - lowestPrice)}`);
     }
-    renderRoot.appendChild(work);
+    if (mode === "price") {
+      renderRoot.appendChild(work);
+      appendReachDisclaimer(renderRoot);
+      if (renderToken !== openReachRenderToken || !body.isConnected) return;
+      body.replaceChildren(...renderRoot.childNodes);
+      body.dataset.dltrackerReachSignature = signature;
+      return;
+    }
 
+    const status = cartDealStatus(insight);
     const cart = document.createElement("section");
     cart.className = "dltracker-reach-section";
     const cartTitle = document.createElement("h3");
-    cartTitle.textContent = "购物车计算";
+    cartTitle.textContent = cartDealStatusLabel(status);
     cart.appendChild(cartTitle);
+    if (status === "single") {
+      appendReachRow(cart, "状态", "当前作品无需凑金额或件数");
+      const reach = insight.bestReach;
+      const platformLabel = reach.saleRate > 0
+        ? `当前平台${compactOff(reach.saleRate)}`
+        : "当前平台无折扣";
+      appendReachRow(cart, "平台优惠", platformLabel);
+      appendReachRow(
+        cart,
+        "优惠券",
+        reach.bestCoupon ? compactCouponListLabel(reach.bestCoupon) : "无需优惠券",
+      );
+      appendReachRow(
+        cart,
+        "单买结算价＝理论最优价",
+        cartLocalizedMoney(targetPrice, cnyRate),
+        "is-current-best",
+      );
+      renderRoot.appendChild(cart);
+      appendReachDisclaimer(renderRoot);
+      if (renderToken !== openReachRenderToken || !body.isConnected) return;
+      body.replaceChildren(...renderRoot.childNodes);
+      body.dataset.dltrackerReachSignature = signature;
+      return;
+    }
     if (snapshot.updatedAt) {
       const updated = document.createElement("div");
       updated.className = "dltracker-reach-muted";
@@ -4295,10 +4392,10 @@
     } else if (calculation.empty) {
       appendReachRow(cart, "状态", "立即购买中没有作品");
     } else {
-      appendReachRow(cart, "当前平台价合计", dealMoney(calculation.platformTotal, cnyRate));
-      appendReachRow(cart, partialData ? "当前已知可结算最低" : "当前可结算最低", dealMoney(calculation.currentBestTotal, cnyRate), "is-current-best");
-      appendReachRow(cart, partialData ? "当前已知理论最低" : "理论最低", dealMoney(calculation.theoreticalTotal, cnyRate));
-      appendReachRow(cart, "距离理论最低", dealMoney(Math.max(0, calculation.currentBestTotal - calculation.theoreticalTotal), cnyRate));
+      appendReachRow(cart, "当前平台价合计", cartLocalizedMoney(calculation.platformTotal, cnyRate));
+      appendReachRow(cart, partialData ? "当前已知可结算最低" : "当前可结算最低", cartLocalizedMoney(calculation.currentBestTotal, cnyRate), "is-current-best");
+      appendReachRow(cart, partialData ? "当前已知理论最低" : "理论最低", cartLocalizedMoney(calculation.theoreticalTotal, cnyRate));
+      appendReachRow(cart, "距离理论最低", cartLocalizedMoney(Math.max(0, calculation.currentBestTotal - calculation.theoreticalTotal), cnyRate));
       const shortfalls = unmetBundleOffers(
         active,
         latestDealContext.coupons,
@@ -4307,27 +4404,30 @@
         ? Boolean(insight.product.bulkbuyKey) && insight.product.bulkbuyKey === offer.key
         : couponMatchesDealProduct(offer.coupon, insight.product))
         .map((offer) => offer.type === "activity"
-          ? `${offer.rule.minCount}件${compactOff(offer.rule.discountRate)}还差${offer.missing}件`
-          : offer.type === "spend"
-            ? `${compactOff(couponEquivalentRate(offer.coupon, insight.product), "券")}还差${toYen(offer.missingSpend)}`
-            : `${compactOff(couponEquivalentRate(offer.coupon, insight.product), "券")}还差${offer.missing}部`);
+          ? `${offer.rule.minCount}件${compactOff(offer.rule.discountRate)}·还差${offer.missing}件`
+          : `${compactOff(couponEquivalentRate(offer.coupon, insight.product), "券")}·${cartCouponConditionText({
+              ...offer.coupon,
+              countShortfall: offer.type === "count" ? offer.missing : 0,
+              spendShortfall: offer.type === "spend" ? offer.missingSpend : 0,
+            })}`);
       if (shortfalls.length) {
         appendReachRow(cart, "还差条件", shortfalls.slice(0, 3).join("｜"));
+      } else if (status === "met") {
+        const satisfied = [];
+        if (insight.bestReach.bulkRate > insight.bestReach.saleRate + 0.001 &&
+          insight.bulkRule) {
+          satisfied.push(`${insight.bulkRule.minCount}件${compactOff(insight.bulkRule.discountRate)}`);
+        }
+        if (insight.bestReach.bestCoupon) {
+          satisfied.push(cartCouponConditionText(insight.bestReach.bestCoupon));
+        }
+        appendReachRow(cart, "已满足门槛", satisfied.join("｜") || "当前最优条件已满足");
       }
       if (!calculation.exact) {
         const warning = document.createElement("div");
         warning.className = "dltracker-reach-warning";
-        warning.textContent = "组合规模过大，未进行精确拆单";
+        warning.textContent = "组合规模过大，当前价格为近似结果";
         cart.appendChild(warning);
-      }
-      if (calculation.splitPlan) {
-        const splitTitle = document.createElement("h4");
-        splitTitle.textContent = `拆单可再省 ${dealMoney(calculation.singleQuote.total - calculation.splitPlan.total, cnyRate)}`;
-        cart.appendChild(splitTitle);
-        calculation.splitPlan.orders.forEach((order, index) =>
-          appendOrderDetails(cart, order, index, cnyRate));
-      } else if (calculation.singleQuote) {
-        appendOrderDetails(cart, calculation.singleQuote, 0, cnyRate);
       }
       if (calculation.theoreticalTotal < calculation.currentBestTotal) {
         const note = document.createElement("div");
@@ -4335,7 +4435,8 @@
         note.textContent = "理论总价未计入尚未加入的凑单作品价格";
         cart.appendChild(note);
       }
-      if (later.length) {
+      if (later.length && (status === "needs" ||
+        calculation.theoreticalTotal < calculation.currentBestTotal)) {
         const recommendations = await buildBundleRecommendations(
           active,
           later,
@@ -4399,25 +4500,7 @@
       }
     }
     renderRoot.appendChild(cart);
-
-    const disclaimer = document.createElement("details");
-    disclaimer.className = "dltracker-reach-disclaimer";
-    const disclaimerSummary = document.createElement("summary");
-    disclaimerSummary.textContent = "价格与方案仅供参考，以 DLsite 实际结算为准｜查看计算说明";
-    const notes = document.createElement("ul");
-    [
-      "本次可到可能依赖尚未满足的件数或金额门槛。",
-      "新增凑单作品的价格不计入未完成方案的理论总价。",
-      "每笔订单最多使用一张优惠券。",
-      "当前平台折扣与多件活动二选一，优惠券可与其中一项叠加。",
-      "人民币金额按 DLsite 当页比例估算。",
-    ].forEach((text) => {
-      const item = document.createElement("li");
-      item.textContent = text;
-      notes.appendChild(item);
-    });
-    disclaimer.append(disclaimerSummary, notes);
-    renderRoot.appendChild(disclaimer);
+    appendReachDisclaimer(renderRoot);
     if (renderToken !== openReachRenderToken || !body.isConnected) return;
     body.replaceChildren(...renderRoot.childNodes);
     body.dataset.dltrackerReachSignature = signature;
@@ -4471,11 +4554,13 @@
     document.querySelector(".dltracker-reach-overlay")?.remove();
     unlockReachDialogScroll();
     openReachProductId = "";
+    openReachDialogMode = "price";
   }
 
-  function openReachDialog(insight, lowestPrice) {
+  function openReachDialog(insight, lowestPrice, mode = "price") {
     closeReachDialog();
     openReachProductId = String(insight?.product?.id || "").toUpperCase();
+    openReachDialogMode = mode === "status" ? "status" : "price";
     const overlay = document.createElement("div");
     overlay.className = "dltracker-reach-overlay";
     overlay.addEventListener("click", (event) => {
@@ -4491,7 +4576,9 @@
     });
     const header = document.createElement("header");
     const title = document.createElement("strong");
-    title.textContent = "本次可到计算";
+    title.textContent = openReachDialogMode === "status"
+      ? cartDealStatusLabel(cartDealStatus(insight))
+      : "本次可到计算";
     const close = document.createElement("button");
     close.type = "button";
     close.textContent = "×";
@@ -4506,7 +4593,7 @@
     document.body.appendChild(overlay);
     lockReachDialogScroll();
     dialog.focus({ preventScroll: true });
-    void renderReachDialog(insight, lowestPrice).catch((error) => {
+    void renderReachDialog(insight, lowestPrice, openReachDialogMode).catch((error) => {
       console.warn(`[${APP_NAME}] reach dialog calculation failed:`, error);
       body.textContent = error instanceof Error ? error.message : String(error);
     });
@@ -4520,7 +4607,11 @@
       `.${UI_CLASSNAME}[data-product-id="${openReachProductId}"]`,
     );
     const lowestPrice = Number(card?.dataset.lowestPrice);
-    void renderReachDialog(insight, Number.isFinite(lowestPrice) ? lowestPrice : undefined);
+    void renderReachDialog(
+      insight,
+      Number.isFinite(lowestPrice) ? lowestPrice : undefined,
+      openReachDialogMode,
+    );
   }
 
   function createSingleBuyBadge() {
@@ -4621,6 +4712,283 @@
     host.appendChild(box);
   }
 
+  function cartDealStatus(insight) {
+    if (!insight) return "loading";
+    if (insight.singleBuyOptimal) return "single";
+    const reach = insight.bestReach || {};
+    const requirements = [];
+    if (reach.bulkRate > reach.saleRate + 0.001 && insight.bulkRule) {
+      const count = (insight.cartProducts || []).filter((item) =>
+        item.bulkbuyKey && item.bulkbuyKey === insight.product.bulkbuyKey,
+      ).length;
+      requirements.push(count >= dealNumber(insight.bulkRule.minCount, 1));
+    }
+    if (reach.bestCoupon) {
+      requirements.push(Boolean(reach.bestCoupon.ready));
+    }
+    return requirements.length && requirements.every(Boolean)
+      ? "met"
+      : "needs";
+  }
+
+  function cartDealStatusLabel(status) {
+    if (status === "single") return "单买即最优";
+    if (status === "met") return "门槛已满足";
+    if (status === "needs") return "需凑单";
+    return "价格读取中";
+  }
+
+  function cartLocalizedMoney(value, cnyRate = null) {
+    const yenValue = dealNumber(value, NaN);
+    if (!Number.isFinite(yenValue)) return "价格读取中";
+    const rounded = Math.round(yenValue);
+    const yen = toYen(rounded);
+    return Number.isFinite(cnyRate) && cnyRate > 0
+      ? `约${(rounded * cnyRate).toFixed(2)}元（${yen}）`
+      : yen;
+  }
+
+  function cartCouponConditionText(option) {
+    const conditions = [];
+    if (dealNumber(option?.minCount, 1) > 1) {
+      conditions.push(`${Math.round(option.minCount)}部起用`);
+    }
+    if (dealNumber(option?.minSpend) > 0) {
+      const threshold = Math.round(option.minSpend);
+      conditions.push(option.discountType === "fixed" && option.discount > 0
+        ? `满${threshold}-${Math.round(option.discount)}`
+        : `满${threshold}円`);
+    }
+    if (!conditions.length) conditions.push("无门槛");
+    const progress = [];
+    if (dealNumber(option?.countShortfall) > 0) {
+      progress.push(`还差${Math.round(option.countShortfall)}部`);
+    }
+    if (dealNumber(option?.spendShortfall) > 0) {
+      progress.push(`还差${toYen(option.spendShortfall)}`);
+    }
+    return `${conditions.join("＋")}·${progress.join("＋") || "可用"}`;
+  }
+
+  function cartTableExpiryText(value, earliest = false) {
+    return chinaExpiryText(value, earliest).replace(/中国时间到期$/, "");
+  }
+
+  function createCartDealPriceFrame({
+    tag = "div",
+    className = "",
+    label,
+    price,
+    rate,
+    onActivate = null,
+  }) {
+    const frame = document.createElement(tag);
+    frame.className = `dltracker-cart-deal-frame dltracker-cart-price-frame ${className}`.trim();
+    if (tag === "button") frame.type = "button";
+    const title = document.createElement("strong");
+    title.textContent = label;
+    const amount = document.createElement("span");
+    amount.className = "dltracker-cart-deal-price";
+    amount.textContent = price;
+    frame.append(title, amount);
+    if (typeof rate === "number" && Number.isFinite(rate)) {
+      const off = document.createElement("span");
+      off.className = "dltracker-cart-deal-off";
+      off.textContent = rate > 0 ? compactOff(rate) : "无折扣";
+      frame.appendChild(off);
+    }
+    if (onActivate) {
+      frame.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onActivate();
+      });
+    }
+    return frame;
+  }
+
+  function appendCartCouponTable(parent, insight) {
+    if (!insight?.couponOptions?.length) return;
+    const section = document.createElement("section");
+    section.className = "dltracker-cart-offer-section dltracker-cart-coupon-section";
+    const heading = document.createElement("h4");
+    heading.textContent = "可用优惠券";
+    const scroll = document.createElement("div");
+    scroll.className = "dltracker-cart-offer-table-wrap";
+    const table = document.createElement("table");
+    table.className = "dltracker-cart-offer-table";
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    ["折扣", "使用条件", "可用次数", "到期（中国时间）"].forEach((text) => {
+      const cell = document.createElement("th");
+      cell.textContent = text;
+      headRow.appendChild(cell);
+    });
+    head.appendChild(headRow);
+    const body = document.createElement("tbody");
+    for (const option of insight.couponOptions) {
+      const row = document.createElement("tr");
+      const expiries = new Set((option.originals || [])
+        .map((original) => original.expiresAt)
+        .filter(Boolean));
+      [
+        compactOff(option.equivalentRate),
+        cartCouponConditionText(option),
+        compactCouponUsage(option),
+        cartTableExpiryText(option.earliestExpiry, expiries.size > 1),
+      ].forEach((text) => {
+        const cell = document.createElement("td");
+        cell.textContent = text;
+        row.appendChild(cell);
+      });
+      body.appendChild(row);
+    }
+    table.append(head, body);
+    scroll.appendChild(table);
+    section.append(heading, scroll);
+    parent.appendChild(section);
+  }
+
+  function appendCartActivityTable(parent, insight) {
+    if (!insight?.bulkRule) return;
+    const count = (insight.cartProducts || []).filter((item) =>
+      item.bulkbuyKey && item.bulkbuyKey === insight.product.bulkbuyKey,
+    ).length;
+    const missing = Math.max(0, dealNumber(insight.bulkRule.minCount, 1) - count);
+    const condition = `${dealNumber(insight.bulkRule.minCount, 3)}件${compactOff(insight.bulkRule.discountRate)}·${missing ? `还差${missing}件` : "可用"}`;
+    const section = document.createElement("section");
+    section.className = "dltracker-cart-offer-section dltracker-cart-activity-section";
+    const heading = document.createElement("h4");
+    heading.textContent = "平台活动";
+    const scroll = document.createElement("div");
+    scroll.className = "dltracker-cart-offer-table-wrap";
+    const table = document.createElement("table");
+    table.className = "dltracker-cart-offer-table";
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    ["活动条件", "到期（中国时间）"].forEach((text) => {
+      const cell = document.createElement("th");
+      cell.textContent = text;
+      headRow.appendChild(cell);
+    });
+    head.appendChild(headRow);
+    const body = document.createElement("tbody");
+    const row = document.createElement("tr");
+    [condition, cartTableExpiryText(insight.bulkRule.expiresAt)].forEach((text) => {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      row.appendChild(cell);
+    });
+    body.appendChild(row);
+    table.append(head, body);
+    scroll.appendChild(table);
+    section.append(heading, scroll);
+    parent.appendChild(section);
+  }
+
+  function renderCartDealLayout(host, record, insight) {
+    if (!host || !record) return;
+    const card = document.createElement("section");
+    card.className = `${UI_CLASSNAME} dltracker-cart-layout`;
+    card.dataset.productId = String(record.rjCode || insight?.product?.id || "").toUpperCase();
+    if (typeof record.lowestPrice === "number") {
+      card.dataset.lowestPrice = String(record.lowestPrice);
+    }
+    const allForRate = insight
+      ? [
+          insight.product,
+          ...(latestDealContext.cartSnapshot.active || []),
+          ...(latestDealContext.cartSnapshot.later || []),
+        ]
+      : [];
+    const cnyRate = currencyRateFromProducts(allForRate);
+    const grid = document.createElement("div");
+    grid.className = "dltracker-cart-deal-grid";
+    if (!insight) {
+      for (const label of ["本次可到", "平台折扣"]) {
+        grid.appendChild(createCartDealPriceFrame({
+          label,
+          price: "价格读取中",
+          rate: null,
+        }));
+      }
+    } else {
+      const reachPrice = calculateHypotheticalPrice(
+        insight.product,
+        insight.bestReach,
+      );
+      grid.appendChild(createCartDealPriceFrame({
+        tag: "button",
+        className: bestReachColorClass(reachPrice, record.lowestPrice),
+        label: insight.partial ? "当前已知可到" : "本次可到",
+        price: cartLocalizedMoney(reachPrice, cnyRate),
+        rate: insight.bestReach.totalRate,
+        onActivate: () => openReachDialog(insight, record.lowestPrice, "price"),
+      }));
+      grid.appendChild(createCartDealPriceFrame({
+        label: "平台折扣",
+        price: cartLocalizedMoney(insight.product.price, cnyRate),
+        rate: insight.bestReach.saleRate,
+      }));
+    }
+    const historyRegular = Math.max(
+      dealNumber(record.regularPrice),
+      dealNumber(insight?.product?.officialPrice),
+    );
+    const historyRate = historyRegular > 0 &&
+      dealNumber(record.lowestPrice, Infinity) < historyRegular
+      ? (1 - dealNumber(record.lowestPrice) / historyRegular) * 100
+      : 0;
+    grid.appendChild(createCartDealPriceFrame({
+      className: insight && Number.isFinite(record.lowestPrice)
+        ? ""
+        : "is-unavailable",
+      label: "史低折扣",
+      price: !insight
+        ? "价格读取中"
+        : Number.isFinite(record.lowestPrice)
+          ? cartLocalizedMoney(record.lowestPrice, cnyRate)
+          : "暂无数据",
+      rate: insight && Number.isFinite(record.lowestPrice) ? historyRate : null,
+    }));
+    const status = cartDealStatus(insight);
+    const statusButton = document.createElement("button");
+    statusButton.type = "button";
+    statusButton.className = `dltracker-cart-deal-frame dltracker-cart-status is-${status}`;
+    statusButton.textContent = cartDealStatusLabel(status);
+    statusButton.disabled = !insight;
+    if (insight) {
+      statusButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openReachDialog(insight, record.lowestPrice, "status");
+      });
+    }
+    grid.appendChild(statusButton);
+    const trend = document.createElement(record.dlwatcherUrl ? "a" : "span");
+    trend.className = "dltracker-cart-deal-frame dltracker-cart-trend";
+    trend.textContent = "价格趋势";
+    if (record.dlwatcherUrl) {
+      trend.href = record.dlwatcherUrl;
+      trend.target = "_blank";
+      trend.rel = "noopener noreferrer";
+      trend.addEventListener("click", (event) => event.stopPropagation());
+    }
+    grid.appendChild(trend);
+    card.appendChild(grid);
+    if (insight) {
+      appendCartCouponTable(card, insight);
+      appendCartActivityTable(card, insight);
+      if (insight.partial) {
+        const partial = document.createElement("div");
+        partial.className = "dltracker-deal-partial";
+        partial.textContent = "部分优惠未确认";
+        card.appendChild(partial);
+      }
+    }
+    host.replaceChildren(card);
+  }
+
   function createBestReachBadge(insight, lowestPrice) {
     const badge = document.createElement("div");
     const price = calculateHypotheticalPrice(insight?.product, insight?.bestReach);
@@ -4659,6 +5027,12 @@
     for (const card of document.querySelectorAll(
       `.${UI_CLASSNAME}[data-product-id="${String(id).toUpperCase()}"]`,
     )) {
+      const cartHost = card.closest(".dltracker-cart-host");
+      const cartRecord = browseRecordById.get(String(id).toUpperCase());
+      if (cartHost && cartRecord) {
+        renderCartDealLayout(cartHost, cartRecord, insight);
+        continue;
+      }
       card.querySelector(".dltracker-best-reach-badge")?.remove();
       card.querySelector(".dltracker-single-buy-badge")?.remove();
       if (!insight?.bestReach?.totalRate) continue;
@@ -4681,7 +5055,20 @@
 
   async function buildInsight(product, coupons, cartProducts, partial = false) {
     const bulkRule = await ensureBulkRule(product);
-    const options = buildDealCouponOptions(coupons, product, cartProducts);
+    const bulkRules = new Map(latestDealContext.bulkRules || []);
+    if (product?.bulkbuyKey && bulkRule) {
+      bulkRules.set(String(product.bulkbuyKey), bulkRule);
+    }
+    const cartSubtotal = platformSubtotalWithBulkRules(
+      cartProducts,
+      bulkRules,
+    );
+    const options = buildDealCouponOptions(
+      coupons,
+      product,
+      cartProducts,
+      cartSubtotal,
+    );
     const bestReach = calculateBestReach(product, options, bulkRule);
     const insight = {
       product,
@@ -4744,15 +5131,26 @@
       appendJpyPrice(priceHost, product);
       renderBrowseVoiceActors(node, product);
       const insight = await buildInsight(product, usableCoupons, enrichedCartProducts, partial);
-      if (isCartPage(location.href)) {
-        renderDetailInsight(priceHost, insight);
+      const cartPage = isCartPage(location.href);
+      const cartHost = cartPage
+        ? node.querySelector(".dltracker-cart-host") ||
+          ensureCartRenderHost(node)
+        : null;
+      if (cartHost) {
+        const record = browseRecordById.get(String(id).toUpperCase()) || {
+          rjCode: id,
+        };
+        renderCartDealLayout(cartHost, record, insight);
       }
 
-      if (/^[RB]J/i.test(id) && !node.querySelector(`.${UI_CLASSNAME}`)) {
-        const historyHost = document.createElement("div");
-        historyHost.className = "dltracker-inline-host";
-        priceHost.appendChild(historyHost);
-        renderLoadingCard(historyHost);
+      if (/^[RB]J/i.test(id) &&
+        (cartHost || !node.querySelector(`.${UI_CLASSNAME}`))) {
+        const historyHost = cartHost || document.createElement("div");
+        if (!cartHost) {
+          historyHost.className = "dltracker-inline-host";
+          priceHost.appendChild(historyHost);
+          renderLoadingCard(historyHost);
+        }
         const link = node.querySelector('a[href*="product_id/"]');
         const record = await buildOrUpdateRecord({
           rjCode: id,
@@ -4760,7 +5158,7 @@
           currentPrice: product.price || undefined,
           forceFetch: false,
         });
-        browseRecordById.set(String(id).toUpperCase(), record);
+        browseRecordById.set(String(id).toUpperCase(), record || { rjCode: id });
         if (record?.voiceActors?.length) {
           renderBrowseVoiceActors(node, {
             ...product,
@@ -4770,9 +5168,9 @@
             ]),
           });
         }
-        renderPriceCard(record, historyHost);
+        renderPriceCard(record || { rjCode: id }, historyHost);
       }
-      if (!isCartPage(location.href)) {
+      if (!cartPage) {
         renderCompactInsight(priceHost, insight);
       }
       markDealProcessed(node, id);
@@ -4857,9 +5255,11 @@
         later: (rawCartSnapshot.later || []).map(enrich),
       };
       cartSnapshot.products = cartSnapshot.active;
+      const bulkRules = await bulkRuleMapForProducts(cartSnapshot.active);
       latestDealContext = {
         coupons,
         cartSnapshot,
+        bulkRules,
         partial: dealDataPartial || !rawCartSnapshot.loaded,
       };
       const cartProducts = cartSnapshot.loaded ? cartSnapshot.active : [];
@@ -6672,6 +7072,16 @@
   }
 
   function renderPriceCard(record, host) {
+    if (isCartPage(location.href) && host?.classList?.contains("dltracker-cart-host")) {
+      if (record?.rjCode) {
+        const id = String(record.rjCode).toUpperCase();
+        browseRecordById.set(id, record);
+        renderCartDealLayout(host, record, dealInsightById.get(id));
+      } else {
+        host.textContent = "史低获取失败";
+      }
+      return;
+    }
     const existed = host.querySelector(`.${UI_CLASSNAME}`);
     if (existed) existed.remove();
 
@@ -6783,6 +7193,28 @@
   }
 
   function renderLoadingCard(host) {
+    if (isCartPage(location.href) && host?.classList?.contains("dltracker-cart-host")) {
+      const loading = document.createElement("div");
+      loading.className = `${UI_CLASSNAME} dltracker-cart-layout dltracker-cart-layout-loading`;
+      const grid = document.createElement("div");
+      grid.className = "dltracker-cart-deal-grid";
+      ["本次可到", "平台折扣", "史低折扣"].forEach((label) => {
+        grid.appendChild(createCartDealPriceFrame({
+          label,
+          price: "价格读取中",
+          rate: null,
+        }));
+      });
+      for (const label of ["价格读取中", "价格趋势"]) {
+        const frame = document.createElement("span");
+        frame.className = "dltracker-cart-deal-frame";
+        frame.textContent = label;
+        grid.appendChild(frame);
+      }
+      loading.appendChild(grid);
+      host.replaceChildren(loading);
+      return;
+    }
     const existed = host.querySelector(`.${UI_CLASSNAME}`);
     if (existed) existed.remove();
 
@@ -7054,10 +7486,14 @@
           resolveFallbackRjCode: () =>
             resolveCanonicalRjCodeFromProductHref(task.productHref),
         });
-        renderPriceCard(record, task.renderHost);
+        const displayRecord = record || { rjCode: task.rjCode };
+        browseRecordById.set(String(task.rjCode).toUpperCase(), displayRecord);
+        renderPriceCard(displayRecord, task.renderHost);
       } catch (error) {
         console.warn(`[${APP_NAME}] cart render failed:`, error);
-        renderPriceCard(null, task.renderHost);
+        const displayRecord = { rjCode: task.rjCode };
+        browseRecordById.set(String(task.rjCode).toUpperCase(), displayRecord);
+        renderPriceCard(displayRecord, task.renderHost);
       }
     });
 
@@ -7828,6 +8264,192 @@
   box-sizing: border-box;
 }
 
+.dltracker-cart-layout-parent {
+  flex-wrap: wrap !important;
+}
+
+.dltracker-cart-layout-parent > .dltracker-cart-host {
+  flex: 0 0 100%;
+  min-width: 0;
+}
+
+.${UI_CLASSNAME}.dltracker-cart-layout {
+  width: 100%;
+  max-width: 100%;
+  margin: 7px 0 0;
+  gap: 7px;
+  color: #34434c;
+  font-size: 11px;
+}
+
+.dltracker-cart-deal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) max-content max-content;
+  align-items: stretch;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+}
+
+.dltracker-cart-deal-frame {
+  min-width: 0;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin: 0;
+  padding: 5px 7px;
+  border: 1px solid #d5dfe5;
+  border-radius: 7px;
+  box-sizing: border-box;
+  color: #34434c;
+  background: #fff;
+  font: inherit;
+  line-height: 1.25;
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+button.dltracker-cart-deal-frame,
+a.dltracker-cart-deal-frame {
+  cursor: pointer;
+}
+
+button.dltracker-cart-deal-frame:focus-visible,
+a.dltracker-cart-deal-frame:focus-visible {
+  outline: 2px solid #4f7f9d;
+  outline-offset: 1px;
+}
+
+.dltracker-cart-price-frame strong {
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+
+.dltracker-cart-deal-price {
+  min-width: 0;
+  font-size: 10px;
+}
+
+.dltracker-cart-deal-off {
+  flex: 0 0 auto;
+  padding: 1px 4px;
+  border-radius: 999px;
+  color: #51616b;
+  background: #edf2f5;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.dltracker-cart-price-frame.dltracker-best-reach-gold {
+  border-color: #dfb84f;
+  color: #4b3a12;
+  background: #fffdf6;
+}
+
+.dltracker-cart-price-frame.dltracker-best-reach-gold .dltracker-cart-deal-off {
+  color: #6d4700;
+  background: #ffd75a;
+}
+
+.dltracker-cart-price-frame.dltracker-best-reach-bluegray {
+  border-color: #9aabb8;
+  color: #34434c;
+  background: #f8fafb;
+}
+
+.dltracker-cart-price-frame.dltracker-best-reach-bluegray .dltracker-cart-deal-off {
+  color: #fff;
+  background: #587187;
+}
+
+.dltracker-cart-status {
+  padding-inline: 10px;
+  font-weight: 800;
+}
+
+.dltracker-cart-status.is-needs {
+  border-color: #e6bd72;
+  color: #81500b;
+  background: #fff4de;
+}
+
+.dltracker-cart-status.is-met,
+.dltracker-cart-status.is-single {
+  border-color: #9bc9aa;
+  color: #24623b;
+  background: #e8f5ed;
+}
+
+.dltracker-cart-status.is-loading,
+.dltracker-cart-status:disabled,
+.dltracker-cart-layout-loading .dltracker-cart-deal-frame {
+  cursor: default;
+  color: #78868e;
+  background: #f5f7f8;
+}
+
+.dltracker-cart-trend {
+  padding-inline: 10px;
+  color: #315f7d;
+  font-weight: 700;
+}
+
+.dltracker-cart-offer-section {
+  width: 100%;
+  min-width: 0;
+}
+
+.dltracker-cart-offer-section h4 {
+  margin: 0 0 4px;
+  color: #485963;
+  font-size: 11px;
+}
+
+.dltracker-cart-offer-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.dltracker-cart-offer-table {
+  width: 100%;
+  min-width: max-content;
+  border-collapse: collapse;
+  color: #3f4e56;
+  background: #fff;
+  font-size: 10px;
+}
+
+.dltracker-cart-offer-table th,
+.dltracker-cart-offer-table td {
+  padding: 4px 6px;
+  border: 1px solid #dbe4e9;
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.dltracker-cart-offer-table th {
+  color: #53636c;
+  background: #f1f5f7;
+  font-weight: 700;
+}
+
+.dltracker-cart-coupon-section .dltracker-cart-offer-table td:first-child {
+  color: #80500d;
+  font-weight: 800;
+}
+
+.dltracker-cart-activity-section .dltracker-cart-offer-table td:first-child {
+  color: #22603a;
+  font-weight: 800;
+}
+
 .dltracker-cart-diagnostic {
   position: fixed;
   z-index: 2147483000;
@@ -8275,6 +8897,22 @@
   color: #975a16;
   font-size: 11px;
   line-height: 1.5;
+}
+
+@media (max-width: 900px) {
+  .dltracker-cart-deal-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dltracker-cart-deal-frame {
+    width: 100%;
+  }
+
+  .dltracker-cart-price-frame strong,
+  .dltracker-cart-deal-price,
+  .dltracker-cart-deal-off {
+    font-size: 11px;
+  }
 }
 
 @media (max-width: 768px) {
