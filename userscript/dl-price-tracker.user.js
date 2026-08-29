@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.2
+// @version      0.6.3
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.2";
+  const APP_VERSION = "0.6.3";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -58,6 +58,9 @@
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.3": [
+      "购物车页新增一键复制脱敏诊断 JSON",
+    ],
     "0.6.2": [
       "严格按立即购买/稍后再买所在区域计算购物车门槛",
       "本次可到的价格计算步骤改为每步单独一行",
@@ -2108,6 +2111,226 @@
       active: cartProductsFromRoot(root, "active"),
       later: cartProductsFromRoot(root, "later"),
     };
+  }
+
+  function cartDiagnosticElementSummary(node) {
+    if (!node) return null;
+    const attributes = {};
+    for (const name of [
+      "data-workno",
+      "data-product-id",
+      "data-cart-area",
+      "data-area",
+      "data-bulkbuy_key",
+      "data-bulkbuy-key",
+      "data-price",
+      "data-sale-price",
+    ]) {
+      const value = node.getAttribute?.(name);
+      if (value !== null && value !== undefined && value !== "") {
+        attributes[name] = String(value).slice(0, 160);
+      }
+    }
+    const rawId = String(node.id || "");
+    return {
+      tag: String(node.tagName || "").toLowerCase(),
+      id: rawId && /cart|buy|later|now|hold|main|work|product|[RBV]J\d{6,}/i.test(rawId)
+        ? rawId.slice(0, 160)
+        : rawId ? "[omitted]" : "",
+      classes: typeof node.className === "string"
+        ? node.className.split(/\s+/).filter(Boolean).slice(0, 24)
+        : [],
+      attributes,
+    };
+  }
+
+  function cartDiagnosticProduct(product) {
+    return {
+      id: String(product?.id || "").toUpperCase(),
+      price: Math.max(0, dealNumber(product?.price)),
+      officialPrice: Math.max(0, dealNumber(product?.officialPrice)),
+      bulkbuyKey: String(product?.bulkbuyKey || "").slice(0, 160),
+    };
+  }
+
+  function cartDiagnosticCandidateItems() {
+    const owners = [];
+    const seen = new Set();
+    for (const item of getCartItems()) {
+      const owner = getCartOwnerItem(item);
+      if (!owner || seen.has(owner)) continue;
+      seen.add(owner);
+      owners.push(owner);
+    }
+    return owners.map((owner, index) => {
+      const ancestors = [];
+      let cursor = owner;
+      for (let depth = 0; cursor && depth < 12; depth += 1) {
+        ancestors.push(cartDiagnosticElementSummary(cursor));
+        if (cursor === document.body) break;
+        cursor = cursor.parentElement;
+      }
+      const nativePriceText = [...owner.querySelectorAll([
+        ".work_price",
+        ".n_work_price_wrap",
+        "[class*='price']",
+      ].join(","))]
+        .filter((node) => !node.closest("[class^='dltracker-'], [class*=' dltracker-']"))
+        .flatMap((node) => [...String(node.textContent || "")
+          .replace(/,/g, "")
+          .matchAll(/(\d{1,8})\s*(?:円|JPY)/gi)]
+          .map((match) => Number(match[1])))
+        .filter((value) => Number.isFinite(value));
+      const id = extractRjCodeFromCartItem(owner) || "";
+      return {
+        index,
+        productId: id,
+        computedArea: cartProductArea(owner),
+        computedPrice: cartCurrentPriceFromNode(owner),
+        nativeYenValues: nativePriceText,
+        hiddenOrRemoved: Boolean(
+          owner.hidden ||
+          owner.classList?.contains("_removed") ||
+          /display\s*:\s*none/i.test(owner.getAttribute?.("style") || ""),
+        ),
+        areaSignals: {
+          closestBuyNow: cartDiagnosticElementSummary(
+            owner.closest?.(BUY_NOW_AREA_SELECTOR),
+          ),
+          closestBuyLater: cartDiagnosticElementSummary(
+            owner.closest?.(BUY_LATER_AREA_SELECTOR),
+          ),
+          hasBuyNowActionTarget: Boolean(owner.querySelector?.(".__buy_now_target")),
+          hasBuyLaterActionTarget: Boolean(owner.querySelector?.(".__buy_later_target")),
+        },
+        displayedDealText: dealPlainText(
+          owner.querySelector?.(`.${DEAL_INSIGHT_CLASSNAME}`)?.textContent,
+        ).slice(0, 800),
+        ancestors,
+      };
+    });
+  }
+
+  function buildCartDiagnostic() {
+    const domSnapshot = cartSnapshotFromRoot(document);
+    const storedSnapshot = loadCartSnapshot();
+    const contextSnapshot = latestDealContext.cartSnapshot || {};
+    const active = contextSnapshot.active || contextSnapshot.products || [];
+    const products = [
+      ...(contextSnapshot.active || contextSnapshot.products || []),
+      ...(contextSnapshot.later || []),
+    ];
+    const calculations = products.map((product) => ({
+      product: cartDiagnosticProduct(product),
+      couponOptions: buildDealCouponOptions(
+        latestDealContext.coupons,
+        product,
+        active,
+      ).map((option) => ({
+        discountType: option.discountType,
+        discount: dealNumber(option.discount),
+        minCount: dealNumber(option.minCount),
+        minSpend: dealNumber(option.minSpend),
+        eligibleCartCount: dealNumber(option.eligibleCartCount),
+        cartSubtotal: dealNumber(option.cartSubtotal),
+        countShortfall: dealNumber(option.countShortfall),
+        spendShortfall: dealNumber(option.spendShortfall),
+        ready: Boolean(option.ready),
+      })),
+    }));
+    const summarizeSnapshot = (snapshot) => ({
+      loaded: Boolean(snapshot?.loaded),
+      updatedAt: dealNumber(snapshot?.updatedAt),
+      active: (snapshot?.active || snapshot?.products || []).map(cartDiagnosticProduct),
+      later: (snapshot?.later || []).map(cartDiagnosticProduct),
+    });
+    return {
+      format: "dltracker-cart-diagnostic-v1",
+      scriptVersion: APP_VERSION,
+      capturedAt: new Date().toISOString(),
+      pagePath: location.pathname,
+      safety: {
+        titlesIncluded: false,
+        accountIdentifiersIncluded: false,
+        cookiesIncluded: false,
+        requestHeadersIncluded: false,
+        fullHtmlIncluded: false,
+      },
+      candidates: cartDiagnosticCandidateItems(),
+      domSnapshot: summarizeSnapshot({ loaded: true, ...domSnapshot }),
+      storedSnapshot: summarizeSnapshot(storedSnapshot),
+      contextSnapshot: summarizeSnapshot(contextSnapshot),
+      calculations,
+    };
+  }
+
+  async function copyCartDiagnosticText(text) {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        // Fall through to the textarea method used by older mobile browsers.
+      }
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } finally {
+      textarea.remove();
+    }
+    return copied;
+  }
+
+  function injectCartDiagnosticPanel() {
+    if (!isCartPage(location.href) ||
+      document.querySelector(".dltracker-cart-diagnostic")) return;
+    const panel = document.createElement("section");
+    panel.className = "dltracker-cart-diagnostic";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "复制购物车诊断 JSON";
+    const status = document.createElement("span");
+    status.textContent = "仅包含脱敏的区域、价格和计算信息";
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      status.textContent = "正在生成…";
+      try {
+        const text = JSON.stringify(buildCartDiagnostic(), null, 2);
+        const copied = await copyCartDiagnosticText(text);
+        if (copied) {
+          status.textContent = "已复制，请直接粘贴发给我";
+        } else {
+          downloadText(
+            `dltracker-cart-diagnostic-${Date.now()}.json`,
+            text,
+            "application/json;charset=utf-8",
+          );
+          status.textContent = "无法复制，已改为下载 JSON 文件";
+        }
+      } catch (error) {
+        status.textContent = `生成失败：${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    panel.append(button, status);
+    const anchor = document.querySelector(
+      "div.buy_now, section.buy_now, #cart, .cart_list",
+    );
+    if (anchor?.parentElement) {
+      anchor.parentElement.insertBefore(panel, anchor);
+    } else {
+      const host = document.querySelector("#main_inner, #main, main") || document.body;
+      host.prepend(panel);
+    }
   }
 
   async function ensureCartSnapshot() {
@@ -5978,6 +6201,7 @@
       await enhanceWishlistCards();
     }
     if (isCartPage(url)) {
+      injectCartDiagnosticPanel();
       if (!lastCartSnapshotFingerprint) {
         lastCartSnapshotFingerprint = cartSnapshotFingerprint(
           cartSnapshotFromRoot(document),
@@ -6520,6 +6744,35 @@
   margin-top: 6px;
   width: 100%;
   box-sizing: border-box;
+}
+
+.dltracker-cart-diagnostic {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 8px 0 12px;
+  padding: 8px 10px;
+  color: #52616b;
+  background: #f5f8fa;
+  border: 1px solid #d6e0e5;
+  border-radius: 7px;
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+.dltracker-cart-diagnostic button {
+  padding: 6px 10px;
+  color: #fff;
+  background: #435a66;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.dltracker-cart-diagnostic button:disabled {
+  opacity: .55;
+  cursor: wait;
 }
 
 .dltracker-mobile-product-host {
