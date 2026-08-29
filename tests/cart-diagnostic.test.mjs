@@ -73,6 +73,46 @@ test("购物车诊断作品不导出标题或账号字段", () => {
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE TITLE|SECRET-ACCOUNT/);
 });
 
+test("购物车隐藏副本不会被当成可见作品", () => {
+  const sandbox = {};
+  vm.runInNewContext(
+    `${functionSource("isHiddenOrRemovedCartItem")}
+    globalThis.isHidden = isHiddenOrRemovedCartItem;`,
+    sandbox,
+  );
+  const item = ({ hidden = false, removed = false, style = "", ariaHidden = "" } = {}) => ({
+    hidden,
+    closest() {
+      return this;
+    },
+    classList: {
+      contains(name) {
+        return name === "_removed" && removed;
+      },
+    },
+    getAttribute(name) {
+      if (name === "style") return style;
+      if (name === "aria-hidden") return ariaHidden;
+      return null;
+    },
+  });
+
+  assert.equal(sandbox.isHidden(item()), false);
+  assert.equal(sandbox.isHidden(item({ hidden: true })), true);
+  assert.equal(sandbox.isHidden(item({ removed: true })), true);
+  assert.equal(sandbox.isHidden(item({ style: "display : none" })), true);
+  assert.equal(sandbox.isHidden(item({ ariaHidden: "true" })), true);
+});
+
+test("购物车快照在分区前排除隐藏副本", () => {
+  const snapshotSource = functionSource("cartProductsFromRoot");
+  assert.match(snapshotSource, /isHiddenOrRemovedCartItem\(node\)/);
+  assert.ok(
+    snapshotSource.indexOf("isHiddenOrRemovedCartItem(node)") <
+      snapshotSource.indexOf("cartProductArea(node)"),
+  );
+});
+
 test("诊断构建器不读取整页 HTML、Cookie 或请求头", () => {
   const diagnosticSource = functionSource("buildCartDiagnostic");
   assert.doesNotMatch(diagnosticSource, /outerHTML|innerHTML|document\.cookie/i);

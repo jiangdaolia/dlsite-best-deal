@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.5
+// @version      0.6.6
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.5";
+  const APP_VERSION = "0.6.6";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -56,8 +56,13 @@
   const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v5";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
+  const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.6": [
+      "修正 DLsite 隐藏购物车副本被计入立即购买门槛的问题",
+      "修正浏览列表凑单筛选框反复重建造成的闪烁",
+    ],
     "0.6.5": [
       "购物车诊断改为右下角固定悬浮面板，避免被页面重绘移除",
     ],
@@ -1069,8 +1074,7 @@
     if (!item) return false;
     const ownerItem =
       item.closest("li.cart_list_item, li.n_work_list_item") || item;
-    if (ownerItem.classList?.contains("_removed")) return false;
-    if (ownerItem.getAttribute("style")?.includes("display:none")) return false;
+    if (isHiddenOrRemovedCartItem(ownerItem)) return false;
     const hasCartTarget =
       ownerItem.matches?.(".__buy_now_target, .__buy_later_target") ||
       !!ownerItem.querySelector(".__buy_now_target, .__buy_later_target");
@@ -2067,6 +2071,16 @@
     return 0;
   }
 
+  function isHiddenOrRemovedCartItem(item) {
+    const owner = item?.closest?.("li.cart_list_item, li.n_work_list_item") || item;
+    if (!owner) return true;
+    if (owner.hidden || owner.classList?.contains("_removed")) return true;
+    if (String(owner.getAttribute?.("aria-hidden") || "").toLowerCase() === "true") {
+      return true;
+    }
+    return /display\s*:\s*none/i.test(owner.getAttribute?.("style") || "");
+  }
+
   function cartProductsFromRoot(root, area = "active") {
     const nodes = root.querySelectorAll([
       "li.cart_list_item._cart_items",
@@ -2080,6 +2094,7 @@
     const products = [];
     const seen = new Set();
     for (const node of nodes) {
+      if (isHiddenOrRemovedCartItem(node)) continue;
       if (cartProductArea(node) !== area) continue;
       const dataId = node.getAttribute("data-workno") ||
         node.getAttribute("data-product-id") || "";
@@ -2194,11 +2209,7 @@
         computedArea: cartProductArea(owner),
         computedPrice: cartCurrentPriceFromNode(owner),
         nativeYenValues: nativePriceText,
-        hiddenOrRemoved: Boolean(
-          owner.hidden ||
-          owner.classList?.contains("_removed") ||
-          /display\s*:\s*none/i.test(owner.getAttribute?.("style") || ""),
-        ),
+        hiddenOrRemoved: isHiddenOrRemovedCartItem(owner),
         areaSignals: {
           closestBuyNow: cartDiagnosticElementSummary(
             owner.closest?.(BUY_NOW_AREA_SELECTOR),
@@ -2651,6 +2662,16 @@
     return matched ? matched[1].toUpperCase() : null;
   }
 
+  function markDealProcessed(node, id) {
+    if (!node || !id) return;
+    node.setAttribute(DEAL_PROCESSED_ATTRIBUTE, String(id).toUpperCase());
+  }
+
+  function needsDealProcessing(node, id = productIdFromNode(node)) {
+    if (!node || !id) return false;
+    return node.getAttribute(DEAL_PROCESSED_ATTRIBUTE) !== String(id).toUpperCase();
+  }
+
   function collectBrowseCards() {
     if (/\/mypage\/(?:order|purchase|library|download)/i.test(location.pathname)) return [];
     const selectors = [
@@ -2666,6 +2687,7 @@
     const seen = new Set();
     const addCard = (node) => {
       if (!node || seen.has(node)) return;
+      if (isCartPage(location.href) && !isRenderableCartItem(node)) return;
       const id = productIdFromNode(node);
       if (!id ||
         id === currentId ||
@@ -2871,7 +2893,12 @@
       entries.sort(mode === BROWSE_SORT_MODE_NATIVE
         ? (a, b) => a.order - b.order
         : (a, b) => compareDealSortEntries(a, b, mode));
-      entries.forEach((entry) => parent.appendChild(entry.node));
+      const sortedNodes = entries.map((entry) => entry.node);
+      const memberNodes = new Set(sortedNodes);
+      const currentNodes = [...parent.children].filter((node) => memberNodes.has(node));
+      if (sortedNodes.some((node, index) => currentNodes[index] !== node)) {
+        sortedNodes.forEach((node) => parent.appendChild(node));
+      }
     }
   }
 
@@ -2914,12 +2941,12 @@
   }
 
   function findBrowseControlsAnchor(cards) {
-    const nativeSort = document.querySelector([
+    const nativeSort = [...document.querySelectorAll([
       "select[name*='sort']",
       ".sort_box select",
       ".search_result_sort select",
       "[class*='sort'] select",
-    ].join(","));
+    ].join(","))].find((select) => !select.closest(".dltracker-browse-controls"));
     if (nativeSort?.parentElement) {
       const group = nativeSort.closest(
         ".sort_box, .search_result_sort, [class*='sort'], label",
@@ -2934,6 +2961,13 @@
       return { parent: list.parentElement, before: list };
     }
     return list ? { parent: list, before: first } : null;
+  }
+
+  function browseSelectOptionsMatch(select, options) {
+    if (!select || select.options.length !== options.length) return false;
+    return options.every((option, index) =>
+      select.options[index]?.value === option.value &&
+      select.options[index]?.textContent === option.label);
   }
 
   function injectBrowseControls() {
@@ -2980,12 +3014,14 @@
     const filter = controls.querySelector(".dltracker-browse-filter");
     const options = browseBundleFilterOptions(cards);
     const selected = getBrowseBundleFilter();
-    filter.replaceChildren(...options.map((option) => {
-      const node = document.createElement("option");
-      node.value = option.value;
-      node.textContent = option.label;
-      return node;
-    }));
+    if (!browseSelectOptionsMatch(filter, options)) {
+      filter.replaceChildren(...options.map((option) => {
+        const node = document.createElement("option");
+        node.value = option.value;
+        node.textContent = option.label;
+        return node;
+      }));
+    }
     if (options.some((option) => option.value === selected)) {
       filter.value = selected;
     } else {
@@ -3887,7 +3923,10 @@
     // 活动页同源请求也保持串行，避免列表上出现并发访问。
     await mapWithConcurrency(cards, 1, async ({ id, node }) => {
       const priceHost = findBrowsePriceHost(node);
-      if (!priceHost) return;
+      if (!priceHost) {
+        markDealProcessed(node, id);
+        return;
+      }
       const priceMatch = (priceHost.textContent || "")
         .replace(/,/g, "")
         .match(/(\d{1,8})\s*(?:円|JPY)/i);
@@ -3946,6 +3985,7 @@
       if (!isCartPage(location.href)) {
         renderCompactInsight(priceHost, insight);
       }
+      markDealProcessed(node, id);
     });
     injectBrowseControls();
     await applyBrowseSortAndFilter();
@@ -3974,7 +4014,9 @@
     const insight = await buildInsight(product, coupons, enrichedCart, partial);
     const priceHost = findProductPriceHost();
     appendJpyPrice(priceHost, product);
-    renderDetailInsight(findProductRenderHost(), insight);
+    const renderHost = findProductRenderHost();
+    renderDetailInsight(renderHost, insight);
+    markDealProcessed(renderHost, id);
   }
 
   async function enhanceDealInsights() {
@@ -6194,7 +6236,7 @@
         (item) =>
           isRenderableCartItem(item) &&
           (!item.querySelector(`.${UI_CLASSNAME}`) ||
-            !item.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`)),
+            needsDealProcessing(item)),
       )
     ) {
       scheduleCartBootstrap();
@@ -6207,7 +6249,7 @@
     const cards = getWishlistCards();
     if (cards.some((card) =>
       !card.querySelector(`.${UI_CLASSNAME}`) ||
-      !card.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`),
+      needsDealProcessing(card),
     )) {
       void bootstrap();
     }
@@ -7414,9 +7456,13 @@
 
         if (isProductPage(currentUrl)) {
           const host = findProductRenderHost();
+          const currentMatch = location.pathname.match(/product_id\/([RBV]J\d{6,})/i);
+          const id = currentMatch
+            ? currentMatch[1].toUpperCase()
+            : productIdFromNode(document.body);
           if (host &&
             (!host.querySelector(`.${UI_CLASSNAME}`) ||
-              !host.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`))) {
+              needsDealProcessing(host, id))) {
             void bootstrap();
           }
           return;
@@ -7431,9 +7477,7 @@
         }
 
         const browseCards = collectBrowseCards();
-        if (browseCards.some(({ node }) =>
-          !node.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`),
-        )) {
+        if (browseCards.some(({ id, node }) => needsDealProcessing(node, id))) {
           void bootstrap();
         }
       }, 300);
