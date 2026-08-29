@@ -200,6 +200,22 @@ test("1200-400 可以加入不适用作品凑整单门槛", () => {
   assert.deepEqual(Array.from(result.orders[0].targetIds), ["A"]);
 });
 
+test("理论满1200减400按等效折扣计算而不会把385円减成0", () => {
+  const result = quoteBestSingleOrder(
+    [{ id: "A", regularPrice: 385 }],
+    [{
+      id: "C400-THEORETICAL",
+      type: "percent",
+      value: 400 / 1200 * 100,
+      maxDiscount: 400,
+      allEligible: true,
+    }],
+  );
+
+  assert.equal(result.total, 257);
+  assert.equal(result.discount, 128);
+});
+
 test("用券作品不计入三件时，求解器会避免破坏更便宜的整组折扣", () => {
   const items = ["A", "B", "C"].map((id) => ({
     id,
