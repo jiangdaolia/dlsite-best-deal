@@ -36,9 +36,22 @@ test("筛选选项未变化时不重建 select", () => {
   assert.equal(sandbox.matches(select, options), true);
   assert.equal(sandbox.matches(select, [...options, { value: "x", label: "X" }]), false);
   assert.match(
-    functionSource("injectBrowseControls"),
+    functionSource("syncBundleFilterSelect"),
     /if \(!browseSelectOptionsMatch\(filter, options\)\)/,
   );
+});
+
+test("稍后再买复用浏览列表的凑单筛选", () => {
+  const controlsSource = functionSource("injectBuyLaterSortToggle");
+  const filterSource = functionSource("applyBuyLaterBundleFilter");
+  const sortSource = functionSource("sortBuyLaterItems");
+  assert.match(controlsSource, /dltracker-buy-later-filter-select/);
+  assert.match(controlsSource, /setBrowseBundleFilter\(filterSelect\.value\)/);
+  assert.match(filterSource, /syncBundleFilterSelect\(filter, cards\)/);
+  assert.match(filterSource, /browseCardMatchesFilter\(insight, selected\)/);
+  assert.match(filterSource, /dltracker-buy-later-filtered-out/);
+  assert.match(sortSource, /applyBuyLaterBundleFilter\(ownerItems\)/);
+  assert.match(source, /\.dltracker-buy-later-filtered-out \{\s*display: none !important;/);
 });
 
 test("无优惠作品也会留下已处理标记供观察器识别", () => {

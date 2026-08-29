@@ -34,10 +34,12 @@ vm.runInNewContext(
   ${functionSource("bundleRecommendationKey")}
   ${functionSource("bundleRecommendationAddedCost")}
   ${functionSource("selectBundleRecommendations")}
+  ${functionSource("recommendationFinalPriceMap")}
   ${functionSource("plannerCouponsFromDeals")}
   globalThis.reachRecommendation = {
     spendThresholdCombinations,
     selectBundleRecommendations,
+    recommendationFinalPriceMap,
     plannerCouponsFromDeals,
   };`,
   sandbox,
@@ -46,10 +48,11 @@ vm.runInNewContext(
 const {
   spendThresholdCombinations,
   selectBundleRecommendations,
+  recommendationFinalPriceMap,
   plannerCouponsFromDeals,
 } = sandbox.reachRecommendation;
 
-test("满1200凑单优先一部达到门槛并减少超额", () => {
+test("满1200凑单优先一部达标也保留多部合计方案", () => {
   const combinations = spendThresholdCombinations([
     { id: "A", price: 300, order: 0 },
     { id: "B", price: 300, order: 1 },
@@ -59,8 +62,9 @@ test("满1200凑单优先一部达到门槛并减少超额", () => {
   ], 815);
 
   assert.ok(combinations.length > 0);
-  assert.ok(combinations.every((combination) => combination.length === 1));
+  assert.equal(combinations[0].length, 1);
   assert.equal(combinations[0][0].id, "E");
+  assert.ok(combinations.some((combination) => combination.length > 1));
 });
 
 test("没有单部能补满时才推荐最少数量的组合", () => {
@@ -71,8 +75,25 @@ test("没有单部能补满时才推荐最少数量的组合", () => {
     { id: "D", price: 250, order: 3 },
   ], 815);
 
-  assert.ok(combinations.every((combination) => combination.length === 2));
+  assert.equal(combinations[0].length, 2);
   assert.deepEqual(Array.from(combinations[0], (item) => item.id).sort(), ["A", "B"]);
+});
+
+test("同时有件数和金额门槛时可用多部作品合计补齐", () => {
+  const combinations = spendThresholdCombinations([
+    { id: "A", price: 900, order: 0 },
+    { id: "B", price: 500, order: 1 },
+    { id: "C", price: 350, order: 2 },
+  ], 800, 30, 2);
+
+  assert.ok(combinations.length > 0);
+  assert.ok(combinations.every((combination) => combination.length >= 2));
+  assert.ok(combinations.every((combination) =>
+    combination.reduce((sum, item) => sum + item.price, 0) >= 800));
+  assert.match(
+    functionSource("buildBundleRecommendations"),
+    /calculationUsesCoupon\(calculation, offer\.key\)/,
+  );
 });
 
 test("拼单分别选择全员最优和预计总价最低方案", () => {
@@ -97,6 +118,28 @@ test("拼单分别选择全员最优和预计总价最低方案", () => {
     "all-optimal",
     "lowest",
   ]);
+});
+
+test("推荐表格按优惠对象分摊券额且加总不变", () => {
+  const prices = recommendationFinalPriceMap({
+    currentPlan: {
+      orders: [{
+        discount: 400,
+        lines: [
+          { id: "A", price: 500, couponTarget: true },
+          { id: "B", price: 700, couponTarget: true },
+          { id: "C", price: 300, couponTarget: false },
+        ],
+      }],
+    },
+  });
+
+  assert.equal(prices.get("A") + prices.get("B") + prices.get("C"), 1100);
+  assert.equal(prices.get("C"), 300);
+  assert.match(functionSource("appendRecommendationTable"), /推荐凑单作品/);
+  assert.match(functionSource("appendRecommendationTable"), /史低折扣/);
+  assert.match(functionSource("appendRecommendationTable"), /优惠前/);
+  assert.match(functionSource("appendRecommendationTable"), /优惠后/);
 });
 
 test("满额固定减免券的理论计算改用门槛等效折扣", () => {
