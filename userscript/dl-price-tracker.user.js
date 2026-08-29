@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.20
+// @version      0.6.21
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -60,6 +60,9 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.21": [
+      "调整手机普通作品卡的优惠分析间距，使其更贴近本卡并远离下一张卡",
+    ],
     "0.6.20": [
       "压缩普通作品卡的趋势框，为本次可到和史低释放更多宽度",
       "横向普通作品卡显示本次可到与史低的人民币（日元），窄卡只显示折扣",
@@ -9549,6 +9552,10 @@ a.dltracker-cart-deal-frame:focus-visible {
     margin-top: 6px;
     gap: 5px;
     font-size: 12px;
+  }
+
+  .${UI_CLASSNAME}.dltracker-browse-analysis {
+    margin: 2px 0 12px;
   }
 
   .dltracker-mobile-product-host .${UI_CLASSNAME} .dltracker-chip,

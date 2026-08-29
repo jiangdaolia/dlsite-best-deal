@@ -167,4 +167,8 @@ test("普通作品卡在标签后使用三框和简洁优惠行", () => {
     source,
     /@container \(min-width: 320px\) \{\s*\.dltracker-browse-analysis-amount \{\s*display: inline/,
   );
+  assert.match(
+    source,
+    /@media \(max-width: 768px\)[\s\S]*?\.\$\{UI_CLASSNAME\}\.dltracker-browse-analysis \{\s*margin: 2px 0 12px/,
+  );
 });
