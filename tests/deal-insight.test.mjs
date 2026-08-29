@@ -35,9 +35,11 @@ vm.runInNewContext(
     calculateHypotheticalPrice,
     isSingleBuyOptimal,
     extractVoiceActorNames,
+    mergeBrowseVoiceActorNames,
     compareDealSortEntries,
     activeCartFingerprint,
     cartSnapshotFingerprint,
+    cartAreaFromMarkerText,
     dealDateMillis,
     lastYenPriceFromText,
     compactCouponCondition,
@@ -58,9 +60,11 @@ const {
   calculateHypotheticalPrice,
   isSingleBuyOptimal,
   extractVoiceActorNames,
+  mergeBrowseVoiceActorNames,
   compareDealSortEntries,
   activeCartFingerprint,
   cartSnapshotFingerprint,
+  cartAreaFromMarkerText,
   dealDateMillis,
   lastYenPriceFromText,
   compactCouponCondition,
@@ -266,6 +270,30 @@ test("批量作品数据可从常见结构归一化声优", () => {
     })),
     ["甲", "乙", "丙"],
   );
+  assert.deepEqual(
+    Array.from(extractVoiceActorNames({
+      creators: [
+        { name: "花岩香奈", role: "声優" },
+        { name: "某画师", role: "イラスト" },
+      ],
+    })),
+    ["花岩香奈"],
+  );
+});
+
+test("音声作品使用列表 author 作为声优数据源", () => {
+  assert.deepEqual(
+    Array.from(mergeBrowseVoiceActorNames("SOU", [], ["甲", "乙"])),
+    ["甲", "乙"],
+  );
+  assert.deepEqual(
+    Array.from(mergeBrowseVoiceActorNames("MNG", [], ["漫画作者"])),
+    [],
+  );
+  assert.deepEqual(
+    Array.from(mergeBrowseVoiceActorNames("SOU", ["甲"], ["甲", "丙"])),
+    ["甲", "丙"],
+  );
 });
 
 test("本次可到价不高于史低用金黄，高于史低用蓝灰", () => {
@@ -302,6 +330,17 @@ test("稍后再买变化也会改变购物车快照指纹", () => {
     later: [{ id: "RJ3", price: 800 }],
   });
   assert.notEqual(first, second);
+});
+
+test("购物车区域标记严格区分立即购买和稍后再买", () => {
+  assert.equal(cartAreaFromMarkerText("buy_now cart_list"), "active");
+  assert.equal(cartAreaFromMarkerText("buy_later cart_list"), "later");
+  assert.equal(cartAreaFromMarkerText("cart_hold"), "later");
+  assert.equal(cartAreaFromMarkerText("cart_list_item"), "unknown");
+  assert.equal(
+    cartAreaFromMarkerText("buy_now __buy_later_target"),
+    "later",
+  );
 });
 
 test("列表与详情使用最终确认的紧凑券文案", () => {

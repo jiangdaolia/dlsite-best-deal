@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.1
+// @version      0.6.2
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.1";
+  const APP_VERSION = "0.6.2";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -53,11 +53,16 @@
   const DLSITE_PRODUCT_INFO_PATH = "/maniax/product/info/ajax";
   const PRODUCT_METADATA_TTL_MS = 30 * 60 * 1000;
   const DEAL_CACHE_STORAGE_KEY = "dltracker-deal-insight-cache-v3";
-  const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v4";
+  const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v5";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.2": [
+      "严格按立即购买/稍后再买所在区域计算购物车门槛",
+      "本次可到的价格计算步骤改为每步单独一行",
+      "复用 DLwatcher 史低数据中的声优资料，并为音声列表原生名字补上声优标签",
+    ],
     "0.6.1": [
       "修正折扣商品原价被误计入购物车满减门槛",
       "移除与价格栏重复的‘当前 N円’标签",
@@ -169,7 +174,9 @@
     ".__buy_later_target",
   ];
   const BUY_LATER_AREA_SELECTOR = [
-    ".__buy_later_target",
+    "div.buy_later",
+    "section.buy_later",
+    "li.buy_later",
     ".buy_later",
     ".cart_hold",
     "[id^='buy_later_']",
@@ -177,9 +184,10 @@
     "[data-area='later']",
   ].join(",");
   const BUY_NOW_AREA_SELECTOR = [
-    ".__buy_now_target",
-    "li.buy_now",
+    "div.buy_now",
     "section.buy_now",
+    "li.buy_now",
+    ".buy_now",
     "li[id^='buy_now_']",
     "[data-cart-area='active']",
     "[data-area='active']",
@@ -1275,6 +1283,21 @@
       .trim();
   }
 
+  function cartAreaFromMarkerText(value) {
+    const marker = String(value || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_");
+    if (/(?:^|_)(?:buy_later|cart_hold)(?:_|$)/.test(marker) ||
+      /(?:^|_)later(?:_|$)/.test(marker)) {
+      return "later";
+    }
+    if (/(?:^|_)buy_now(?:_|$)/.test(marker) ||
+      /(?:^|_)active(?:_|$)/.test(marker)) {
+      return "active";
+    }
+    return "unknown";
+  }
+
   function lastYenPriceFromText(value) {
     const matches = [...String(value || "")
       .replace(/,/g, "")
@@ -1619,6 +1642,10 @@
         Object.values(value).forEach(collect);
       }
     };
+    if (typeof raw === "string" || typeof raw === "number" || Array.isArray(raw)) {
+      collect(raw);
+      return names;
+    }
     const sources = [
       raw?.voice_actor,
       raw?.voice_actors,
@@ -1634,7 +1661,7 @@
     for (const collection of [raw?.creater, raw?.creaters, raw?.creators, raw?.casts]) {
       if (Array.isArray(collection)) {
         collection
-          .filter((entry) => /voice|actor|cv|声優|声优/i.test(dealPlainText(
+          .filter((entry) => /voice|actor|cv|声優|声优|配音/i.test(dealPlainText(
             entry?.role ?? entry?.type ?? entry?.category ?? entry?.label ??
               entry?.creater_type ?? entry?.creator_type,
           )))
@@ -1643,10 +1670,18 @@
       }
       if (!collection || typeof collection !== "object") continue;
       for (const [key, value] of Object.entries(collection)) {
-        if (/voice|actor|cv|声優|声优/i.test(key)) collect(value);
+        if (/voice|actor|cv|声優|声优|配音/i.test(key)) collect(value);
       }
     }
     return names;
+  }
+
+  function mergeBrowseVoiceActorNames(workType, metadataNames, cardAuthors) {
+    const sources = [metadataNames];
+    if (String(workType || "").toUpperCase() === "SOU") {
+      sources.push(cardAuthors);
+    }
+    return extractVoiceActorNames(sources);
   }
 
   function compareDealSortEntries(a, b, mode) {
@@ -2035,12 +2070,8 @@
     ].join(","));
     const products = [];
     const seen = new Set();
-    const hasExplicitBuyNowArea = Boolean(root.querySelector(BUY_NOW_AREA_SELECTOR));
     for (const node of nodes) {
-      const later = isBuyLaterCartItem(node) ||
-        /buy_later|later/i.test(`${node.id} ${node.className}`);
-      if (area === "later" ? !later : later) continue;
-      if (area === "active" && hasExplicitBuyNowArea && !isBuyNowCartItem(node)) continue;
+      if (cartProductArea(node) !== area) continue;
       const dataId = node.getAttribute("data-workno") ||
         node.getAttribute("data-product-id") || "";
       const href = node.querySelector('a[href*="product_id/"]')?.getAttribute("href") || "";
@@ -2371,16 +2402,55 @@
     ], card);
   }
 
+  function browseCardWorkType(card) {
+    const explicit = card?.querySelector?.("[data-worktype]")
+      ?.getAttribute("data-worktype");
+    if (explicit) return String(explicit).toUpperCase();
+    const category = card?.querySelector?.(".work_category");
+    const matched = String(category?.className || "").match(/(?:^|\s)type_([A-Z0-9]+)/i);
+    return matched ? matched[1].toUpperCase() : "";
+  }
+
+  function browseCardAuthorElements(card) {
+    return [...card.querySelectorAll([
+      ".maker_name .author",
+      ".work_maker .author",
+      ".n_work_maker .author",
+    ].join(","))];
+  }
+
   function renderBrowseVoiceActors(card, product) {
-    if (!card || !product?.voiceActors?.length) return;
+    if (!card) return;
     if (card.querySelector(".dltracker-voice-actors")) return;
+    const workType = browseCardWorkType(card);
+    const authorElements = browseCardAuthorElements(card);
+    const authorNames = authorElements.flatMap((element) =>
+      [...element.querySelectorAll("a")].map((link) => link.textContent)
+        .concat(element.querySelector("a") ? [] : [element.textContent]),
+    );
+    const voiceActors = mergeBrowseVoiceActorNames(
+      workType,
+      product?.voiceActors || [],
+      authorNames,
+    );
+    if (!voiceActors.length) return;
     const originalText = dealPlainText(card.textContent);
-    if (/(?:声優|声优|\bCV\b)\s*[:：]/i.test(originalText)) return;
-    if (product.voiceActors.some((name) =>
-      originalText.includes(dealPlainText(name)))) return;
+    if (/(?:声優|声优)\s*[:：]|(?:^|[【[(\s])CV\s*[.．:：]/i.test(originalText)) return;
+
+    if (workType === "SOU" && authorElements.length) {
+      for (const author of authorElements) {
+        if (author.querySelector(".dltracker-voice-label")) continue;
+        const label = document.createElement("span");
+        label.className = "dltracker-voice-label";
+        label.textContent = "声优：";
+        author.prepend(label);
+      }
+      return;
+    }
+
     const line = document.createElement("div");
     line.className = "dltracker-voice-actors";
-    line.textContent = `声优：${product.voiceActors.join("／")}`;
+    line.textContent = `声优：${voiceActors.join("／")}`;
     const maker = firstElementBySelectors([
       ".maker_name",
       ".work_maker",
@@ -3108,7 +3178,12 @@
     workTitle.textContent = insight.product.title || insight.product.id || "当前作品";
     const formula = document.createElement("div");
     formula.className = "dltracker-reach-work-formula";
-    formula.textContent = bestReachFormulaLines(insight, cnyRate).join(" → ");
+    for (const line of bestReachFormulaLines(insight, cnyRate)) {
+      const step = document.createElement("div");
+      step.className = "dltracker-reach-work-step";
+      step.textContent = line;
+      formula.appendChild(step);
+    }
     work.append(workTitle, formula);
     if (partialData) {
       const partial = document.createElement("div");
@@ -3556,6 +3631,15 @@
           forceFetch: false,
         });
         browseRecordById.set(String(id).toUpperCase(), record);
+        if (record?.voiceActors?.length) {
+          renderBrowseVoiceActors(node, {
+            ...product,
+            voiceActors: extractVoiceActorNames([
+              product.voiceActors || [],
+              record.voiceActors,
+            ]),
+          });
+        }
         renderPriceCard(record, historyHost);
       }
       if (!isCartPage(location.href)) {
@@ -4597,35 +4681,43 @@
     }
   }
 
-  function isBuyLaterCartItem(item) {
+  function cartProductArea(item) {
     const owner = getCartOwnerItem(item);
-    if (item?.matches?.(BUY_LATER_AREA_SELECTOR) ||
-      item?.closest?.(BUY_LATER_AREA_SELECTOR)) {
-      return true;
+    const anchor = owner || item;
+    if (!anchor) return "unknown";
+
+    if (anchor.matches?.(BUY_LATER_AREA_SELECTOR) ||
+      anchor.closest?.(BUY_LATER_AREA_SELECTOR)) {
+      return "later";
     }
-    if (owner?.matches?.(BUY_LATER_AREA_SELECTOR) ||
-      owner?.closest?.(BUY_LATER_AREA_SELECTOR)) {
-      return true;
+    if (anchor.matches?.(BUY_NOW_AREA_SELECTOR) ||
+      anchor.closest?.(BUY_NOW_AREA_SELECTOR)) {
+      return "active";
     }
-    const ownerId = String(owner?.id || "");
-    if (/^buy_later_/i.test(ownerId)) return true;
-    if (owner?.matches?.(".__buy_later_target")) return true;
-    if (owner?.querySelector?.(".__buy_later_target")) return true;
-    return false;
+
+    let sawActive = false;
+    let cursor = anchor;
+    for (let depth = 0; cursor && depth < 12; depth += 1) {
+      const marker = [
+        cursor.id,
+        typeof cursor.className === "string" ? cursor.className : "",
+        cursor.getAttribute?.("data-cart-area"),
+        cursor.getAttribute?.("data-area"),
+      ].filter(Boolean).join(" ");
+      const resolved = cartAreaFromMarkerText(marker);
+      if (resolved === "later") return "later";
+      if (resolved === "active") sawActive = true;
+      cursor = cursor.parentElement;
+    }
+    return sawActive ? "active" : "unknown";
+  }
+
+  function isBuyLaterCartItem(item) {
+    return cartProductArea(item) === "later";
   }
 
   function isBuyNowCartItem(item) {
-    const owner = getCartOwnerItem(item);
-    if (item?.matches?.(BUY_NOW_AREA_SELECTOR) ||
-      item?.closest?.(BUY_NOW_AREA_SELECTOR)) {
-      return true;
-    }
-    if (owner?.matches?.(BUY_NOW_AREA_SELECTOR) ||
-      owner?.closest?.(BUY_NOW_AREA_SELECTOR)) {
-      return true;
-    }
-    if (/^buy_now_/i.test(String(owner?.id || ""))) return true;
-    return Boolean(owner?.querySelector?.(".__buy_now_target"));
+    return cartProductArea(item) === "active";
   }
 
   function getRecordCompareCurrentPrice(record) {
@@ -4951,6 +5043,10 @@
     return undefined;
   }
 
+  function hasDlwatcherCreatorData(record) {
+    return Array.isArray(record?.voiceActors);
+  }
+
   function isRetryableFetchError(error) {
     const message =
       error instanceof Error ? error.message : String(error ?? "");
@@ -5010,6 +5106,7 @@
           lowestPrice,
           regularPrice: safeNumber(json?.lowestPrice?.priceInfo?.regularPrice),
           discountRate: safeNumber(json?.lowestPrice?.priceInfo?.discountRate),
+          voiceActors: extractVoiceActorNames(json),
           dlwatcherUrl: buildDlwatcherPageUrl(rjCode),
         };
       } catch (error) {
@@ -5086,7 +5183,7 @@
 
     for (const code of queryCodes) {
       const cached = await getReusablePriceRecord(code);
-      if (cached) {
+      if (cached && hasDlwatcherCreatorData(cached)) {
         fetched = {
           rjCode: code,
           title: cached.title,
@@ -5094,6 +5191,7 @@
           lowestPrice: cached.lowestPrice,
           regularPrice: cached.regularPrice,
           discountRate: cached.discountRate,
+          voiceActors: cached.voiceActors,
           dlwatcherUrl: cached.dlwatcherUrl || buildDlwatcherPageUrl(code),
         };
         resolvedRjCode = code;
@@ -5111,7 +5209,7 @@
       const resolved = await resolveFallbackRjCode();
       if (isValidRjCode(resolved) && !queryCodes.includes(resolved)) {
         const cached = await getReusablePriceRecord(resolved);
-        if (cached) {
+        if (cached && hasDlwatcherCreatorData(cached)) {
           fetched = {
             rjCode: resolved,
             title: cached.title,
@@ -5119,6 +5217,7 @@
             lowestPrice: cached.lowestPrice,
             regularPrice: cached.regularPrice,
             discountRate: cached.discountRate,
+            voiceActors: cached.voiceActors,
             dlwatcherUrl:
               cached.dlwatcherUrl || buildDlwatcherPageUrl(resolved),
           };
@@ -5162,6 +5261,7 @@
       sourceRjCode: resolvedRjCode,
       regularPrice: fetched.regularPrice,
       discountRate: fetched.discountRate,
+      voiceActors: fetched.voiceActors ?? existing?.voiceActors ?? [],
       lastChecked: nowIso(),
       dlwatcherUrl: fetched.dlwatcherUrl,
       isFavorite: Boolean(existing?.isFavorite || favoriteSet.has(rjCode)),
@@ -5211,7 +5311,8 @@
 
       if (existing) {
         const cacheReusable = existing.isFavorite || isCacheFresh(existing);
-        if (cacheReusable && hasUsableLowestPrice(existing)) {
+        if (cacheReusable && hasUsableLowestPrice(existing) &&
+          hasDlwatcherCreatorData(existing)) {
           return syncCurrentPrice(existing, currentPrice);
         }
       }
@@ -5301,6 +5402,7 @@
           : fetched.lowestPrice,
         regularPrice: fetched.regularPrice,
         discountRate: fetched.discountRate,
+        voiceActors: fetched.voiceActors ?? existing?.voiceActors ?? [],
         lastChecked: nowIso(),
         dlwatcherUrl: fetched.dlwatcherUrl,
         isFavorite: true,
@@ -6093,6 +6195,12 @@
   overflow-wrap: anywhere;
 }
 
+.dltracker-voice-label {
+  margin-right: 2px;
+  color: #59666e;
+  font-size: 11px;
+}
+
 .dltracker-browse-controls {
   display: flex;
   align-items: center;
@@ -6287,6 +6395,10 @@
   border-radius: 6px;
   background: #f3f7f9;
   word-break: break-word;
+}
+
+.dltracker-reach-work-step + .dltracker-reach-work-step {
+  margin-top: 4px;
 }
 
 .dltracker-reach-row {
