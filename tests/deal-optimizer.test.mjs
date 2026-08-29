@@ -34,6 +34,7 @@ vm.runInNewContext(
   ${couponImportMatched[1]}
   globalThis.optimizer = {
     optimizeDealPlan,
+    quoteBestSingleOrder,
     normalizePlannerItems,
     normalizeDlsiteCoupon,
     couponArrayFromPayload,
@@ -44,6 +45,7 @@ vm.runInNewContext(
 
 const {
   optimizeDealPlan,
+  quoteBestSingleOrder,
   normalizeDlsiteCoupon,
   couponArrayFromPayload,
 } = sandbox.optimizer;
@@ -315,6 +317,37 @@ test("同一张一次性券不会跨两个订单重复使用", () => {
   );
 });
 
+test("两张同类一次性券最多可用两单", () => {
+  const result = optimizeDealPlan(
+    ["A", "B", "C"].map((id) => ({ id, regularPrice: 1000 })),
+    [{
+      id: "TWICE50",
+      type: "percent",
+      value: 50,
+      scope: "one",
+      maxUses: 2,
+      eligibleIds: ["A", "B", "C"],
+    }],
+  );
+  assert.equal(result.total, 2000);
+  assert.equal(result.orders.filter((order) => order.couponId === "TWICE50").length, 2);
+});
+
+test("单笔报价不会为了使用多张券自动拆单", () => {
+  const quote = quoteBestSingleOrder(
+    [
+      { id: "A", regularPrice: 1000 },
+      { id: "B", regularPrice: 800 },
+    ],
+    [
+      { id: "CA", type: "percent", value: 30, eligibleIds: ["A"] },
+      { id: "CB", type: "percent", value: 50, eligibleIds: ["B"] },
+    ],
+  );
+  assert.equal(quote.total, 1400);
+  assert.equal(quote.couponId, "CB");
+});
+
 test("明确的空适用列表不会被误认为全作品适用", () => {
   const result = optimizeDealPlan(
     [{ id: "A", regularPrice: 1000 }],
@@ -353,6 +386,21 @@ test("至少三部适用作品券不会在只有两部时误用", () => {
     { id: "C", regularPrice: 1000 },
   ], [coupon]);
   assert.equal(three.total, 1500);
+});
+
+test("超过精确拆单上限时仍可安全计算大购物车单笔价", () => {
+  const items = Array.from({ length: 36 }, (_, index) => ({
+    id: `L${index}`,
+    regularPrice: 100,
+  }));
+  const quote = quoteBestSingleOrder(items, [{
+    id: "ALL10",
+    type: "percent",
+    value: 10,
+    allEligible: true,
+  }]);
+  assert.equal(quote.total, 3240);
+  assert.equal(quote.lines.length, 36);
 });
 
 test("上限规模的购物车和优惠券可以完成精确计算", () => {

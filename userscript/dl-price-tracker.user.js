@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.5.1
+// @version      0.6.0
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.5.1";
+  const APP_VERSION = "0.6.0";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -42,6 +42,9 @@
   const BUY_LATER_SORT_MODE_LOWEST = "lowest";
   const BUY_LATER_SORT_MODE_REACH = "reach";
   const BUY_LATER_SORT_MODE_PRICE = "price";
+  const BROWSE_SORT_MODE_STORAGE_KEY = "dltracker-browse-sort-mode";
+  const BROWSE_FILTER_STORAGE_KEY = "dltracker-browse-bundle-filter";
+  const BROWSE_SORT_MODE_NATIVE = "native";
   const UPDATE_NOTICE_SEEN_VERSION_KEY = "dltracker-update-notice-seen-version";
   const DEAL_PLANNER_STORAGE_KEY = "dltracker-deal-planner-v1";
   const DEAL_PLANNER_MAX_ITEMS = 12;
@@ -49,12 +52,17 @@
   const DLSITE_COUPON_API_PATH = "/books/mypage/coupon/list/ajax";
   const DLSITE_PRODUCT_INFO_PATH = "/maniax/product/info/ajax";
   const PRODUCT_METADATA_TTL_MS = 30 * 60 * 1000;
-  const DEAL_CACHE_STORAGE_KEY = "dltracker-deal-insight-cache-v2";
-  const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v2";
+  const DEAL_CACHE_STORAGE_KEY = "dltracker-deal-insight-cache-v3";
+  const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v3";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.0": [
+      "点击‘本次可到’查看作品与购物车计算、拆单和拼单建议",
+      "浏览列表新增最高可达折扣、理论低价排序和凑件优惠筛选",
+      "列表补充声优与‘单买即最优’提示，并修正活动结束时间解析",
+    ],
     "0.5.1": [
       "本次可到价不高于史低时用金黄色，高于史低时用蓝灰色",
       "移入、移出、删除或移到稍后再买后立即重算门槛",
@@ -180,13 +188,21 @@
   let dealCouponFetchInFlight = null;
   let importedCouponPageUrl = "";
   let dealSessionStopped = false;
-  let metadataBatchUsedForUrl = "";
   let insightBootstrapInFlight = null;
   const dealInsightById = new Map();
+  const browseRecordById = new Map();
+  let latestDealContext = {
+    coupons: [],
+    cartSnapshot: { loaded: false, active: [], later: [], updatedAt: 0 },
+    partial: false,
+  };
+  let openReachProductId = "";
+  let openReachRenderToken = 0;
+  let browseNativeSortPending = false;
   let pendingCartAdd = null;
   let cartRefreshInFlight = null;
   let dealToastTimer = null;
-  let lastActiveCartFingerprint = "";
+  let lastCartSnapshotFingerprint = "";
 
   function nowIso() {
     return new Date().toISOString();
@@ -342,6 +358,9 @@
           raw?.allEligible === true ||
           (raw?.allEligible === undefined && eligibleIds.length === 0),
         repeatable: raw?.repeatable === true,
+        maxUses: raw?.repeatable === true
+          ? Number.POSITIVE_INFINITY
+          : Math.max(1, plannerYen(raw?.maxUses, 1)),
         eligibleIds,
       };
     });
@@ -355,8 +374,7 @@
     return indexes;
   }
 
-  function quotePlannerOrder(items, mask, coupon = null) {
-    const selected = selectedPlannerIndexes(mask, items.length);
+  function quotePlannerSelection(items, selected, coupon = null, mask = null) {
     if (!selected.length) return null;
 
     const eligible = coupon
@@ -456,6 +474,15 @@
     return best;
   }
 
+  function quotePlannerOrder(items, mask, coupon = null) {
+    return quotePlannerSelection(
+      items,
+      selectedPlannerIndexes(mask, items.length),
+      coupon,
+      mask,
+    );
+  }
+
   function betterPlannerPlan(candidate, current) {
     if (!current) return true;
     if (candidate.total !== current.total) return candidate.total < current.total;
@@ -463,6 +490,26 @@
       return candidate.orders.length < current.orders.length;
     }
     return candidate.discount > current.discount;
+  }
+
+  function quoteBestSingleOrder(rawItems, rawCoupons) {
+    const items = normalizePlannerItems(rawItems);
+    if (!items.length) throw new Error("购物车中没有可计算的作品");
+    const coupons = normalizePlannerCoupons(
+      rawCoupons,
+      items.map((item) => item.id),
+    );
+    const selected = items.map((_, index) => index);
+    let best = quotePlannerSelection(items, selected);
+    for (const coupon of coupons) {
+      const quote = quotePlannerSelection(items, selected, coupon);
+      if (!quote) continue;
+      if (!best || quote.total < best.total ||
+        (quote.total === best.total && quote.discount > best.discount)) {
+        best = quote;
+      }
+    }
+    return best;
   }
 
   function optimizeDealPlan(rawItems, rawCoupons) {
@@ -504,73 +551,41 @@
       return cache.get(mask);
     };
 
-    const oneTimeIndexes = [];
-    const repeatableIndexes = [];
-    coupons.forEach((coupon, index) => {
-      (coupon.repeatable ? repeatableIndexes : oneTimeIndexes).push(index);
-    });
-
-    // 可重复券可以用于不同订单，但每次报价仍只包含一张券。
-    // minimumPosition 强制券序非递减，去掉等价的拆单排列。
-    const repeatableMemo = new Map();
-    const solveRepeatable = (minimumPosition, remainingMask) => {
-      const key = `${minimumPosition}:${remainingMask}`;
-      if (repeatableMemo.has(key)) return repeatableMemo.get(key);
-      const base = getBaseQuote(remainingMask);
-      let best = {
-        total: base?.total || 0,
-        discount: 0,
-        orders: base ? [base] : [],
-      };
-      for (
-        let position = minimumPosition;
-        position < repeatableIndexes.length;
-        position += 1
-      ) {
-        const couponIndex = repeatableIndexes[position];
-        for (
-          let orderMask = remainingMask;
-          orderMask > 0;
-          orderMask = (orderMask - 1) & remainingMask
-        ) {
-          const quote = getCouponQuote(couponIndex, orderMask);
-          if (!quote || quote.discount <= 0) continue;
-          const rest = solveRepeatable(
-            position,
-            remainingMask ^ orderMask,
-          );
-          const candidate = {
-            total: quote.total + rest.total,
-            discount: quote.discount + rest.discount,
-            orders: [quote, ...rest.orders],
-          };
-          if (betterPlannerPlan(candidate, best)) best = candidate;
-        }
-      }
-      repeatableMemo.set(key, best);
-      return best;
-    };
-
     const memo = new Map();
-    const solve = (couponPosition, remainingMask) => {
-      const key = `${couponPosition}:${remainingMask}`;
+    const solve = (couponPosition, remainingMask, usesRemaining = null) => {
+      const key = `${couponPosition}:${remainingMask}:${usesRemaining ?? "new"}`;
       if (memo.has(key)) return memo.get(key);
-      if (couponPosition >= oneTimeIndexes.length) {
-        const result = solveRepeatable(0, remainingMask);
+      if (couponPosition >= coupons.length) {
+        const base = getBaseQuote(remainingMask);
+        const result = {
+          total: base?.total || 0,
+          discount: 0,
+          orders: base ? [base] : [],
+        };
         memo.set(key, result);
         return result;
       }
 
-      const couponIndex = oneTimeIndexes[couponPosition];
-      let best = solve(couponPosition + 1, remainingMask);
+      const coupon = coupons[couponPosition];
+      const allowedUses = usesRemaining ?? Math.min(
+        items.length,
+        Number.isFinite(coupon.maxUses) ? coupon.maxUses : items.length,
+      );
+      let best = solve(couponPosition + 1, remainingMask, null);
+      if (allowedUses <= 0) {
+        memo.set(key, best);
+        return best;
+      }
       for (
         let orderMask = remainingMask;
         orderMask > 0;
         orderMask = (orderMask - 1) & remainingMask
       ) {
-        const quote = getCouponQuote(couponIndex, orderMask);
+        const quote = getCouponQuote(couponPosition, orderMask);
         if (!quote || quote.discount <= 0) continue;
-        const rest = solve(couponPosition + 1, remainingMask ^ orderMask);
+        const rest = allowedUses > 1
+          ? solve(couponPosition, remainingMask ^ orderMask, allowedUses - 1)
+          : solve(couponPosition + 1, remainingMask ^ orderMask, null);
         const candidate = {
           total: quote.total + rest.total,
           discount: quote.discount + rest.discount,
@@ -583,7 +598,7 @@
     };
 
     const baselineQuote = getBaseQuote(fullMask);
-    const best = solve(0, fullMask);
+    const best = solve(0, fullMask, null);
     return {
       items,
       coupons,
@@ -1322,6 +1337,10 @@
       conditionType,
       discountType: discountKind === "rate" ? "percent" : "fixed",
       discount: Math.max(0, dealNumber(raw.discount)),
+      maxDiscount: Math.max(0, dealNumber(
+        raw.maximum_discount_price ?? raw.max_discount ??
+        conditions.maximum_discount_price ?? conditions.max_discount,
+      )),
       minSpend: Math.max(0, minSpend),
       minCount,
       maxPrice: Math.max(0, dealNumber(
@@ -1349,6 +1368,7 @@
       coupon.conditionType,
       coupon.discountType,
       coupon.discount,
+      coupon.maxDiscount,
       coupon.minSpend,
       coupon.minCount,
       coupon.maxPrice,
@@ -1375,6 +1395,7 @@
         if (!group) {
           groups.set(key, {
             ...coupon,
+            groupKey: key,
             ids: [coupon.id],
             names: [coupon.name],
             instances: 1,
@@ -1445,7 +1466,14 @@
   }
 
   function couponEquivalentRate(coupon, product) {
-    if (coupon.discountType === "percent") return Math.min(100, coupon.discount);
+    if (coupon.discountType === "percent") {
+      const basis = Math.max(1, dealNumber(product?.price));
+      const rawDiscount = basis * Math.min(100, coupon.discount) / 100;
+      const discount = coupon.maxDiscount > 0
+        ? Math.min(rawDiscount, coupon.maxDiscount)
+        : rawDiscount;
+      return Math.min(100, discount / basis * 100);
+    }
     const basis = coupon.minSpend > 0
       ? coupon.minSpend
       : Math.max(1, dealNumber(product?.price));
@@ -1490,8 +1518,28 @@
       ? Math.max(0, dealNumber(bulkRule.discountRate))
       : 0;
     const platformRate = Math.max(saleRate, bulkRate);
-    const bestCoupon = (Array.isArray(couponOptions) ? couponOptions : [])[0] || null;
-    const couponRate = bestCoupon ? bestCoupon.equivalentRate : 0;
+    const platformPrice = officialPrice * (1 - platformRate / 100);
+    const rankedCoupons = (Array.isArray(couponOptions) ? couponOptions : [])
+      .map((coupon) => {
+        let rate = coupon.equivalentRate;
+        if (coupon.discountType === "percent") {
+          const rawDiscount = platformPrice * Math.min(100, coupon.discount) / 100;
+          const discount = coupon.maxDiscount > 0
+            ? Math.min(rawDiscount, coupon.maxDiscount)
+            : rawDiscount;
+          rate = platformPrice > 0 ? discount / platformPrice * 100 : 0;
+        } else if (!(coupon.minSpend > 0)) {
+          rate = platformPrice > 0
+            ? Math.min(100, coupon.discount / platformPrice * 100)
+            : 0;
+        }
+        return { coupon, rate };
+      })
+      .sort((a, b) => b.rate - a.rate ||
+        (a.coupon.earliestExpiry || Infinity) -
+          (b.coupon.earliestExpiry || Infinity));
+    const bestCoupon = rankedCoupons[0]?.coupon || null;
+    const couponRate = rankedCoupons[0]?.rate || 0;
     const totalRate = 100 - ((100 - platformRate) * (100 - couponRate)) / 100;
     return {
       saleRate,
@@ -1513,15 +1561,92 @@
       : Number.POSITIVE_INFINITY;
   }
 
-  function compareDealSortEntries(a, b, mode) {
-    if (mode === "lowest" && a.isNewLowest !== b.isNewLowest) {
-      return a.isNewLowest ? -1 : 1;
+  function isSingleBuyOptimal(product, couponOptions, bulkRule, bestReach) {
+    const officialPrice = Math.max(0, dealNumber(product?.officialPrice));
+    const currentPrice = Math.max(0, dealNumber(product?.price));
+    if (!(officialPrice > 0) || !(currentPrice >= 0)) return false;
+    const targetPrice = calculateHypotheticalPrice(product, bestReach);
+    if (!Number.isFinite(targetPrice)) return false;
+    const saleRate = officialPrice > 0 && currentPrice < officialPrice
+      ? (1 - currentPrice / officialPrice) * 100
+      : 0;
+    const singleCoupons = (Array.isArray(couponOptions) ? couponOptions : [])
+      .filter((coupon) => coupon.minCount <= 1 && coupon.minSpend <= currentPrice);
+    const rates = [0, ...singleCoupons.map((coupon) => coupon.equivalentRate)];
+    const singleBestPrice = Math.min(...rates.map((couponRate) => Math.round(
+      officialPrice * (1 - saleRate / 100) * (1 - couponRate / 100),
+    )));
+    const bulkNeedsOthers = dealNumber(bulkRule?.minCount, 1) > 1 &&
+      dealNumber(bestReach?.bulkRate) > saleRate;
+    return !bulkNeedsOthers && singleBestPrice <= targetPrice;
+  }
+
+  function extractVoiceActorNames(raw) {
+    const names = [];
+    const add = (value) => {
+      const text = dealPlainText(value);
+      if (!text || /^\d+$/.test(text) || names.includes(text)) return;
+      names.push(text);
+    };
+    const collect = (value) => {
+      if (value === null || value === undefined) return;
+      if (typeof value === "string" || typeof value === "number") {
+        String(value).split(/[\n,，、／/]+/).forEach(add);
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach(collect);
+        return;
+      }
+      if (typeof value === "object") {
+        const direct = value.name ?? value.actor_name ?? value.creater_name ??
+          value.creator_name ?? value.label ?? value.value;
+        if (direct !== undefined) {
+          collect(direct);
+          return;
+        }
+        Object.values(value).forEach(collect);
+      }
+    };
+    const sources = [
+      raw?.voice_actor,
+      raw?.voice_actors,
+      raw?.voiceActor,
+      raw?.voiceActors,
+      raw?.cv,
+      raw?.casts?.voice_actor,
+      raw?.creater?.voice_actor,
+      raw?.creaters?.voice_actor,
+      raw?.creators?.voice_actor,
+    ];
+    sources.forEach(collect);
+    for (const collection of [raw?.creater, raw?.creaters, raw?.creators, raw?.casts]) {
+      if (Array.isArray(collection)) {
+        collection
+          .filter((entry) => /voice|actor|cv|声優|声优/i.test(dealPlainText(
+            entry?.role ?? entry?.type ?? entry?.category ?? entry?.label ??
+              entry?.creater_type ?? entry?.creator_type,
+          )))
+          .forEach(collect);
+        continue;
+      }
+      if (!collection || typeof collection !== "object") continue;
+      for (const [key, value] of Object.entries(collection)) {
+        if (/voice|actor|cv|声優|声优/i.test(key)) collect(value);
+      }
     }
+    return names;
+  }
+
+  function compareDealSortEntries(a, b, mode) {
     if (mode === "reach" && a.reachRank !== b.reachRank) {
       return b.reachRank - a.reachRank;
     }
     if (mode === "price" && a.hypotheticalPrice !== b.hypotheticalPrice) {
       return a.hypotheticalPrice - b.hypotheticalPrice;
+    }
+    if (a.isNewLowest !== b.isNewLowest) {
+      return a.isNewLowest ? -1 : 1;
     }
     return a.order - b.order;
   }
@@ -1536,6 +1661,13 @@
         ])
         .sort((a, b) => a[0].localeCompare(b[0])),
     );
+  }
+
+  function cartSnapshotFingerprint(snapshot) {
+    return JSON.stringify([
+      activeCartFingerprint(snapshot?.active || snapshot?.products || []),
+      activeCartFingerprint(snapshot?.later || []),
+    ]);
   }
   // </deal-insight-core>
 
@@ -1716,6 +1848,7 @@
 
   function normalizedMetadataProduct(id, raw) {
     const nestedYen = raw?.currency_price?.JPY;
+    const nestedCny = raw?.currency_price?.CNY ?? raw?.currency_price?.RMB;
     const translationInfo = typeof raw?.translation_info === "string"
       ? parseTranslationInfo(raw.translation_info)
       : raw?.translation_info;
@@ -1729,8 +1862,12 @@
     );
     return {
       id: String(id || raw?.product_id || raw?.workno || "").toUpperCase(),
+      title: dealPlainText(raw?.product_name ?? raw?.work_name ?? raw?.title) ||
+        String(id || raw?.product_id || raw?.workno || "").toUpperCase(),
       price,
       officialPrice,
+      cnyPrice: dealNumber(nestedCny?.price ?? nestedCny, 0),
+      voiceActors: extractVoiceActorNames(raw),
       makerId: String(raw?.maker_id || ""),
       siteId: String(raw?.site_id || location.pathname.split("/")[1] || ""),
       workType: String(raw?.work_type || ""),
@@ -1749,8 +1886,7 @@
     const cache = loadDealCache();
     const unique = [...new Set((Array.isArray(ids) ? ids : [])
       .map((id) => String(id).toUpperCase())
-      .filter((id) => /^[RBV]J\d{6,}$/i.test(id)))]
-      .slice(0, MAX_PRODUCT_METADATA_BATCH);
+      .filter((id) => /^[RBV]J\d{6,}$/i.test(id)))];
     const result = new Map();
     const missing = [];
     for (const id of unique) {
@@ -1762,11 +1898,11 @@
       }
     }
     if (!missing.length || dealSessionStopped) return result;
-    if (metadataBatchUsedForUrl === location.href) return result;
-    metadataBatchUsedForUrl = location.href;
+    // 无限滚动会在同一 URL 下追加作品；每次只读未缓存的下一批。
+    const batch = missing.slice(0, MAX_PRODUCT_METADATA_BATCH);
 
     const url = new URL(DLSITE_PRODUCT_INFO_PATH, location.origin);
-    url.searchParams.set("product_id", missing.join(","));
+    url.searchParams.set("product_id", batch.join(","));
     try {
       const text = await fetchSameOriginText(url, "作品信息接口");
       let payload;
@@ -1777,7 +1913,7 @@
         throw new Error("作品信息接口没有返回 JSON");
       }
       const records = productRecordsFromPayload(payload);
-      for (const id of missing) {
+      for (const id of batch) {
         const raw = records.get(id);
         if (!raw) continue;
         cache.metadata[id] = { fetchedAt: Date.now(), raw };
@@ -1790,21 +1926,46 @@
     return result;
   }
 
+  async function ensureProductMetadataBatches(ids) {
+    const unique = [...new Set((Array.isArray(ids) ? ids : [])
+      .map((id) => String(id).toUpperCase())
+      .filter((id) => /^[RBV]J\d{6,}$/i.test(id)))];
+    const result = new Map();
+    for (let start = 0; start < unique.length; start += MAX_PRODUCT_METADATA_BATCH) {
+      const batch = await ensureProductMetadata(
+        unique.slice(start, start + MAX_PRODUCT_METADATA_BATCH),
+      );
+      for (const [id, product] of batch.entries()) result.set(id, product);
+      if (dealSessionStopped) break;
+    }
+    return result;
+  }
+
   function loadCartSnapshot() {
+    const empty = { loaded: false, active: [], later: [], products: [], updatedAt: 0 };
     try {
       const parsed = JSON.parse(localStorage.getItem(CART_SNAPSHOT_STORAGE_KEY) || "null");
-      return parsed && parsed.loaded
-        ? parsed
-        : { loaded: false, products: [], updatedAt: 0 };
+      if (!parsed || !parsed.loaded) return empty;
+      const active = Array.isArray(parsed.active)
+        ? parsed.active
+        : Array.isArray(parsed.products) ? parsed.products : [];
+      const later = Array.isArray(parsed.later) ? parsed.later : [];
+      return { ...parsed, active, later, products: active };
     } catch {
-      return { loaded: false, products: [], updatedAt: 0 };
+      return empty;
     }
   }
 
-  function saveCartSnapshot(products) {
+  function saveCartSnapshot(value) {
+    const active = Array.isArray(value)
+      ? value
+      : Array.isArray(value?.active) ? value.active : [];
+    const later = Array.isArray(value?.later) ? value.later : [];
     const snapshot = {
       loaded: true,
-      products: Array.isArray(products) ? products : [],
+      active,
+      later,
+      products: active,
       updatedAt: Date.now(),
     };
     try {
@@ -1815,21 +1976,24 @@
     return snapshot;
   }
 
-  function cartProductsFromRoot(root) {
+  function cartProductsFromRoot(root, area = "active") {
     const nodes = root.querySelectorAll([
       "li.cart_list_item._cart_items",
       "li.cart_list_item[id^='buy_now_']",
+      "li.cart_list_item[id^='buy_later_']",
       "li.n_work_list_item._cart_item",
       "li.n_work_list_item[id^='buy_now_']",
+      "li.n_work_list_item[id^='buy_later_']",
       "li[data-workno]",
     ].join(","));
     const products = [];
     const seen = new Set();
     const hasExplicitBuyNowArea = Boolean(root.querySelector(BUY_NOW_AREA_SELECTOR));
     for (const node of nodes) {
-      if (isBuyLaterCartItem(node) ||
-        /buy_later|later/i.test(`${node.id} ${node.className}`)) continue;
-      if (hasExplicitBuyNowArea && !isBuyNowCartItem(node)) continue;
+      const later = isBuyLaterCartItem(node) ||
+        /buy_later|later/i.test(`${node.id} ${node.className}`);
+      if (area === "later" ? !later : later) continue;
+      if (area === "active" && hasExplicitBuyNowArea && !isBuyNowCartItem(node)) continue;
       const dataId = node.getAttribute("data-workno") ||
         node.getAttribute("data-product-id") || "";
       const href = node.querySelector('a[href*="product_id/"]')?.getAttribute("href") || "";
@@ -1840,20 +2004,40 @@
       seen.add(id);
       const priceText = node.querySelector(".work_price, .n_work_price_wrap, [class*='price']")?.textContent || "";
       const priceMatch = priceText.replace(/,/g, "").match(/(\d{1,8})\s*(?:円|JPY)/i);
+      const cnyMatch = priceText.replace(/,/g, "").match(
+        /(?:RMB|CNY|CN\s*[¥￥]|人民币|[¥￥])\s*(\d{1,8}(?:\.\d{1,2})?)/i,
+      );
+      const price = priceMatch ? Number(priceMatch[1]) : dealNumber(
+        node.getAttribute("data-price") || node.getAttribute("data-bulkbuy_origin_price"),
+      );
       products.push({
         id,
-        price: priceMatch ? Number(priceMatch[1]) : dealNumber(
-          node.getAttribute("data-bulkbuy_origin_price") || node.getAttribute("data-price"),
+        title: dealPlainText(
+          node.querySelector(".work_name a, .n_work_name a, a[href*='product_id/']")?.textContent,
+        ) || id,
+        price,
+        officialPrice: dealNumber(
+          node.getAttribute("data-official_price") ||
+          node.getAttribute("data-bulkbuy_origin_price"),
+          price,
         ),
+        cnyPrice: cnyMatch ? Number(cnyMatch[1]) : 0,
         bulkbuyKey: node.getAttribute("data-bulkbuy_key") || "",
       });
     }
     return products;
   }
 
+  function cartSnapshotFromRoot(root) {
+    return {
+      active: cartProductsFromRoot(root, "active"),
+      later: cartProductsFromRoot(root, "later"),
+    };
+  }
+
   async function ensureCartSnapshot() {
     if (isCartPage(location.href)) {
-      return saveCartSnapshot(cartProductsFromRoot(document));
+      return saveCartSnapshot(cartSnapshotFromRoot(document));
     }
     const existing = loadCartSnapshot();
     if (existing.loaded) return existing;
@@ -1863,7 +2047,7 @@
       const html = await fetchSameOriginText(url, "购物车");
       if (!/^\s*</.test(html)) throw new Error("购物车没有返回网页");
       const doc = new DOMParser().parseFromString(html, "text/html");
-      return saveCartSnapshot(cartProductsFromRoot(doc));
+      return saveCartSnapshot(cartSnapshotFromRoot(doc));
     } catch (error) {
       console.warn(`[${APP_NAME}] cart snapshot failed:`, error);
       return existing;
@@ -1944,6 +2128,24 @@
         expiresAt: Date.now() + 12_000,
       };
     }, true);
+    document.addEventListener("change", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLSelectElement) ||
+        target.matches(".dltracker-browse-sort, .dltracker-browse-filter") ||
+        !target.matches([
+          "select[name*='sort']",
+          ".sort_box select",
+          ".search_result_sort select",
+          "[class*='sort'] select",
+        ].join(","))) return;
+      browseNativeSortPending = true;
+      setTimeout(() => {
+        if (!browseNativeSortPending) return;
+        browseNativeSortPending = false;
+        resetBrowseOriginalOrder();
+        void bootstrap();
+      }, 1000);
+    }, true);
   }
 
   function dealCampaignPath(product, key) {
@@ -1953,45 +2155,72 @@
     return `/${section}/campaign/bulkbuy/=/key/${encodeURIComponent(key)}/`;
   }
 
-  function campaignEndFromHtml(html) {
+  // <campaign-time-core>
+  function campaignEndFromEmbedded(embedded) {
+    if (!embedded || typeof embedded !== "object") return null;
+    const candidates = [];
+    const visit = (value, path = "") => {
+      if (!value || typeof value !== "object") return;
+      for (const [key, child] of Object.entries(value)) {
+        const nextPath = `${path}.${key}`;
+        if (/(?:end|finish|limit).*(?:date|time|at)|period_end|end_date/i.test(nextPath)) {
+          candidates.push(child);
+        }
+        if (child && typeof child === "object") visit(child, nextPath);
+      }
+    };
+    visit(embedded);
+    for (const value of candidates) {
+      if (typeof value === "string" &&
+        /^\s*20\d{2}[-\/]\d{1,2}[-\/]\d{1,2}\s*$/.test(value)) continue;
+      const parsed = dealDateMillis(value);
+      if (typeof parsed === "number" && parsed > 0) return parsed;
+    }
+    return null;
+  }
+
+  function campaignEndFromHtml(html, embedded = null) {
+    const structured = campaignEndFromEmbedded(embedded);
+    if (structured) return structured;
     const labelled = String(html || "").match(
       /(?:end_date|endDate|period_end|終了|截止|结束|까지|まで)[\s\S]{0,160}?(20\d{2})[\/-年](\d{1,2})[\/-月](\d{1,2})(?:日)?(?:[^\d]{0,12}(\d{1,2}):(\d{2}))?/i,
     );
-    if (labelled) {
+    if (labelled?.[4] && labelled?.[5]) {
       return Date.UTC(
         Number(labelled[1]),
         Number(labelled[2]) - 1,
         Number(labelled[3]),
-        Number(labelled[4] || 23) - 9,
-        Number(labelled[5] || 59),
-        59,
+        Number(labelled[4]) - 9,
+        Number(labelled[5]),
+        0,
       );
     }
     const short = dealPlainText(html).match(
       /(?:終了|截止|结束|까지|まで)[^\n]{0,80}?(\d{1,2})[\/-月](\d{1,2})(?:日)?(?:[^\d]{0,12}(\d{1,2}):(\d{2}))?/i,
     );
-    if (!short) return null;
+    if (!short?.[3] || !short?.[4]) return null;
     const now = new Date();
     let result = new Date(Date.UTC(
       now.getFullYear(),
       Number(short[1]) - 1,
       Number(short[2]),
-      Number(short[3] || 23) - 9,
-      Number(short[4] || 59),
-      59,
+      Number(short[3]) - 9,
+      Number(short[4]),
+      0,
     ));
     if (result.getTime() < Date.now() - 24 * 60 * 60 * 1000) {
       result = new Date(Date.UTC(
         now.getFullYear() + 1,
         Number(short[1]) - 1,
         Number(short[2]),
-        Number(short[3] || 23) - 9,
-        Number(short[4] || 59),
-        59,
+        Number(short[3]) - 9,
+        Number(short[4]),
+        0,
       ));
     }
     return result.getTime();
   }
+  // </campaign-time-core>
 
   async function ensureBulkRule(product) {
     const key = String(product?.bulkbuyKey || "");
@@ -2004,7 +2233,9 @@
         new URL(dealCampaignPath(product, key), location.origin),
         "三件折扣活动页",
       );
-      const objectMatch = html.match(/window\[[^\n]+?_product[^\n]+?\]\s*=\s*(\{[^\n]+?\});/i);
+      const objectMatch = html.match(
+        /window\[[^\]]*?_product[^\]]*\]\s*=\s*(\{[\s\S]*?\})\s*;/i,
+      );
       let embedded = null;
       if (objectMatch) {
         try { embedded = JSON.parse(objectMatch[1]); } catch { /* noop */ }
@@ -2013,7 +2244,7 @@
       const discountRate = dealNumber(embedded?.discount_rate, titleMatch ? dealNumber(titleMatch[2]) : 0);
       const minCount = Math.max(1, Math.round(dealNumber(embedded?.per_item, titleMatch ? dealNumber(titleMatch[1]) : 3)));
       if (!discountRate) return null;
-      const parsedEnd = campaignEndFromHtml(html);
+      const parsedEnd = campaignEndFromHtml(html, embedded);
       const rule = {
         key,
         discountRate,
@@ -2058,7 +2289,7 @@
     const cards = [];
     const seen = new Set();
     const addCard = (node) => {
-      if (!node || seen.has(node) || cards.length >= MAX_PRODUCT_METADATA_BATCH) return;
+      if (!node || seen.has(node)) return;
       const id = productIdFromNode(node);
       if (!id ||
         id === currentId ||
@@ -2071,20 +2302,17 @@
     for (const node of document.querySelectorAll(selectors.join(","))) {
       addCard(node);
     }
-    if (cards.length < MAX_PRODUCT_METADATA_BATCH) {
-      for (const link of document.querySelectorAll('a[href*="product_id/"]')) {
-        const node = link.closest([
-          "li",
-          "article",
-          ".search_result_img_box_inner",
-          ".product-item",
-          ".n_worklist_item",
-          ".work",
-        ].join(","));
-        if (!node || !findBrowsePriceHost(node)) continue;
-        addCard(node);
-        if (cards.length >= MAX_PRODUCT_METADATA_BATCH) break;
-      }
+    for (const link of document.querySelectorAll('a[href*="product_id/"]')) {
+      const node = link.closest([
+        "li",
+        "article",
+        ".search_result_img_box_inner",
+        ".product-item",
+        ".n_worklist_item",
+        ".work",
+      ].join(","));
+      if (!node || !findBrowsePriceHost(node)) continue;
+      addCard(node);
     }
     return cards;
   }
@@ -2097,6 +2325,259 @@
       ".work_price",
       '[class*="price"]',
     ], card);
+  }
+
+  function renderBrowseVoiceActors(card, product) {
+    if (!card || !product?.voiceActors?.length) return;
+    if (card.querySelector(".dltracker-voice-actors")) return;
+    const originalText = dealPlainText(card.textContent);
+    if (/(?:声優|声优|\bCV\b)\s*[:：]/i.test(originalText)) return;
+    if (product.voiceActors.some((name) =>
+      originalText.includes(dealPlainText(name)))) return;
+    const line = document.createElement("div");
+    line.className = "dltracker-voice-actors";
+    line.textContent = `声优：${product.voiceActors.join("／")}`;
+    const maker = firstElementBySelectors([
+      ".maker_name",
+      ".work_maker",
+      ".n_work_maker",
+      "[class*='maker']",
+    ], card);
+    if (maker) maker.insertAdjacentElement("afterend", line);
+    else findBrowsePriceHost(card)?.insertAdjacentElement("beforebegin", line);
+  }
+
+  function getBrowseSortMode() {
+    try {
+      const value = localStorage.getItem(BROWSE_SORT_MODE_STORAGE_KEY);
+      return [BROWSE_SORT_MODE_NATIVE, BUY_LATER_SORT_MODE_REACH, BUY_LATER_SORT_MODE_PRICE]
+        .includes(value) ? value : BUY_LATER_SORT_MODE_REACH;
+    } catch {
+      return BUY_LATER_SORT_MODE_REACH;
+    }
+  }
+
+  function setBrowseSortMode(mode) {
+    try {
+      localStorage.setItem(BROWSE_SORT_MODE_STORAGE_KEY, mode);
+    } catch {
+      // noop
+    }
+  }
+
+  function getBrowseBundleFilter() {
+    try {
+      return localStorage.getItem(BROWSE_FILTER_STORAGE_KEY) || "all";
+    } catch {
+      return "all";
+    }
+  }
+
+  function setBrowseBundleFilter(value) {
+    try {
+      localStorage.setItem(BROWSE_FILTER_STORAGE_KEY, value || "all");
+    } catch {
+      // noop
+    }
+  }
+
+  function browseCardMatchesFilter(insight, filter) {
+    if (filter === "all") return true;
+    const bundleCoupons = insight?.couponOptions?.filter((coupon) => coupon.minCount > 1) || [];
+    if (filter === "bundle") {
+      return dealNumber(insight?.bulkRule?.minCount, 1) > 1 || bundleCoupons.length > 0;
+    }
+    if (filter.startsWith("activity:")) {
+      return String(insight?.product?.bulkbuyKey || "") === filter.slice(9);
+    }
+    if (filter.startsWith("coupon:")) {
+      return bundleCoupons.some((coupon) =>
+        String(coupon.groupKey || coupon.id) === filter.slice(7));
+    }
+    return true;
+  }
+
+  function stampBrowseOriginalOrder(cards) {
+    const counters = new Map();
+    for (const { node } of cards) {
+      const parent = node.parentElement;
+      if (!parent || !node.dataset.dltrackerBrowseOrder) continue;
+      const current = dealNumber(node.dataset.dltrackerBrowseOrder, -1);
+      counters.set(parent, Math.max(counters.get(parent) || 0, current + 1));
+    }
+    for (const { node } of cards) {
+      const parent = node.parentElement;
+      if (!parent) continue;
+      const order = counters.get(parent) || 0;
+      if (!node.dataset.dltrackerBrowseOrder) {
+        node.dataset.dltrackerBrowseOrder = String(order);
+        counters.set(parent, order + 1);
+      }
+    }
+  }
+
+  function resetBrowseOriginalOrder() {
+    for (const { node } of collectBrowseCards()) {
+      delete node.dataset.dltrackerBrowseOrder;
+    }
+  }
+
+  async function applyBrowseSortAndFilter() {
+    if (isCartPage(location.href) || isProductPage(location.href)) return;
+    const cards = collectBrowseCards();
+    if (!cards.length) return;
+    stampBrowseOriginalOrder(cards);
+    const mode = getBrowseSortMode();
+    const filter = getBrowseBundleFilter();
+    const grouped = new Map();
+    for (const { id, node } of cards) {
+      const insight = dealInsightById.get(String(id).toUpperCase());
+      node.hidden = !browseCardMatchesFilter(insight, filter);
+      node.classList.toggle("dltracker-browse-filtered-out", node.hidden);
+      const parent = node.parentElement;
+      if (!parent) continue;
+      const record = browseRecordById.get(String(id).toUpperCase()) ||
+        (/^[RB]J/i.test(id) ? await getPriceRecord(String(id).toUpperCase()) : null);
+      const order = dealNumber(node.dataset.dltrackerBrowseOrder, 0);
+      const reachRank = dealNumber(insight?.bestReach?.totalRate, -1);
+      const entry = {
+        node,
+        order,
+        isNewLowest: isRecordNewLowest(record, insight?.product?.price),
+        reachRank,
+        hypotheticalPrice: reachRank >= 0
+          ? calculateHypotheticalPrice(insight?.product, insight?.bestReach)
+          : Number.POSITIVE_INFINITY,
+      };
+      if (!grouped.has(parent)) grouped.set(parent, []);
+      grouped.get(parent).push(entry);
+    }
+    for (const [parent, entries] of grouped.entries()) {
+      entries.sort(mode === BROWSE_SORT_MODE_NATIVE
+        ? (a, b) => a.order - b.order
+        : (a, b) => compareDealSortEntries(a, b, mode));
+      entries.forEach((entry) => parent.appendChild(entry.node));
+    }
+  }
+
+  function browseBundleFilterOptions(cards) {
+    const active = latestDealContext.cartSnapshot.active || [];
+    const options = [
+      { value: "all", label: "全部作品" },
+      { value: "bundle", label: "所有需要凑单的优惠" },
+    ];
+    const seen = new Set(options.map((option) => option.value));
+    const cacheRules = loadDealCache().bulkRules || {};
+    for (const [key, rule] of Object.entries(cacheRules)) {
+      if (!rule || dealNumber(rule.minCount, 1) <= 1 ||
+        (rule.cacheUntil && rule.cacheUntil <= Date.now())) continue;
+      const value = `activity:${key}`;
+      if (seen.has(value)) continue;
+      seen.add(value);
+      const count = active.filter((item) => item.bulkbuyKey === key).length;
+      options.push({
+        value,
+        label: `${rule.minCount}件${compactOff(rule.discountRate)}｜${count >= rule.minCount ? "已满" : "已有"}${count}/${rule.minCount}`,
+      });
+    }
+    for (const coupon of latestDealContext.coupons) {
+      if (coupon.minCount <= 1) continue;
+      const value = `coupon:${coupon.groupKey || coupon.id}`;
+      if (seen.has(value)) continue;
+      seen.add(value);
+      const count = active.filter((item) => couponMatchesDealProduct(coupon, item)).length;
+      const sample = cards
+        .map(({ id }) => dealInsightById.get(String(id).toUpperCase())?.product)
+        .find((product) => product && couponMatchesDealProduct(coupon, product));
+      const rate = couponEquivalentRate(coupon, sample || active[0] || { price: 1 });
+      options.push({
+        value,
+        label: `${compactOff(rate, "券")}·${coupon.minCount}部起用｜${count >= coupon.minCount ? "已满" : "已有"}${count}/${coupon.minCount}`,
+      });
+    }
+    return options;
+  }
+
+  function findBrowseControlsAnchor(cards) {
+    const nativeSort = document.querySelector([
+      "select[name*='sort']",
+      ".sort_box select",
+      ".search_result_sort select",
+      "[class*='sort'] select",
+    ].join(","));
+    if (nativeSort?.parentElement) {
+      const group = nativeSort.closest(
+        ".sort_box, .search_result_sort, [class*='sort'], label",
+      ) || nativeSort.parentElement;
+      if (group.parentElement) {
+        return { parent: group.parentElement, before: group.nextSibling };
+      }
+    }
+    const first = cards[0]?.node;
+    const list = first?.parentElement;
+    if (list?.parentElement) {
+      return { parent: list.parentElement, before: list };
+    }
+    return list ? { parent: list, before: first } : null;
+  }
+
+  function injectBrowseControls() {
+    if (isCartPage(location.href) || isProductPage(location.href)) return;
+    const cards = collectBrowseCards();
+    if (!cards.length) return;
+    const anchor = findBrowseControlsAnchor(cards);
+    if (!anchor) return;
+    let controls = document.querySelector(".dltracker-browse-controls");
+    if (!controls) {
+      controls = document.createElement("div");
+      controls.className = "dltracker-browse-controls";
+      const sortLabel = document.createElement("label");
+      sortLabel.textContent = "优惠助手排序 ";
+      const sort = document.createElement("select");
+      sort.className = "dltracker-browse-sort";
+      sort.innerHTML = `
+        <option value="${BROWSE_SORT_MODE_NATIVE}">保持 DLsite 当前顺序</option>
+        <option value="${BUY_LATER_SORT_MODE_REACH}">最高可达到折扣</option>
+        <option value="${BUY_LATER_SORT_MODE_PRICE}">理论低价优先</option>
+      `;
+      sort.value = getBrowseSortMode();
+      sort.addEventListener("change", () => {
+        setBrowseSortMode(sort.value);
+        void applyBrowseSortAndFilter();
+      });
+      sortLabel.appendChild(sort);
+      const filterLabel = document.createElement("label");
+      filterLabel.textContent = "凑单优惠 ";
+      const filter = document.createElement("select");
+      filter.className = "dltracker-browse-filter";
+      filter.addEventListener("change", () => {
+        setBrowseBundleFilter(filter.value);
+        void applyBrowseSortAndFilter();
+      });
+      filterLabel.appendChild(filter);
+      controls.append(sortLabel, filterLabel);
+    }
+    if (controls.parentElement !== anchor.parent || controls.nextSibling !== anchor.before) {
+      anchor.parent.insertBefore(controls, anchor.before);
+    }
+    const sort = controls.querySelector(".dltracker-browse-sort");
+    if (sort) sort.value = getBrowseSortMode();
+    const filter = controls.querySelector(".dltracker-browse-filter");
+    const options = browseBundleFilterOptions(cards);
+    const selected = getBrowseBundleFilter();
+    filter.replaceChildren(...options.map((option) => {
+      const node = document.createElement("option");
+      node.value = option.value;
+      node.textContent = option.label;
+      return node;
+    }));
+    if (options.some((option) => option.value === selected)) {
+      filter.value = selected;
+    } else {
+      filter.value = "all";
+      setBrowseBundleFilter("all");
+      showDealToast("已选凑单优惠已失效，已恢复全部作品", false, 5000);
+    }
   }
 
   function detailProductFromDom(id) {
@@ -2227,6 +2708,584 @@
   }
   // </deal-insight-format-core>
 
+  function median(values) {
+    const sorted = values
+      .filter((value) => Number.isFinite(value) && value > 0)
+      .sort((a, b) => a - b);
+    if (!sorted.length) return null;
+    const middle = Math.floor(sorted.length / 2);
+    return sorted.length % 2
+      ? sorted[middle]
+      : (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+
+  function currencyRateFromProducts(products) {
+    return median((Array.isArray(products) ? products : []).map((product) => {
+      const yen = dealNumber(product?.price);
+      const cny = dealNumber(product?.cnyPrice);
+      return yen > 0 && cny > 0 ? cny / yen : NaN;
+    }));
+  }
+
+  function dealMoney(value, cnyRate = null) {
+    const yen = toYen(value);
+    return Number.isFinite(cnyRate) && cnyRate > 0
+      ? `${yen}｜约${(Math.round(value) * cnyRate).toFixed(2)}元`
+      : yen;
+  }
+
+  async function bulkRuleMapForProducts(products) {
+    const rules = new Map();
+    const seen = new Set();
+    for (const product of Array.isArray(products) ? products : []) {
+      const key = String(product?.bulkbuyKey || "");
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const insightRule = dealInsightById.get(String(product.id || "").toUpperCase())?.bulkRule;
+      const rule = insightRule || await ensureBulkRule(product);
+      if (rule) rules.set(key, rule);
+    }
+    return rules;
+  }
+
+  function plannerItemsFromProducts(products, rules, theoretical = false) {
+    return (Array.isArray(products) ? products : []).map((product) => {
+      const currentPrice = Math.max(0, dealNumber(product?.price));
+      const officialPrice = Math.max(currentPrice, dealNumber(product?.officialPrice, currentPrice));
+      const rule = rules.get(String(product?.bulkbuyKey || ""));
+      const bulkPrice = rule?.discountRate
+        ? Math.round(officialPrice * (1 - dealNumber(rule.discountRate) / 100))
+        : null;
+      return {
+        id: String(product?.id || "").toUpperCase(),
+        title: String(product?.title || product?.id || "未命名作品"),
+        regularPrice: currentPrice,
+        setPrice: Number.isFinite(bulkPrice) && bulkPrice < currentPrice ? bulkPrice : null,
+        setGroup: rule ? String(product?.bulkbuyKey || "") : "",
+        setMinCount: theoretical ? 1 : Math.max(2, dealNumber(rule?.minCount, 3)),
+      };
+    });
+  }
+
+  function plannerCouponsFromDeals(coupons, products, theoretical = false) {
+    const result = [];
+    for (const coupon of Array.isArray(coupons) ? coupons : []) {
+      const eligibleIds = products
+        .filter((product) => couponMatchesDealProduct(coupon, product))
+        .map((product) => String(product.id).toUpperCase());
+      if (!eligibleIds.length) continue;
+      result.push({
+        id: coupon.groupKey || coupon.id,
+        name: compactCouponListLabel({
+          ...coupon,
+          equivalentRate: couponEquivalentRate(coupon, products[0]),
+        }),
+        type: coupon.discountType,
+        value: coupon.discount,
+        minSpend: theoretical ? 0 : coupon.minSpend,
+        minEligibleCount: theoretical ? 1 : coupon.minCount,
+        maxDiscount: coupon.maxDiscount || 0,
+        scope: "all",
+        minSpendScope: "order",
+        stackMode: "after",
+        allEligible: false,
+        repeatable: coupon.repeatable,
+        maxUses: coupon.repeatable ? Number.POSITIVE_INFINITY : coupon.instances || 1,
+        eligibleIds,
+      });
+    }
+    return result;
+  }
+
+  function pruneDominatedPlannerCoupons(coupons) {
+    const list = Array.isArray(coupons) ? coupons : [];
+    const eligibilityKey = (coupon) => [
+      coupon.type,
+      coupon.minSpend,
+      coupon.minEligibleCount,
+      coupon.scope,
+      coupon.minSpendScope,
+      coupon.stackMode,
+      [...coupon.eligibleIds].sort().join(","),
+    ].join("|");
+    const capAtLeast = (candidate, other) =>
+      other.maxDiscount <= 0 ||
+      (candidate.maxDiscount > 0 && other.maxDiscount >= candidate.maxDiscount);
+    return list.filter((coupon, index) => !list.some((other, otherIndex) => {
+      if (index === otherIndex || !other.repeatable) return false;
+      if (eligibilityKey(coupon) !== eligibilityKey(other)) return false;
+      if (other.value < coupon.value || !capAtLeast(coupon, other)) return false;
+      return other.value > coupon.value || other.maxDiscount !== coupon.maxDiscount ||
+        String(other.id) < String(coupon.id);
+    }));
+  }
+
+  async function calculateCartPlans(products, coupons) {
+    const active = (Array.isArray(products) ? products : [])
+      .filter((product) => product?.id && dealNumber(product?.price) >= 0);
+    if (!active.length) {
+      return {
+        empty: true,
+        platformTotal: 0,
+        currentBestTotal: 0,
+        theoreticalTotal: 0,
+        exact: true,
+        splitPlan: null,
+      };
+    }
+    const rules = await bulkRuleMapForProducts(active);
+    const items = plannerItemsFromProducts(active, rules, false);
+    const theoreticalItems = plannerItemsFromProducts(active, rules, true);
+    const plannerCoupons = pruneDominatedPlannerCoupons(
+      plannerCouponsFromDeals(coupons, active, false),
+    );
+    const theoreticalCoupons = pruneDominatedPlannerCoupons(
+      plannerCouponsFromDeals(coupons, active, true),
+    );
+    const exact = items.length <= DEAL_PLANNER_MAX_ITEMS &&
+      plannerCoupons.length <= DEAL_PLANNER_MAX_COUPONS;
+    const platformTotal = items.reduce((sum, item) => sum + item.regularPrice, 0);
+    const singleQuote = quoteBestSingleOrder(items, plannerCoupons);
+    const currentPlan = exact ? optimizeDealPlan(items, plannerCoupons) : null;
+    const currentBestTotal = currentPlan?.total ?? singleQuote.total;
+    const theoreticalPlan = exact
+      ? optimizeDealPlan(theoreticalItems, theoreticalCoupons)
+      : null;
+    const theoreticalQuote = theoreticalPlan
+      ? null
+      : quoteBestSingleOrder(theoreticalItems, theoreticalCoupons);
+    const theoreticalTotal = theoreticalPlan?.total ?? theoreticalQuote.total;
+    return {
+      empty: false,
+      products: active,
+      rules,
+      items,
+      plannerCoupons,
+      platformTotal,
+      singleQuote,
+      currentPlan,
+      currentBestTotal,
+      theoreticalPlan,
+      theoreticalTotal,
+      exact,
+      splitPlan: currentPlan && currentPlan.total < singleQuote.total &&
+        currentPlan.orders.length > 1 ? currentPlan : null,
+    };
+  }
+
+  function unmetBundleOffers(products, coupons, rules) {
+    const offers = [];
+    const active = Array.isArray(products) ? products : [];
+    for (const [key, rule] of rules.entries()) {
+      const eligible = active.filter((product) => product.bulkbuyKey === key);
+      const missing = Math.max(0, dealNumber(rule.minCount, 3) - eligible.length);
+      if (missing > 0) {
+        offers.push({ type: "activity", key, rule, missing, eligible });
+      }
+    }
+    for (const coupon of Array.isArray(coupons) ? coupons : []) {
+      if (coupon.minCount <= 1) continue;
+      const eligible = active.filter((product) => couponMatchesDealProduct(coupon, product));
+      const missing = Math.max(0, coupon.minCount - eligible.length);
+      if (missing > 0) {
+        offers.push({
+          type: "coupon",
+          key: coupon.groupKey || coupon.id,
+          coupon,
+          missing,
+          eligible,
+        });
+      }
+    }
+    return offers;
+  }
+
+  function limitedCombinations(items, count, limit = 30) {
+    if (count <= 0) return [[]];
+    const result = [];
+    const pick = (start, chosen) => {
+      if (result.length >= limit) return;
+      if (chosen.length === count) {
+        result.push([...chosen]);
+        return;
+      }
+      for (let index = start; index < items.length; index += 1) {
+        chosen.push(items[index]);
+        pick(index + 1, chosen);
+        chosen.pop();
+        if (result.length >= limit) return;
+      }
+    };
+    pick(0, []);
+    return result;
+  }
+
+  function productsReachingOwnBest(products, coupons, rules) {
+    const combined = Array.isArray(products) ? products : [];
+    return combined.filter((product) => {
+      const rule = rules.get(String(product.bulkbuyKey || ""));
+      const options = buildDealCouponOptions(coupons, product, combined);
+      const reach = calculateBestReach(product, options, rule);
+      const bulkReady = !(reach.bulkRate > reach.saleRate + 0.001) ||
+        combined.filter((item) => item.bulkbuyKey === product.bulkbuyKey).length >=
+          dealNumber(rule?.minCount, 3);
+      const couponReady = !reach.bestCoupon || Boolean(reach.bestCoupon.ready);
+      return bulkReady && couponReady;
+    });
+  }
+
+  async function buildBundleRecommendations(active, later, coupons, rules) {
+    const recommendations = [];
+    for (const offer of unmetBundleOffers(active, coupons, rules)) {
+      const candidates = later.filter((product) => offer.type === "activity"
+        ? product.bulkbuyKey === offer.key
+        : couponMatchesDealProduct(offer.coupon, product));
+      if (candidates.length < offer.missing) continue;
+      const rankedCandidates = [];
+      for (let order = 0; order < candidates.length; order += 1) {
+        const product = candidates[order];
+        const record = await getPriceRecord(String(product.id).toUpperCase());
+        const atLowest = isRecordNewLowest(record, product.price);
+        const insight = dealInsightById.get(String(product.id).toUpperCase());
+        rankedCandidates.push({
+          ...product,
+          order,
+          atLowest,
+          reachRank: dealNumber(insight?.bestReach?.totalRate, -1),
+        });
+      }
+      rankedCandidates.sort((a, b) =>
+        Number(b.atLowest) - Number(a.atLowest) ||
+        b.reachRank - a.reachRank ||
+        dealNumber(a.price) - dealNumber(b.price) ||
+        a.order - b.order);
+      const pool = rankedCandidates.slice(0, 10);
+      for (const added of limitedCombinations(pool, offer.missing)) {
+        const combined = [...active, ...added];
+        const calculation = await calculateCartPlans(combined, coupons);
+        if (!calculation.exact) continue;
+        const reachedIds = new Set(productsReachingOwnBest(
+          combined,
+          coupons,
+          calculation.rules,
+        ).map((product) => String(product.id).toUpperCase()));
+        recommendations.push({
+          offer,
+          added,
+          reachedCount: reachedIds.size,
+          addedReachedCount: added.filter((product) =>
+            reachedIds.has(String(product.id).toUpperCase())).length,
+          historyHits: added.filter((product) => product.atLowest).length,
+          total: calculation.currentBestTotal,
+          calculation,
+        });
+      }
+    }
+    recommendations.sort((a, b) =>
+      b.reachedCount - a.reachedCount ||
+      b.addedReachedCount - a.addedReachedCount ||
+      b.historyHits - a.historyHits ||
+      a.total - b.total ||
+      Math.min(...a.added.map((item) => item.order)) -
+        Math.min(...b.added.map((item) => item.order)));
+    return recommendations.slice(0, 3);
+  }
+
+  function appendOrderDetails(parent, order, index, cnyRate) {
+    const details = document.createElement("details");
+    details.className = "dltracker-reach-order";
+    const summary = document.createElement("summary");
+    const offers = [];
+    const activityCount = order.lines.filter((line) => line.dealApplied).length;
+    if (activityCount) offers.push(`多件活动${activityCount}部`);
+    if (order.couponName) offers.push(order.couponName);
+    const offer = offers.length ? `｜${offers.join("＋")}` : "";
+    summary.textContent = `第${index + 1}单｜${order.lines.length}部${offer}｜${dealMoney(order.total, cnyRate)}`;
+    const formula = document.createElement("div");
+    formula.className = "dltracker-reach-formula";
+    formula.textContent = `${dealMoney(order.subtotal, cnyRate)}${order.discount ? ` - ${dealMoney(order.discount, cnyRate)}` : ""} = ${dealMoney(order.total, cnyRate)}`;
+    const list = document.createElement("ul");
+    for (const line of order.lines) {
+      const item = document.createElement("li");
+      item.textContent = `${line.title}｜${dealMoney(line.price, cnyRate)}`;
+      list.appendChild(item);
+    }
+    details.append(summary, formula, list);
+    parent.appendChild(details);
+  }
+
+  function appendReachRow(parent, label, value, className = "") {
+    const row = document.createElement("div");
+    row.className = `dltracker-reach-row ${className}`.trim();
+    const name = document.createElement("strong");
+    name.textContent = label;
+    const content = document.createElement("span");
+    content.textContent = value;
+    row.append(name, content);
+    parent.appendChild(row);
+  }
+
+  function bestReachFormulaLines(insight, cnyRate = null) {
+    const product = insight.product;
+    const reach = insight.bestReach;
+    const officialPrice = Math.max(0, dealNumber(product.officialPrice));
+    const platformPrice = Math.round(officialPrice * (1 - reach.platformRate / 100));
+    const platformLabel = reach.bulkRate > reach.saleRate
+      ? `${dealNumber(insight.bulkRule?.minCount, 3)}件${compactOff(reach.bulkRate)}`
+      : reach.saleRate > 0 ? `当前平台${compactOff(reach.saleRate)}` : "当前平台价";
+    const lines = [
+      `原价 ${dealMoney(officialPrice, cnyRate)}`,
+      `${platformLabel}后 ${dealMoney(platformPrice, cnyRate)}`,
+    ];
+    if (reach.bestCoupon) {
+      const couponPrice = calculateHypotheticalPrice(product, reach);
+      lines.push(`${compactCouponListLabel(reach.bestCoupon)}后 ${dealMoney(couponPrice, cnyRate)}`);
+    }
+    lines.push(`${insight.partial ? "当前已知可到" : "本次可到"} ${dealMoney(calculateHypotheticalPrice(product, reach), cnyRate)}｜${compactOff(reach.totalRate)}`);
+    return lines;
+  }
+
+  async function renderReachDialog(insight, lowestPrice) {
+    const renderToken = ++openReachRenderToken;
+    const overlay = document.querySelector(".dltracker-reach-overlay");
+    const body = overlay?.querySelector(".dltracker-reach-dialog-body");
+    if (!body || !insight) return;
+    body.replaceChildren();
+    const snapshot = latestDealContext.cartSnapshot;
+    const partialData = Boolean(insight.partial || latestDealContext.partial || !snapshot.loaded);
+    const active = snapshot.active || snapshot.products || [];
+    const later = snapshot.later || [];
+    const allForRate = [insight.product, ...active, ...later];
+    const cnyRate = currencyRateFromProducts(allForRate);
+
+    const work = document.createElement("section");
+    work.className = "dltracker-reach-section";
+    const workTitle = document.createElement("h3");
+    workTitle.textContent = insight.product.title || insight.product.id || "当前作品";
+    const formula = document.createElement("div");
+    formula.className = "dltracker-reach-work-formula";
+    formula.textContent = bestReachFormulaLines(insight, cnyRate).join(" → ");
+    work.append(workTitle, formula);
+    if (partialData) {
+      const partial = document.createElement("div");
+      partial.className = "dltracker-reach-warning";
+      partial.textContent = "部分优惠未确认，以下仅为当前已知最低。";
+      work.appendChild(partial);
+    }
+    const currentPrice = dealNumber(insight.product.price);
+    const targetPrice = calculateHypotheticalPrice(insight.product, insight.bestReach);
+    appendReachRow(work, "还可节省", dealMoney(Math.max(0, currentPrice - targetPrice), cnyRate));
+    if (insight.bulkRule) {
+      const count = active.filter((item) => item.bulkbuyKey === insight.product.bulkbuyKey).length;
+      const missing = Math.max(0, insight.bulkRule.minCount - count);
+      appendReachRow(work, "活动门槛", missing ? `还差${missing}件` : "已满足");
+    }
+    if (insight.bestReach.bestCoupon) {
+      const coupon = insight.bestReach.bestCoupon;
+      const missing = [];
+      if (coupon.countShortfall > 0) missing.push(`还差${coupon.countShortfall}部`);
+      if (coupon.spendShortfall > 0) missing.push(`还差${toYen(coupon.spendShortfall)}`);
+      appendReachRow(work, "优惠券门槛", missing.join("｜") || "已满足");
+    }
+    if (Number.isFinite(lowestPrice)) {
+      appendReachRow(work, "史低对比", targetPrice <= lowestPrice ? "本次可到不高于史低" : `比史低高${toYen(targetPrice - lowestPrice)}`);
+    }
+    body.appendChild(work);
+
+    const cart = document.createElement("section");
+    cart.className = "dltracker-reach-section";
+    const cartTitle = document.createElement("h3");
+    cartTitle.textContent = "购物车计算";
+    cart.appendChild(cartTitle);
+    if (snapshot.updatedAt) {
+      const updated = document.createElement("div");
+      updated.className = "dltracker-reach-muted";
+      updated.textContent = `购物车数据更新于 ${new Date(snapshot.updatedAt).toLocaleString("zh-CN")}${isCartPage(location.href) ? "" : "，离开购物车后可能已变化"}`;
+      cart.appendChild(updated);
+    }
+    const calculation = await calculateCartPlans(active, latestDealContext.coupons);
+    if (renderToken !== openReachRenderToken || !body.isConnected) return;
+    if (!snapshot.loaded) {
+      appendReachRow(cart, "状态", "购物车数据未读取，暂无法计算");
+    } else if (calculation.empty) {
+      appendReachRow(cart, "状态", "立即购买中没有作品");
+    } else {
+      appendReachRow(cart, "当前平台价合计", dealMoney(calculation.platformTotal, cnyRate));
+      appendReachRow(cart, partialData ? "当前已知可结算最低" : "当前可结算最低", dealMoney(calculation.currentBestTotal, cnyRate), "is-current-best");
+      appendReachRow(cart, partialData ? "当前已知理论最低" : "理论最低", dealMoney(calculation.theoreticalTotal, cnyRate));
+      appendReachRow(cart, "距离理论最低", dealMoney(Math.max(0, calculation.currentBestTotal - calculation.theoreticalTotal), cnyRate));
+      const shortfalls = unmetBundleOffers(
+        active,
+        latestDealContext.coupons,
+        calculation.rules,
+      ).map((offer) => offer.type === "activity"
+        ? `${offer.rule.minCount}件${compactOff(offer.rule.discountRate)}还差${offer.missing}件`
+        : `${compactOff(couponEquivalentRate(offer.coupon, active[0] || { price: 1 }), "券")}还差${offer.missing}部`);
+      for (const coupon of latestDealContext.coupons) {
+        if (!(coupon.minSpend > calculation.platformTotal) ||
+          !active.some((product) => couponMatchesDealProduct(coupon, product))) continue;
+        shortfalls.push(`${compactOff(couponEquivalentRate(coupon, active[0] || { price: 1 }), "券")}还差${toYen(coupon.minSpend - calculation.platformTotal)}`);
+      }
+      if (shortfalls.length) {
+        appendReachRow(cart, "还差条件", shortfalls.slice(0, 3).join("｜"));
+      }
+      if (!calculation.exact) {
+        const warning = document.createElement("div");
+        warning.className = "dltracker-reach-warning";
+        warning.textContent = "组合规模过大，未进行精确拆单";
+        cart.appendChild(warning);
+      }
+      if (calculation.splitPlan) {
+        const splitTitle = document.createElement("h4");
+        splitTitle.textContent = `拆单可再省 ${dealMoney(calculation.singleQuote.total - calculation.splitPlan.total, cnyRate)}`;
+        cart.appendChild(splitTitle);
+        calculation.splitPlan.orders.forEach((order, index) =>
+          appendOrderDetails(cart, order, index, cnyRate));
+      } else if (calculation.singleQuote) {
+        appendOrderDetails(cart, calculation.singleQuote, 0, cnyRate);
+      }
+      if (calculation.theoreticalTotal < calculation.currentBestTotal) {
+        const note = document.createElement("div");
+        note.className = "dltracker-reach-warning";
+        note.textContent = "理论总价未计入尚未加入的凑单作品价格";
+        cart.appendChild(note);
+      }
+      if (calculation.exact && later.length) {
+        const recommendations = await buildBundleRecommendations(
+          active,
+          later,
+          latestDealContext.coupons,
+          calculation.rules,
+        );
+        if (renderToken !== openReachRenderToken || !body.isConnected) return;
+        if (recommendations.length) {
+          const recommendationTitle = document.createElement("h4");
+          recommendationTitle.textContent = "从稍后再买中推荐拼单";
+          cart.appendChild(recommendationTitle);
+          const renderRecommendation = (recommendation, index, parent) => {
+            const details = document.createElement("details");
+            details.className = "dltracker-reach-recommendation";
+            details.open = index === 0;
+            const summary = document.createElement("summary");
+            summary.textContent = index === 0 ? "最佳方案" : `备选方案 ${index}`;
+            const list = document.createElement("ul");
+            recommendation.added.forEach((product) => {
+              const item = document.createElement("li");
+              item.textContent = `${product.title || product.id}｜${dealMoney(product.price, cnyRate)}${product.atLowest ? "｜当前已达史低" : ""}`;
+              list.appendChild(item);
+            });
+            const total = document.createElement("div");
+            total.className = "dltracker-reach-formula";
+            const addedCost = recommendation.added.reduce(
+              (sum, product) => sum + dealNumber(product.price),
+              0,
+            );
+            const delta = recommendation.total - calculation.currentBestTotal;
+            const deltaText = Math.abs(delta) < 0.01
+              ? "总支出不变"
+              : `总支出${delta > 0 ? "增加" : "减少"} ${dealMoney(Math.abs(delta), cnyRate)}`;
+            total.textContent = `新增作品平台价 ${dealMoney(addedCost, cnyRate)}｜加入后预计 ${dealMoney(recommendation.total, cnyRate)}｜${deltaText}｜${recommendation.reachedCount}/${active.length + recommendation.added.length}部可达各自最优`;
+            details.append(summary, list, total);
+            parent.appendChild(details);
+          };
+          renderRecommendation(recommendations[0], 0, cart);
+          if (recommendations.length > 1) {
+            const alternatives = document.createElement("details");
+            alternatives.className = "dltracker-reach-alternatives";
+            const alternativesSummary = document.createElement("summary");
+            alternativesSummary.textContent = `查看其他方案（${recommendations.length - 1}）`;
+            alternatives.appendChild(alternativesSummary);
+            recommendations.slice(1, 3).forEach((recommendation, index) =>
+              renderRecommendation(recommendation, index + 1, alternatives));
+            cart.appendChild(alternatives);
+          }
+        }
+      }
+    }
+    body.appendChild(cart);
+
+    const disclaimer = document.createElement("details");
+    disclaimer.className = "dltracker-reach-disclaimer";
+    const disclaimerSummary = document.createElement("summary");
+    disclaimerSummary.textContent = "价格与方案仅供参考，以 DLsite 实际结算为准｜查看计算说明";
+    const notes = document.createElement("ul");
+    [
+      "本次可到可能依赖尚未满足的件数或金额门槛。",
+      "新增凑单作品的价格不计入未完成方案的理论总价。",
+      "每笔订单最多使用一张优惠券。",
+      "当前平台折扣与多件活动二选一，优惠券可与其中一项叠加。",
+      "人民币金额按 DLsite 当页比例估算。",
+    ].forEach((text) => {
+      const item = document.createElement("li");
+      item.textContent = text;
+      notes.appendChild(item);
+    });
+    disclaimer.append(disclaimerSummary, notes);
+    body.appendChild(disclaimer);
+  }
+
+  function closeReachDialog() {
+    openReachRenderToken += 1;
+    document.querySelector(".dltracker-reach-overlay")?.remove();
+    openReachProductId = "";
+  }
+
+  function openReachDialog(insight, lowestPrice) {
+    closeReachDialog();
+    openReachProductId = String(insight?.product?.id || "").toUpperCase();
+    const overlay = document.createElement("div");
+    overlay.className = "dltracker-reach-overlay";
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) closeReachDialog();
+    });
+    const dialog = document.createElement("section");
+    dialog.className = "dltracker-reach-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.tabIndex = -1;
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeReachDialog();
+    });
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    title.textContent = "本次可到计算";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "关闭");
+    close.addEventListener("click", closeReachDialog);
+    header.append(title, close);
+    const body = document.createElement("div");
+    body.className = "dltracker-reach-dialog-body";
+    body.textContent = "正在计算…";
+    dialog.append(header, body);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    dialog.focus({ preventScroll: true });
+    void renderReachDialog(insight, lowestPrice).catch((error) => {
+      console.warn(`[${APP_NAME}] reach dialog calculation failed:`, error);
+      body.textContent = error instanceof Error ? error.message : String(error);
+    });
+  }
+
+  function refreshOpenReachDialog() {
+    if (!openReachProductId) return;
+    const insight = dealInsightById.get(openReachProductId);
+    if (!insight) return;
+    const card = document.querySelector(
+      `.${UI_CLASSNAME}[data-product-id="${openReachProductId}"]`,
+    );
+    const lowestPrice = Number(card?.dataset.lowestPrice);
+    void renderReachDialog(insight, Number.isFinite(lowestPrice) ? lowestPrice : undefined);
+  }
+
+  function createSingleBuyBadge() {
+    const badge = document.createElement("div");
+    badge.className = "dltracker-single-buy-badge";
+    badge.textContent = "单买即最优";
+    return badge;
+  }
+
   function renderCompactInsight(host, insight) {
     if (!host) return;
     host.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`)?.remove();
@@ -2326,24 +3385,38 @@
       "dltracker-best-reach-badge",
       bestReachColorClass(price, lowestPrice),
     ].join(" ");
+    badge.setAttribute("role", "button");
+    badge.setAttribute("tabindex", "0");
+    badge.setAttribute("aria-label", "查看本次可到的计算说明");
     const text = document.createElement("span");
     text.className = "dltracker-chip-text";
+    const label = insight?.partial ? "当前已知可到" : "本次可到";
     text.textContent = Number.isFinite(price)
-      ? `本次可到 ${toYen(price)}`
-      : "本次可到";
+      ? `${label} ${toYen(price)}`
+      : label;
     const off = document.createElement("span");
     off.className = "dltracker-off-badge";
     off.textContent = `${Math.round(insight?.bestReach?.totalRate || 0)}OFF`;
     badge.append(text, off);
+    const open = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openReachDialog(insight, lowestPrice);
+    };
+    badge.addEventListener("click", open);
+    badge.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") open(event);
+    });
     return badge;
   }
 
   function refreshHistoryReachBadges(id) {
     const insight = dealInsightById.get(String(id).toUpperCase());
     for (const card of document.querySelectorAll(
-      `.${UI_CLASSNAME}[data-product-id="${CSS.escape(String(id).toUpperCase())}"]`,
+      `.${UI_CLASSNAME}[data-product-id="${String(id).toUpperCase()}"]`,
     )) {
       card.querySelector(".dltracker-best-reach-badge")?.remove();
+      card.querySelector(".dltracker-single-buy-badge")?.remove();
       if (!insight?.bestReach?.totalRate) continue;
       const lowestPrice = Number(card.dataset.lowestPrice);
       const badge = createBestReachBadge(
@@ -2355,6 +3428,9 @@
         chip?.insertAdjacentElement("afterend", badge);
       } else {
         card.appendChild(badge);
+      }
+      if (insight.singleBuyOptimal) {
+        badge.insertAdjacentElement("afterend", createSingleBuyBadge());
       }
     }
   }
@@ -2369,7 +3445,9 @@
       cartProducts,
       bulkRule,
       bestReach,
-      partial,
+      singleBuyOptimal: isSingleBuyOptimal(product, options, bulkRule, bestReach),
+      partial: partial || latestDealContext.partial ||
+        Boolean(product?.bulkbuyKey && !bulkRule),
     };
     dealInsightById.set(product.id, insight);
     refreshHistoryReachBadges(product.id);
@@ -2379,7 +3457,7 @@
   async function enhanceGenericBrowseCards(coupons, cartProducts) {
     const cards = collectBrowseCards();
     if (!cards.length) return;
-    const metadata = await ensureProductMetadata(cards.map((entry) => entry.id));
+    const metadata = await ensureProductMetadataBatches(cards.map((entry) => entry.id));
     const enrichedCartProducts = cartProducts.map((item) => ({
       ...item,
       ...(metadata.get(item.id) || {}),
@@ -2395,8 +3473,11 @@
         .match(/(\d{1,8})\s*(?:円|JPY)/i);
       const product = metadata.get(id) || {
         id,
+        title: node.querySelector('a[href*="product_id/"]')?.textContent?.trim() || id,
         price: priceMatch ? Number(priceMatch[1]) : 0,
         officialPrice: priceMatch ? Number(priceMatch[1]) : 0,
+        cnyPrice: 0,
+        voiceActors: [],
         makerId: "",
         siteId: location.pathname.split("/").filter(Boolean)[0] || "",
         workType: "",
@@ -2412,6 +3493,7 @@
           )
         : coupons;
       appendJpyPrice(priceHost, product);
+      renderBrowseVoiceActors(node, product);
       const insight = await buildInsight(product, usableCoupons, enrichedCartProducts, partial);
       if (isCartPage(location.href)) {
         renderDetailInsight(priceHost, insight);
@@ -2429,12 +3511,15 @@
           currentPrice: product.price || undefined,
           forceFetch: false,
         });
+        browseRecordById.set(String(id).toUpperCase(), record);
         renderPriceCard(record, historyHost);
       }
       if (!isCartPage(location.href)) {
         renderCompactInsight(priceHost, insight);
       }
     });
+    injectBrowseControls();
+    await applyBrowseSortAndFilter();
   }
 
   async function enhanceProductDealDetail(coupons, cartProducts) {
@@ -2443,7 +3528,10 @@
     const id = matched ? matched[1].toUpperCase() : productIdFromNode(document.body);
     if (!id) return;
     const domProduct = detailProductFromDom(id);
-    const metadata = await ensureProductMetadata([id, ...cartProducts.map((item) => item.id)]);
+    const metadata = await ensureProductMetadataBatches([
+      id,
+      ...cartProducts.map((item) => item.id),
+    ]);
     const product = metadata.get(id) || domProduct;
     const enrichedCart = cartProducts.map((item) => ({
       ...item,
@@ -2465,24 +3553,56 @@
     insightBootstrapInFlight = (async () => {
       invalidateCouponCacheAfterPurchase();
       let rawCoupons = [];
+      let dealDataPartial = false;
       try {
         const forceCouponRefresh = isCouponPage(location.href) &&
           importedCouponPageUrl !== location.href;
         if (forceCouponRefresh) importedCouponPageUrl = location.href;
         rawCoupons = await ensureDealCoupons(forceCouponRefresh);
       } catch (error) {
+        dealDataPartial = true;
         console.warn(`[${APP_NAME}] coupon insight load failed:`, error);
         stopDealRequests("优惠券读取失败");
         showDealToast("优惠券读取失败，本页已停止自动请求", true, 8000);
       }
       const coupons = groupDealCoupons(rawCoupons);
-      const cartSnapshot = await ensureCartSnapshot();
-      const cartProducts = cartSnapshot.loaded ? cartSnapshot.products : [];
+      const rawCartSnapshot = await ensureCartSnapshot();
+      const currentProductMatch = location.pathname.match(/product_id\/([RBV]J\d{6,})/i);
+      const metadataIds = [
+        ...(rawCartSnapshot.active || rawCartSnapshot.products || []).map((item) => item.id),
+        ...(rawCartSnapshot.later || []).map((item) => item.id),
+        ...collectBrowseCards().map((entry) => entry.id),
+        ...(currentProductMatch ? [currentProductMatch[1]] : []),
+      ];
+      const cartMetadata = await ensureProductMetadataBatches(metadataIds);
+      const enrich = (item) => ({
+        ...(cartMetadata.get(String(item.id).toUpperCase()) || {}),
+        ...item,
+        id: String(item.id).toUpperCase(),
+        price: item.price || cartMetadata.get(String(item.id).toUpperCase())?.price || 0,
+        officialPrice: item.officialPrice ||
+          cartMetadata.get(String(item.id).toUpperCase())?.officialPrice || item.price || 0,
+        title: item.title || cartMetadata.get(String(item.id).toUpperCase())?.title || item.id,
+        cnyPrice: item.cnyPrice || cartMetadata.get(String(item.id).toUpperCase())?.cnyPrice || 0,
+      });
+      const cartSnapshot = {
+        ...rawCartSnapshot,
+        active: (rawCartSnapshot.active || rawCartSnapshot.products || []).map(enrich),
+        later: (rawCartSnapshot.later || []).map(enrich),
+      };
+      cartSnapshot.products = cartSnapshot.active;
+      latestDealContext = {
+        coupons,
+        cartSnapshot,
+        partial: dealDataPartial || !rawCartSnapshot.loaded,
+      };
+      const cartProducts = cartSnapshot.loaded ? cartSnapshot.active : [];
       if (isProductPage(location.href)) {
         await enhanceProductDealDetail(coupons, cartProducts);
       }
       await enhanceGenericBrowseCards(coupons, cartProducts);
       if (isCartPage(location.href)) await sortBuyLaterItems();
+      refreshOpenReachDialog();
     })().finally(() => {
       insightBootstrapInFlight = null;
     });
@@ -3204,12 +4324,13 @@
     try {
       const raw = localStorage.getItem(BUY_LATER_SORT_MODE_STORAGE_KEY);
       if ([
-        BUY_LATER_SORT_MODE_LOWEST,
         BUY_LATER_SORT_MODE_REACH,
         BUY_LATER_SORT_MODE_PRICE,
       ].includes(raw)) return raw;
-      // 旧版“折扣优先”迁移为口径更明确的“当前最低可达优先”。
-      if (raw === "discount") return BUY_LATER_SORT_MODE_REACH;
+      // 旧版史低/折扣模式统一迁移到最高可达折扣。
+      if (raw === "discount" || raw === BUY_LATER_SORT_MODE_LOWEST) {
+        return BUY_LATER_SORT_MODE_REACH;
+      }
       return BUY_LATER_SORT_MODE_REACH;
     } catch {
       return BUY_LATER_SORT_MODE_REACH;
@@ -3218,7 +4339,6 @@
 
   function setBuyLaterSortMode(mode) {
     const normalized = [
-      BUY_LATER_SORT_MODE_LOWEST,
       BUY_LATER_SORT_MODE_REACH,
       BUY_LATER_SORT_MODE_PRICE,
     ].includes(mode) ? mode : BUY_LATER_SORT_MODE_REACH;
@@ -3301,9 +4421,8 @@
       const modeSelect = document.createElement("select");
       modeSelect.className = "dltracker-buy-later-mode-select";
       modeSelect.innerHTML = `
-        <option value="${BUY_LATER_SORT_MODE_LOWEST}">史低优先</option>
-        <option value="${BUY_LATER_SORT_MODE_REACH}">当前最低可达优先</option>
-        <option value="${BUY_LATER_SORT_MODE_PRICE}">低价优先</option>
+        <option value="${BUY_LATER_SORT_MODE_REACH}">最高可达到折扣</option>
+        <option value="${BUY_LATER_SORT_MODE_PRICE}">理论低价优先</option>
       `;
 
       const updateState = () => {
@@ -3480,8 +4599,7 @@
       return false;
     }
     return (
-      hasEffectiveDiscount(record) &&
-      Math.abs(compareCurrent - lowestPrice) < 0.01
+      compareCurrent <= lowestPrice + 0.01
     );
   }
 
@@ -4306,6 +5424,7 @@
     if (insight?.bestReach?.totalRate > 0) {
       const reachBadge = createBestReachBadge(insight, record.lowestPrice);
       card.appendChild(reachBadge);
+      if (insight.singleBuyOptimal) card.appendChild(createSingleBuyBadge());
     }
     if (discounted) {
       const button = document.createElement("a");
@@ -4617,12 +5736,14 @@
 
   function maybeBootstrapForCartMutation(currentUrl) {
     if (!isCartPage(currentUrl)) return false;
-    const activeProducts = cartProductsFromRoot(document);
-    const nextFingerprint = activeCartFingerprint(activeProducts);
-    const thresholdChanged = Boolean(lastActiveCartFingerprint) &&
-      nextFingerprint !== lastActiveCartFingerprint;
-    lastActiveCartFingerprint = nextFingerprint;
-    saveCartSnapshot(activeProducts);
+    const cartSnapshot = cartSnapshotFromRoot(document);
+    const nextFingerprint = cartSnapshotFingerprint(cartSnapshot);
+    const hadFingerprint = Boolean(lastCartSnapshotFingerprint);
+    const thresholdChanged = hadFingerprint &&
+      nextFingerprint !== lastCartSnapshotFingerprint;
+    const shouldSave = !hadFingerprint || thresholdChanged;
+    lastCartSnapshotFingerprint = nextFingerprint;
+    if (shouldSave) saveCartSnapshot(cartSnapshot);
     if (thresholdChanged) {
       scheduleCartBootstrap();
       return true;
@@ -4695,6 +5816,13 @@
   async function bootstrap() {
     const url = location.href;
     document.querySelector(".dltracker-deal-planner")?.remove();
+    if (isProductPage(url) || isCartPage(url)) {
+      document.querySelector(".dltracker-browse-controls")?.remove();
+      for (const node of document.querySelectorAll(".dltracker-browse-filtered-out")) {
+        node.hidden = false;
+        node.classList.remove("dltracker-browse-filtered-out");
+      }
+    }
     try {
       localStorage.removeItem(DEAL_PLANNER_STORAGE_KEY);
     } catch {
@@ -4711,9 +5839,9 @@
       await enhanceWishlistCards();
     }
     if (isCartPage(url)) {
-      if (!lastActiveCartFingerprint) {
-        lastActiveCartFingerprint = activeCartFingerprint(
-          cartProductsFromRoot(document),
+      if (!lastCartSnapshotFingerprint) {
+        lastCartSnapshotFingerprint = cartSnapshotFingerprint(
+          cartSnapshotFromRoot(document),
         );
       }
       await enhanceCartItems();
@@ -4866,6 +5994,21 @@
   align-self: flex-start;
   width: fit-content;
   max-width: 100%;
+  cursor: pointer;
+}
+
+.dltracker-single-buy-badge {
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #dff4e7;
+  color: #24623b;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  box-sizing: border-box;
 }
 
 .${UI_CLASSNAME} .dltracker-best-reach-gold {
@@ -4891,6 +6034,11 @@
   justify-content: center;
 }
 
+.${UI_CLASSNAME}.dltracker-product-wide > .dltracker-single-buy-badge {
+  width: 100%;
+  text-align: center;
+}
+
 .dltracker-jpy-price {
   display: inline-block;
   margin-left: 5px;
@@ -4898,6 +6046,50 @@
   font-size: 11px;
   font-weight: 500;
   white-space: nowrap;
+}
+
+.dltracker-voice-actors {
+  margin-top: 3px;
+  color: #59666e;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.dltracker-browse-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  width: 100%;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid #d8e0e5;
+  border-radius: 8px;
+  background: #f8fafb;
+  box-sizing: border-box;
+  color: #55636c;
+  font-size: 12px;
+}
+
+.dltracker-browse-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dltracker-browse-controls select {
+  max-width: min(68vw, 290px);
+  height: 28px;
+  border: 1px solid #bdc9d0;
+  border-radius: 6px;
+  background: #fff;
+  color: #34434c;
+  font-size: 12px;
+}
+
+.dltracker-browse-filtered-out {
+  display: none !important;
 }
 
 .${DEAL_INSIGHT_CLASSNAME} {
@@ -4976,6 +6168,146 @@
 .dltracker-deal-partial {
   color: #a14716;
   font-size: 10px;
+}
+
+.dltracker-reach-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.5);
+  box-sizing: border-box;
+}
+
+.dltracker-reach-dialog {
+  width: min(560px, 100%);
+  max-height: min(760px, calc(100vh - 32px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 13px;
+  background: #fff;
+  color: #263238;
+  box-shadow: 0 20px 70px rgba(0, 0, 0, 0.32);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.dltracker-reach-dialog > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 14px;
+  background: #3f6074;
+  color: #fff;
+  font-size: 14px;
+}
+
+.dltracker-reach-dialog > header button {
+  border: 0;
+  padding: 0 3px;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.dltracker-reach-dialog-body {
+  overflow-y: auto;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dltracker-reach-section + .dltracker-reach-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #e1e7eb;
+}
+
+.dltracker-reach-section h3,
+.dltracker-reach-section h4 {
+  margin: 0 0 7px;
+  color: #263238;
+}
+
+.dltracker-reach-section h3 {
+  font-size: 14px;
+}
+
+.dltracker-reach-section h4 {
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.dltracker-reach-work-formula,
+.dltracker-reach-formula {
+  margin: 5px 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #f3f7f9;
+  word-break: break-word;
+}
+
+.dltracker-reach-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 5px;
+}
+
+.dltracker-reach-row span {
+  text-align: right;
+}
+
+.dltracker-reach-row.is-current-best {
+  color: #24623b;
+}
+
+.dltracker-reach-muted,
+.dltracker-reach-warning {
+  margin: 5px 0;
+  color: #69757d;
+  font-size: 11px;
+}
+
+.dltracker-reach-warning {
+  color: #9a5b13;
+}
+
+.dltracker-reach-order,
+.dltracker-reach-recommendation,
+.dltracker-reach-alternatives,
+.dltracker-reach-disclaimer {
+  margin-top: 7px;
+  padding: 7px 8px;
+  border: 1px solid #dbe4e9;
+  border-radius: 7px;
+  background: #fbfcfd;
+}
+
+.dltracker-reach-order summary,
+.dltracker-reach-recommendation summary,
+.dltracker-reach-alternatives summary,
+.dltracker-reach-disclaimer summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.dltracker-reach-order ul,
+.dltracker-reach-recommendation ul,
+.dltracker-reach-disclaimer ul {
+  margin: 7px 0 0;
+  padding-left: 20px;
+}
+
+.dltracker-reach-disclaimer {
+  margin-top: 12px;
+  color: #5f6b72;
+  font-size: 11px;
 }
 
 .dltracker-deal-toast {
@@ -5550,6 +6882,7 @@
     const currentUrl = location.href;
     if (currentUrl === lastUrl) return;
     lastUrl = currentUrl;
+    resetBrowseOriginalOrder();
     waitForElement(currentUrl).then(() => {
       void bootstrap();
     });
@@ -5579,6 +6912,13 @@
         domDebounceTimer = null;
         const currentUrl = location.href;
         maybeConfirmPendingCartAdd();
+
+        if (browseNativeSortPending) {
+          browseNativeSortPending = false;
+          resetBrowseOriginalOrder();
+          void bootstrap();
+          return;
+        }
 
         if (isProductPage(currentUrl)) {
           const host = findProductRenderHost();

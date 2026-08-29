@@ -15,11 +15,16 @@ const formatMatched = source.match(
   /\/\/ <deal-insight-format-core>([\s\S]*?)\/\/ <\/deal-insight-format-core>/,
 );
 if (!formatMatched) throw new Error("deal insight format core markers not found");
+const campaignMatched = source.match(
+  /\/\/ <campaign-time-core>([\s\S]*?)\/\/ <\/campaign-time-core>/,
+);
+if (!campaignMatched) throw new Error("campaign time core markers not found");
 
 const sandbox = {};
 vm.runInNewContext(
   `${matched[1]}
   ${formatMatched[1]}
+  ${campaignMatched[1]}
   globalThis.dealInsightCore = {
     normalizeDealCoupon,
     groupDealCoupons,
@@ -28,14 +33,18 @@ vm.runInNewContext(
     buildDealCouponOptions,
     calculateBestReach,
     calculateHypotheticalPrice,
+    isSingleBuyOptimal,
+    extractVoiceActorNames,
     compareDealSortEntries,
     activeCartFingerprint,
+    cartSnapshotFingerprint,
     dealDateMillis,
     compactCouponCondition,
     compactCouponExpiry,
     compactCouponUsage,
     compactCouponListLabel,
     bestReachColorClass,
+    campaignEndFromHtml,
   };`,
   sandbox,
 );
@@ -46,14 +55,18 @@ const {
   buildDealCouponOptions,
   calculateBestReach,
   calculateHypotheticalPrice,
+  isSingleBuyOptimal,
+  extractVoiceActorNames,
   compareDealSortEntries,
   activeCartFingerprint,
+  cartSnapshotFingerprint,
   dealDateMillis,
   compactCouponCondition,
   compactCouponExpiry,
   compactCouponUsage,
   compactCouponListLabel,
   bestReachColorClass,
+  campaignEndFromHtml,
 } = sandbox.dealInsightCore;
 
 const future = Math.floor(Date.parse("2026-10-01T00:00:00+08:00") / 1000);
@@ -88,6 +101,23 @@ test("信息语义相同的 15 张 1200-400 券归为一组并折算 33%", () =>
   const [option] = buildDealCouponOptions(groups, product, []);
   assert.ok(Math.abs(option.equivalentRate - 100 / 3) < 0.001);
   assert.equal(option.spendShortfall, 1200);
+});
+
+test("折扣上限不同的百分比券不会被错误合并", () => {
+  const base = {
+    coupon_name: "50% OFF",
+    discount_type: "rate",
+    discount: 50,
+    condition_type: "id_all",
+    conditions: { product_all: ["RJ123456"] },
+    is_multiple_use: false,
+    limit_date: future,
+  };
+  const groups = groupDealCoupons([
+    { ...base, coupon_id: "CAP-100", maximum_discount_price: 100 },
+    { ...base, coupon_id: "CAP-500", maximum_discount_price: 500 },
+  ], now);
+  assert.equal(groups.length, 2);
 });
 
 test("三件 60% 与一张 50% 券按乘法叠加为 80% OFF", () => {
@@ -169,19 +199,29 @@ test("日本时间到期字段会转换为绝对时间并可按中国时间显�
   assert.equal(new Date(value).toISOString(), "2026-09-13T14:59:00.000Z");
 });
 
-test("三种稍后再买排序使用各自主字段且并列保持原顺序", () => {
+test("活动优先读取结构化结束时间且不为纯日期虚构 23:59", () => {
+  const structured = campaignEndFromHtml(
+    "終了 2026年9月2日 10:00",
+    { period_end: "2026-09-03 13:59:00" },
+  );
+  assert.equal(new Date(structured).toISOString(), "2026-09-03T04:59:00.000Z");
+  assert.match(compactCouponExpiry({
+    originals: [{ expiresAt: structured }],
+    earliestExpiry: structured,
+  }), /9月3日 12:59中国时间到期/);
+  assert.equal(campaignEndFromHtml("終了 2026年9月3日", null), null);
+  assert.equal(campaignEndFromHtml("", { period_end: "2026-09-03" }), null);
+});
+
+test("两种新排序都在主字段相同时优先当前史低", () => {
   const entries = [
     { id: "A", isNewLowest: false, reachRank: 80, hypotheticalPrice: 300, order: 0 },
     { id: "B", isNewLowest: true, reachRank: 60, hypotheticalPrice: 200, order: 1 },
     { id: "C", isNewLowest: true, reachRank: 80, hypotheticalPrice: 400, order: 2 },
   ];
   assert.deepEqual(
-    entries.toSorted((a, b) => compareDealSortEntries(a, b, "lowest")).map((x) => x.id),
-    ["B", "C", "A"],
-  );
-  assert.deepEqual(
     entries.toSorted((a, b) => compareDealSortEntries(a, b, "reach")).map((x) => x.id),
-    ["A", "C", "B"],
+    ["C", "A", "B"],
   );
   assert.deepEqual(
     entries.toSorted((a, b) => compareDealSortEntries(a, b, "price")).map((x) => x.id),
@@ -193,6 +233,30 @@ test("低价优先使用本次可到后的假设价格", () => {
   assert.equal(
     calculateHypotheticalPrice({ officialPrice: 1000 }, { totalRate: 80 }),
     200,
+  );
+});
+
+test("单部无门槛券可标单买即最优，三件活动不可", () => {
+  const product = { id: "RJ123456", price: 800, officialPrice: 1000 };
+  const options = [{ equivalentRate: 50, minCount: 1, minSpend: 0 }];
+  const best = calculateBestReach(product, options, null);
+  assert.equal(isSingleBuyOptimal(product, options, null, best), true);
+
+  const bulkProduct = { ...product, bulkbuyKey: "set" };
+  const bulkRule = { discountRate: 60, minCount: 3 };
+  const bulkBest = calculateBestReach(bulkProduct, [], bulkRule);
+  assert.equal(isSingleBuyOptimal(bulkProduct, [], bulkRule, bulkBest), false);
+});
+
+test("批量作品数据可从常见结构归一化声优", () => {
+  assert.deepEqual(
+    Array.from(extractVoiceActorNames({
+      creaters: {
+        voice_actor: [{ name: "甲" }, { creater_name: "乙" }],
+        voice_by: [{ creator_name: "丙" }],
+      },
+    })),
+    ["甲", "乙", "丙"],
   );
 });
 
@@ -218,6 +282,18 @@ test("立即购买集合的作品、价格或活动变化会改变门槛指纹",
     { id: "RJ1", price: 500, bulkbuyKey: "A" },
     { id: "RJ2", price: 700, bulkbuyKey: "B" },
   ]));
+});
+
+test("稍后再买变化也会改变购物车快照指纹", () => {
+  const first = cartSnapshotFingerprint({
+    active: [{ id: "RJ1", price: 500 }],
+    later: [{ id: "RJ2", price: 800 }],
+  });
+  const second = cartSnapshotFingerprint({
+    active: [{ id: "RJ1", price: 500 }],
+    later: [{ id: "RJ3", price: 800 }],
+  });
+  assert.notEqual(first, second);
 });
 
 test("列表与详情使用最终确认的紧凑券文案", () => {
