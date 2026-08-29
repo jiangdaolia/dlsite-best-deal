@@ -64,3 +64,14 @@ test("浏览排序只在实际顺序变化时移动作品节点", () => {
   assert.match(sortSource, /currentNodes\[index\] !== node/);
   assert.match(sortSource, /sortedNodes\.forEach\(\(node\) => parent\.appendChild\(node\)\)/);
 });
+
+test("手机版控件挂到作品一览而不是页顶排行", () => {
+  const collectSource = functionSource("collectBrowseCards");
+  const enhanceSource = functionSource("enhanceGenericBrowseCards");
+  assert.match(collectSource, /form#works \.n_work_list_container/);
+  assert.match(collectSource, /const scope = primaryList \|\| document/);
+  assert.match(collectSource, /scope\.querySelectorAll/);
+  assert.match(enhanceSource, /injectBrowseControls\(false\)/);
+  assert.match(functionSource("bootstrap"), /injectBrowseControls\(false\)/);
+  assert.match(functionSource("installSpaListeners"), /!document\.querySelector\("\.dltracker-browse-controls"\)/);
+});

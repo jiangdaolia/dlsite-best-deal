@@ -28,7 +28,11 @@ const sandbox = {
   },
 };
 vm.runInNewContext(
-  `${functionSource("dealNumber")}
+  `${functionSource("toYen")}
+  ${functionSource("dealNumber")}
+  ${functionSource("median")}
+  ${functionSource("currencyRateFromProducts")}
+  ${functionSource("dealMoney")}
   ${functionSource("compareSpendCombinationTie")}
   ${functionSource("spendThresholdCombinations")}
   ${functionSource("bundleRecommendationKey")}
@@ -37,6 +41,8 @@ vm.runInNewContext(
   ${functionSource("recommendationFinalPriceMap")}
   ${functionSource("plannerCouponsFromDeals")}
   globalThis.reachRecommendation = {
+    currencyRateFromProducts,
+    dealMoney,
     spendThresholdCombinations,
     selectBundleRecommendations,
     recommendationFinalPriceMap,
@@ -46,11 +52,23 @@ vm.runInNewContext(
 );
 
 const {
+  currencyRateFromProducts,
+  dealMoney,
   spendThresholdCombinations,
   selectBundleRecommendations,
   recommendationFinalPriceMap,
   plannerCouponsFromDeals,
 } = sandbox.reachRecommendation;
+
+test("385日元对16.23元时统一使用当页换算比例", () => {
+  const rate = currencyRateFromProducts([{
+    price: 385,
+    cnyPrice: 16.23,
+  }]);
+
+  assert.ok(Math.abs(rate - 16.23 / 385) < 1e-12);
+  assert.equal(dealMoney(385, rate), "385円｜约16.23元");
+});
 
 test("满1200凑单优先一部达标也保留多部合计方案", () => {
   const combinations = spendThresholdCombinations([
@@ -120,7 +138,7 @@ test("拼单分别选择全员最优和预计总价最低方案", () => {
   ]);
 });
 
-test("推荐表格按优惠对象分摊券额且加总不变", () => {
+test("推荐明细按优惠对象分摊券额且总计不画表格", () => {
   const prices = recommendationFinalPriceMap({
     currentPlan: {
       orders: [{
@@ -140,6 +158,20 @@ test("推荐表格按优惠对象分摊券额且加总不变", () => {
   assert.match(functionSource("appendRecommendationTable"), /史低折扣/);
   assert.match(functionSource("appendRecommendationTable"), /优惠前/);
   assert.match(functionSource("appendRecommendationTable"), /优惠后/);
+  assert.doesNotMatch(
+    functionSource("appendRecommendationTable"),
+    /dltracker-reach-recommendation-totals/,
+  );
+  assert.match(
+    functionSource("appendRecommendationTable"),
+    /dltracker-reach-recommendation-summary/,
+  );
+});
+
+test("拼单候选必须当前已达或低于史低", () => {
+  const recommendationSource = functionSource("buildBundleRecommendations");
+  assert.match(recommendationSource, /const atLowest = isRecordNewLowest/);
+  assert.match(recommendationSource, /if \(!atLowest\) continue/);
 });
 
 test("满额固定减免券的理论计算改用门槛等效折扣", () => {

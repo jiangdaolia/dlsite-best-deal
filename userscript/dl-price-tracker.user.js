@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.9
+// @version      0.6.10
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.9";
+  const APP_VERSION = "0.6.10";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -60,6 +60,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.10": [
+      "拼单只推荐当前已达或低于史低的稍后再买作品",
+      "推荐总计改为简洁文字行，不再使用表格",
+      "修正手机版作品一览缺少凑单优惠筛选的问题",
+    ],
     "0.6.9": [
       "‘稍后再买’新增与浏览列表相同的凑单优惠筛选",
       "满额券拼单会同时考虑多部作品合计达到门槛的方案",
@@ -2694,6 +2699,15 @@
 
   function collectBrowseCards() {
     if (/\/mypage\/(?:order|purchase|library|download)/i.test(location.pathname)) return [];
+    // 手机版作品页会在主列表前插入一组热门排行。有明确的
+    // “作品一览”容器时只采集该容器，避免把控件挂到排行区。
+    const primaryList = firstElementBySelectors([
+      "#search_result_img_box",
+      "#search_result_list",
+      "form#works .n_work_list_container",
+      ".n_work_list_container",
+    ], document);
+    const scope = primaryList || document;
     const selectors = [
       "li.search_result_img_box_inner[data-workno]",
       ".search_result_img_box_inner[data-workno]",
@@ -2717,10 +2731,10 @@
       seen.add(node);
       cards.push({ id, node });
     };
-    for (const node of document.querySelectorAll(selectors.join(","))) {
+    for (const node of scope.querySelectorAll(selectors.join(","))) {
       addCard(node);
     }
-    for (const link of document.querySelectorAll('a[href*="product_id/"]')) {
+    for (const link of scope.querySelectorAll('a[href*="product_id/"]')) {
       const node = link.closest([
         "li",
         "article",
@@ -2990,7 +3004,7 @@
       select.options[index]?.textContent === option.label);
   }
 
-  function syncBundleFilterSelect(filter, cards) {
+  function syncBundleFilterSelect(filter, cards, resetMissing = true) {
     if (!filter) return;
     const options = browseBundleFilterOptions(cards);
     const selected = getBrowseBundleFilter();
@@ -3004,14 +3018,16 @@
     }
     if (options.some((option) => option.value === selected)) {
       filter.value = selected;
-    } else {
+    } else if (resetMissing) {
       filter.value = "all";
       setBrowseBundleFilter("all");
       showDealToast("已选凑单优惠已失效，已恢复全部作品", false, 5000);
+    } else {
+      filter.value = "all";
     }
   }
 
-  function injectBrowseControls() {
+  function injectBrowseControls(resetMissing = true) {
     if (isCartPage(location.href) || isProductPage(location.href)) return;
     const cards = collectBrowseCards();
     if (!cards.length) return;
@@ -3053,7 +3069,7 @@
     const sort = controls.querySelector(".dltracker-browse-sort");
     if (sort) sort.value = getBrowseSortMode();
     const filter = controls.querySelector(".dltracker-browse-filter");
-    syncBundleFilterSelect(filter, cards);
+    syncBundleFilterSelect(filter, cards, resetMissing);
   }
 
   function detailProductFromDom(id) {
@@ -3596,6 +3612,7 @@
         const product = candidates[order];
         const record = await getPriceRecord(String(product.id).toUpperCase());
         const atLowest = isRecordNewLowest(record, product.price);
+        if (!atLowest) continue;
         const insight = dealInsightById.get(String(product.id).toUpperCase());
         rankedCandidates.push({
           ...product,
@@ -3773,9 +3790,8 @@
     const addedAfter = recommendation.added.reduce((sum, product) =>
       sum + (finalPrices.get(String(product.id).toUpperCase()) ??
         Math.max(0, dealNumber(product.price))), 0);
-    const totals = document.createElement("table");
-    totals.className = "dltracker-reach-recommendation-totals";
-    const totalsBody = document.createElement("tbody");
+    const totals = document.createElement("div");
+    totals.className = "dltracker-reach-recommendation-summary";
     const combinedBefore = (recommendation.calculation.products || []).reduce(
       (sum, product) => sum + Math.max(
         dealNumber(product.price),
@@ -3783,20 +3799,16 @@
       ),
       0,
     );
-    [
-      ["推荐作品小计", addedBefore, addedAfter],
-      ["购物车＋推荐总计", combinedBefore, recommendation.total],
-    ].forEach(([label, before, after]) => {
-      const row = document.createElement("tr");
-      [label, `优惠前 ${dealMoney(before, cnyRate)}`,
-        `优惠后 ${dealMoney(after, cnyRate)}`].forEach((value, index) => {
-        const cell = document.createElement(index === 0 ? "th" : "td");
-        cell.textContent = value;
-        row.appendChild(cell);
-      });
-      totalsBody.appendChild(row);
-    });
-    totals.appendChild(totalsBody);
+    appendReachRow(
+      totals,
+      "推荐作品小计",
+      `优惠前 ${dealMoney(addedBefore, cnyRate)}｜优惠后 ${dealMoney(addedAfter, cnyRate)}`,
+    );
+    appendReachRow(
+      totals,
+      "购物车＋推荐总计",
+      `优惠前 ${dealMoney(combinedBefore, cnyRate)}｜优惠后 ${dealMoney(recommendation.total, cnyRate)}`,
+    );
     parent.appendChild(totals);
 
     const delta = recommendation.total - calculation.currentBestTotal;
@@ -4304,6 +4316,8 @@
   async function enhanceGenericBrowseCards(coupons, cartProducts) {
     const cards = collectBrowseCards();
     if (!cards.length) return;
+    // 价格、声优和活动信息可能需要数秒才处理完，先把排序/筛选入口放到主列表。
+    injectBrowseControls(false);
     const metadata = await ensureProductMetadataBatches(cards.map((entry) => entry.id));
     const enrichedCartProducts = cartProducts.map((item) => ({
       ...item,
@@ -6766,6 +6780,10 @@
       localStorage.removeItem(DEAL_PLANNER_STORAGE_KEY);
     } catch {
     }
+    if (!isProductPage(url) && !isCartPage(url)) {
+      // 不等待优惠券、购物车快照或史低请求，作品一览先显示控件。
+      injectBrowseControls(false);
+    }
     if (isProductPage(url)) {
       await enhanceProductPage();
     }
@@ -7257,8 +7275,7 @@
   overscroll-behavior-x: contain;
 }
 
-.dltracker-reach-recommendation-table,
-.dltracker-reach-recommendation-totals {
+.dltracker-reach-recommendation-table {
   width: 100%;
   border-collapse: collapse;
   color: #34434c;
@@ -7270,9 +7287,7 @@
 }
 
 .dltracker-reach-recommendation-table th,
-.dltracker-reach-recommendation-table td,
-.dltracker-reach-recommendation-totals th,
-.dltracker-reach-recommendation-totals td {
+.dltracker-reach-recommendation-table td {
   padding: 6px;
   border: 1px solid #dbe4e9;
   text-align: right;
@@ -7280,8 +7295,7 @@
   white-space: nowrap;
 }
 
-.dltracker-reach-recommendation-table th:first-child,
-.dltracker-reach-recommendation-totals th {
+.dltracker-reach-recommendation-table th:first-child {
   text-align: left;
   white-space: normal;
 }
@@ -7290,12 +7304,10 @@
   background: #eef4f7;
 }
 
-.dltracker-reach-recommendation-totals {
+.dltracker-reach-recommendation-summary {
   margin-top: 7px;
-}
-
-.dltracker-reach-recommendation-totals th {
-  width: 34%;
+  padding: 6px 8px;
+  border-radius: 6px;
   background: #f3f7f9;
 }
 
@@ -7993,6 +8005,12 @@
         }
 
         const browseCards = collectBrowseCards();
+        if (browseCards.length &&
+          !document.querySelector(".dltracker-browse-controls")) {
+          const hasInsights = browseCards.some(({ id }) =>
+            dealInsightById.has(String(id).toUpperCase()));
+          injectBrowseControls(hasInsights);
+        }
         if (browseCards.some(({ id, node }) => needsDealProcessing(node, id))) {
           void bootstrap();
         }
