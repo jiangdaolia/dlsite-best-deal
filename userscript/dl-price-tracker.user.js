@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.14
+// @version      0.6.15
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.14";
+  const APP_VERSION = "0.6.15";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -60,6 +60,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.15": [
+      "修正满额券方案的优惠前总计口径",
+      "优惠前改为平台折扣或平台活动后的价格合计",
+      "优惠后再扣除满1200减400等本单优惠券",
+    ],
     "0.6.14": [
       "修正购物车占位原价覆盖接口真实原价的问题",
       "平台折扣优先使用结构化 official_price 与当前日元价计算",
@@ -3937,6 +3942,22 @@
     return result;
   }
 
+  function recommendationPreCouponPriceMap(calculation) {
+    const result = new Map();
+    const orders = calculation?.currentPlan?.orders?.length
+      ? calculation.currentPlan.orders
+      : calculation?.singleQuote ? [calculation.singleQuote] : [];
+    for (const order of orders) {
+      for (const line of order.lines || []) {
+        result.set(
+          String(line.id).toUpperCase(),
+          Math.max(0, dealNumber(line.price)),
+        );
+      }
+    }
+    return result;
+  }
+
   function recommendationMoneyLines(value, cnyRate = null) {
     const yen = toYen(value);
     return Number.isFinite(cnyRate) && cnyRate > 0
@@ -4073,23 +4094,21 @@
     }
 
     if (!recommendation.calculation) return;
-    const addedBefore = products.reduce(
-      (sum, product) => sum + Math.max(
-        dealNumber(product.price),
-        dealNumber(product.officialPrice, product.price),
-      ),
-      0,
+    const preCouponPrices = recommendationPreCouponPriceMap(
+      recommendation.calculation,
     );
+    const addedBefore = products.reduce((sum, product) =>
+      sum + (preCouponPrices.get(String(product.id).toUpperCase()) ??
+        Math.max(0, dealNumber(product.price))), 0);
     const addedAfter = products.reduce((sum, product) =>
       sum + (finalPrices.get(String(product.id).toUpperCase()) ??
         Math.max(0, dealNumber(product.price))), 0);
     const totals = document.createElement("div");
     totals.className = "dltracker-reach-recommendation-summary";
     const combinedBefore = (recommendation.calculation.products || []).reduce(
-      (sum, product) => sum + Math.max(
-        dealNumber(product.price),
-        dealNumber(product.officialPrice, product.price),
-      ),
+      (sum, product) => sum + (preCouponPrices.get(
+        String(product.id).toUpperCase(),
+      ) ?? Math.max(0, dealNumber(product.price))),
       0,
     );
     appendReachRow(

@@ -43,6 +43,7 @@ vm.runInNewContext(
   ${functionSource("recommendationCandidateMatchesOffer")}
   ${functionSource("sortRecommendationCandidates")}
   ${functionSource("recommendationFinalPriceMap")}
+  ${functionSource("recommendationPreCouponPriceMap")}
   ${functionSource("recommendationStrongestDiscountRate")}
   ${functionSource("isRecordNewLowest")}
   ${functionSource("plannerCouponsFromDeals")}
@@ -55,6 +56,7 @@ vm.runInNewContext(
     recommendationCandidateMatchesOffer,
     sortRecommendationCandidates,
     recommendationFinalPriceMap,
+    recommendationPreCouponPriceMap,
     recommendationStrongestDiscountRate,
     isRecordNewLowest,
     plannerCouponsFromDeals,
@@ -71,6 +73,7 @@ const {
   recommendationCandidateMatchesOffer,
   sortRecommendationCandidates,
   recommendationFinalPriceMap,
+  recommendationPreCouponPriceMap,
   recommendationStrongestDiscountRate,
   isRecordNewLowest,
   plannerCouponsFromDeals,
@@ -85,6 +88,20 @@ test("推荐表现在折扣按最终结算价相对原价计算", () => {
   const currentRate = (1 - 155 / 330) * 100;
   assert.ok(currentRate > 53 && currentRate < 54);
   assert.equal(recommendationStrongestDiscountRate([currentRate, 30, 30]), currentRate);
+});
+
+test("满额券优惠前总计使用平台折扣或活动后的行价格", () => {
+  const prices = recommendationPreCouponPriceMap({
+    currentPlan: {
+      orders: [{
+        lines: [
+          { id: "SALE", price: 231, dealApplied: false },
+          { id: "BULK", price: 132, dealApplied: true },
+        ],
+      }],
+    },
+  });
+  assert.equal(prices.get("SALE") + prices.get("BULK"), 363);
 });
 
 function coupon(overrides = {}) {
@@ -221,6 +238,10 @@ test("推荐明细按优惠对象分摊券额且总计不画表格", () => {
   assert.match(source, /min-width: 0/);
   assert.match(functionSource("appendRecommendationTable"), /优惠前/);
   assert.match(functionSource("appendRecommendationTable"), /优惠后/);
+  assert.match(
+    functionSource("appendRecommendationTable"),
+    /recommendationPreCouponPriceMap/,
+  );
   assert.doesNotMatch(
     functionSource("appendRecommendationTable"),
     /dltracker-reach-recommendation-totals/,
