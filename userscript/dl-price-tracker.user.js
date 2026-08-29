@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.22
+// @version      0.6.23
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.17";
+  const APP_VERSION = "0.6.23";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -60,6 +60,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.23": [
+      "按 DLsite 移动路由和触控输入特征适配普通作品卡，不再扩大固定像素断点",
+      "普通作品卡沿用 DLsite 的自然收缩与长文案换行，修复手机横向卡片溢出",
+    ],
     "0.6.22": [
       "手机普通作品卡的本次可到、史低与趋势改为一行一个框",
       "优惠券与平台活动拆为可自适应换行的独立内容组",
@@ -777,6 +781,17 @@
 
   function isTouchPath(url) {
     return /-touch\//i.test(url);
+  }
+
+  function shouldStackBrowseAnalysis() {
+    if (isTouchPath(location.href)) return true;
+    try {
+      const pointerQuery = window.matchMedia("(hover: none) and (pointer: coarse)");
+      if (typeof pointerQuery?.matches === "boolean") return pointerQuery.matches;
+    } catch {
+      // Older engines can lack matchMedia; maxTouchPoints is the semantic fallback.
+    }
+    return Number(window.navigator?.maxTouchPoints || 0) > 0;
   }
 
   function isNarrowViewport() {
@@ -4897,7 +4912,9 @@
   function renderBrowseCardAnalysis(host, record, insight) {
     if (!host) return;
     const layout = document.createElement("section");
-    layout.className = `${UI_CLASSNAME} dltracker-browse-analysis`;
+    layout.className = `${UI_CLASSNAME} dltracker-browse-analysis${
+      shouldStackBrowseAnalysis() ? " is-stacked" : ""
+    }`;
     const id = String(record?.rjCode || insight?.product?.id || "").toUpperCase();
     if (id) layout.dataset.productId = id;
     if (Number.isFinite(record?.lowestPrice)) {
@@ -8339,6 +8356,7 @@
 
 .dltracker-browse-analysis-host {
   width: 100%;
+  max-width: 100%;
   min-width: 0;
   margin: 0;
   padding: 0;
@@ -8375,6 +8393,7 @@ dl > .dltracker-browse-analysis-host {
   justify-content: center;
   gap: 2px;
   min-width: 0;
+  max-width: 100%;
   min-height: 23px;
   padding: 2px 3px;
   border: 1px solid #d4dee4;
@@ -8388,6 +8407,18 @@ dl > .dltracker-browse-analysis-host {
   text-decoration: none;
   white-space: nowrap;
   overflow: hidden;
+}
+
+.${UI_CLASSNAME}.dltracker-browse-analysis.is-stacked {
+  margin: 2px 0 12px;
+}
+
+.dltracker-browse-analysis.is-stacked .dltracker-browse-analysis-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.dltracker-browse-analysis.is-stacked .dltracker-browse-analysis-frame {
+  width: 100%;
 }
 
 .dltracker-browse-analysis-trend {
@@ -8463,13 +8494,18 @@ a.dltracker-browse-analysis-frame {
   display: inline-flex;
   flex: 0 1 auto;
   flex-wrap: wrap;
+  max-width: 100%;
   min-width: 0;
   gap: 1px 4px;
 }
 
 .dltracker-browse-analysis-offer-group strong,
 .dltracker-browse-analysis-offer-item {
-  white-space: nowrap;
+  max-width: 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 
 .dltracker-deal-compact {
@@ -9597,18 +9633,6 @@ a.dltracker-cart-deal-frame:focus-visible {
     margin-top: 6px;
     gap: 5px;
     font-size: 12px;
-  }
-
-  .${UI_CLASSNAME}.dltracker-browse-analysis {
-    margin: 2px 0 12px;
-  }
-
-  .dltracker-browse-analysis-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .dltracker-browse-analysis-frame {
-    width: 100%;
   }
 
   .dltracker-mobile-product-host .${UI_CLASSNAME} .dltracker-chip,

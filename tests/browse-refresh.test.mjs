@@ -153,6 +153,7 @@ test("普通作品卡在标签后使用三框和简洁优惠行", () => {
   const hostSource = functionSource("ensureBrowseAnalysisHost");
   const renderSource = functionSource("renderBrowseCardAnalysis");
   const frameSource = functionSource("createBrowseAnalysisFrame");
+  const stackSource = functionSource("shouldStackBrowseAnalysis");
   assert.match(functionSource("findBrowseTagAnchor"), /\.work_genre/);
   assert.match(functionSource("findBrowseTagAnchor"), /\.work_labels/);
   assert.match(hostSource, /anchor\.insertAdjacentElement\("afterend", host\)/);
@@ -167,6 +168,10 @@ test("普通作品卡在标签后使用三框和简洁优惠行", () => {
   assert.match(renderSource, /平台活动：/);
   assert.match(renderSource, /dltracker-browse-analysis-offer-group/);
   assert.match(renderSource, /dltracker-browse-analysis-offer-item/);
+  assert.match(renderSource, /shouldStackBrowseAnalysis\(\) \? " is-stacked" : ""/);
+  assert.match(stackSource, /isTouchPath\(location\.href\)/);
+  assert.match(stackSource, /\(hover: none\) and \(pointer: coarse\)/);
+  assert.match(stackSource, /maxTouchPoints/);
   assert.match(frameSource, /dltracker-browse-analysis-frame/);
   assert.match(
     source,
@@ -185,11 +190,11 @@ test("普通作品卡在标签后使用三框和简洁优惠行", () => {
   );
   assert.match(
     source,
-    /@media \(max-width: 768px\)[\s\S]*?\.\$\{UI_CLASSNAME\}\.dltracker-browse-analysis \{\s*margin: 2px 0 12px/,
+    /\.\$\{UI_CLASSNAME\}\.dltracker-browse-analysis\.is-stacked \{\s*margin: 2px 0 12px/,
   );
   assert.match(
     source,
-    /@media \(max-width: 768px\)[\s\S]*?\.dltracker-browse-analysis-grid \{\s*grid-template-columns: minmax\(0, 1fr\)/,
+    /\.dltracker-browse-analysis\.is-stacked \.dltracker-browse-analysis-grid \{\s*grid-template-columns: minmax\(0, 1fr\)/,
   );
   assert.match(
     source,
@@ -199,4 +204,41 @@ test("普通作品卡在标签后使用三框和简洁优惠行", () => {
     source,
     /\.dltracker-browse-analysis-offer-group \{[\s\S]*?flex-wrap: wrap/,
   );
+  assert.match(
+    source,
+    /\.dltracker-browse-analysis-offer-group strong,\s*\.dltracker-browse-analysis-offer-item \{[\s\S]*?white-space: normal;[\s\S]*?overflow-wrap: anywhere/,
+  );
+});
+
+test("移动作品卡布局按路由和输入方式判断而不是固定像素", () => {
+  const sandbox = {
+    location: { href: "https://www.dlsite.com/maniax-touch/fsr/" },
+    window: {
+      matchMedia: () => ({ matches: false }),
+      navigator: { maxTouchPoints: 0 },
+    },
+  };
+  vm.runInNewContext(
+    `${functionSource("isTouchPath")}
+    ${functionSource("shouldStackBrowseAnalysis")}
+    globalThis.shouldStack = shouldStackBrowseAnalysis;`,
+    sandbox,
+  );
+  assert.equal(sandbox.shouldStack(), true);
+
+  sandbox.location.href = "https://www.dlsite.com/maniax/fsr/";
+  sandbox.window.matchMedia = (query) => {
+    assert.equal(query, "(hover: none) and (pointer: coarse)");
+    return { matches: true };
+  };
+  assert.equal(sandbox.shouldStack(), true);
+
+  sandbox.window.matchMedia = () => ({ matches: false });
+  assert.equal(sandbox.shouldStack(), false);
+
+  sandbox.window.matchMedia = () => {
+    throw new Error("unsupported");
+  };
+  sandbox.window.navigator.maxTouchPoints = 2;
+  assert.equal(sandbox.shouldStack(), true);
 });
