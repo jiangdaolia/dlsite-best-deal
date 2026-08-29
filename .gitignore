@@ -5,3 +5,8 @@ dist
 *.log
 *.zip
 _upstream/
+
+# Local-only agent handoff and discovery memory. Never publish these files.
+AGENTS.md
+PROJECT_MEMORY.md
+notes/
