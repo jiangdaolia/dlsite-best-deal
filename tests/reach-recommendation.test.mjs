@@ -571,6 +571,10 @@ test("购物车使用五框、两类表格和双入口弹窗", () => {
   assert.match(layoutSource, /dltracker-cart-reach/);
   assert.match(layoutSource, /dltracker-cart-history/);
   assert.match(layoutSource, /dltracker-cart-platform/);
+  assert.equal(
+    layoutSource.match(/cartFrameLocalizedMoney\(/g)?.length,
+    3,
+  );
   assert.match(
     source,
     /@media \(max-width: 900px\)[\s\S]*?\.dltracker-cart-reach \{\s*grid-column: 1 \/ 4;\s*grid-row: 1/,
@@ -591,6 +595,19 @@ test("购物车使用五框、两类表格和双入口弹窗", () => {
     functionSource("enhanceGenericBrowseCards"),
     /if \(cartPage\) \{\s*priceHost\.querySelector\("\.dltracker-jpy-price"\)\?\.remove\(\)/,
   );
+});
+
+test("购物车三个价格框使用人民币斜杠日元紧凑格式", () => {
+  const moneySandbox = {};
+  vm.runInNewContext(
+    `${functionSource("toYen")}
+    ${functionSource("dealNumber")}
+    ${functionSource("cartFrameLocalizedMoney")}
+    globalThis.format = cartFrameLocalizedMoney;`,
+    moneySandbox,
+  );
+  assert.equal(moneySandbox.format(1078, 45.43 / 1078), "约45.43元/1,078円");
+  assert.equal(moneySandbox.format(1078), "1,078円");
 });
 
 test("购物车优惠信息挂在完整原生作品行后且不改变原生布局", () => {

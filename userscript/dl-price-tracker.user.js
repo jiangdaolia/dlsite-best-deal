@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.25
+// @version      0.6.27
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.25";
+  const APP_VERSION = "0.6.27";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -55,11 +55,26 @@
   const PRODUCT_METADATA_TTL_MS = 30 * 60 * 1000;
   const DEAL_CACHE_STORAGE_KEY = "dltracker-deal-insight-cache-v3";
   const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v5";
+  const ACCOUNT_INDEX_STORAGE_KEY = "dltracker-account-index-v1";
+  const LANGUAGE_FAMILY_CACHE_STORAGE_KEY = "dltracker-language-family-cache-v1";
+  const ACCOUNT_REFRESH_COOLDOWN_MS = 60 * 1000;
+  const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
+  const ACCOUNT_METADATA_BATCH_PAUSE_MS = 1000;
+  const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
+  const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.27": [
+      "新增同一作品各语言版本的理论最低价、平台折扣与独立史低比较",
+      "新增账号信息索引，在浏览卡提示已购买及购物车中的其他语言版本",
+      "购物车和详情页新增比较语言版本入口，并支持单件加入、放回或移出",
+    ],
+    "0.6.26": [
+      "购物车前三个价格框改用人民币/日元紧凑格式，为状态与趋势释放空间",
+    ],
     "0.6.25": [
       "保留 DLsite 横向卡为封面预留的原生内容缩进，避免优惠框挤入图片区域",
       "仅用自动宽度消除整宽与缩进相加造成的越界，不改动原生图片列",
@@ -338,6 +353,9 @@
   let cartRefreshInFlight = null;
   let dealToastTimer = null;
   let lastCartSnapshotFingerprint = "";
+  let accountIndexRefreshInFlight = null;
+  let accountIndexRuntimeFingerprint = "";
+  let openLanguageDialogState = null;
 
   function nowIso() {
     return new Date().toISOString();
@@ -2073,6 +2091,7 @@
       cnyPrice: dealNumber(nestedCny?.price ?? nestedCny, 0),
       voiceActors: extractVoiceActorNames(raw),
       makerId: String(raw?.maker_id || ""),
+      makerName: dealPlainText(raw?.maker_name),
       siteId: String(raw?.site_id || location.pathname.split("/")[1] || ""),
       workType: String(raw?.work_type || ""),
       customGenres: dealTokens(raw?.custom_genres),
@@ -2082,6 +2101,10 @@
         translationInfo?.original_workno,
         raw?.parent_workno,
       ]).map((value) => String(value).toUpperCase()),
+      translationInfo: translationInfo && typeof translationInfo === "object"
+        ? translationInfo
+        : {},
+      onSale: Boolean(dealNumber(raw?.on_sale, raw?.is_sale ? 1 : 0)),
       raw,
     };
   }
@@ -2144,6 +2167,431 @@
     }
     return result;
   }
+
+  // <language-account-core>
+  function currentDlsiteSection() {
+    return (location.pathname.split("/").filter(Boolean)[0] || "maniax")
+      .replace(/-touch$/i, "");
+  }
+
+  function readCookieValue(name) {
+    const escaped = String(name || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const matched = document.cookie.match(new RegExp(`(?:^|;\\s*)${escaped}=([^;]*)`));
+    return matched ? decodeURIComponent(matched[1]) : "";
+  }
+
+  function dlsiteBoughtToken() {
+    const direct = document.cookie.match(/(?:^|;\s*)uhash(?:jp|en)?=([^;]+)/i);
+    return direct ? decodeURIComponent(direct[1]) : "";
+  }
+
+  function isDlsiteMemberLoggedIn() {
+    const value = Number(readCookieValue("loginchecked") || 0);
+    return Boolean(value & 1);
+  }
+
+  const LANGUAGE_LABELS = {
+    JPN: "日语",
+    ENG: "英语",
+    CHI_HANS: "简体中文",
+    CHI_HANT: "繁体中文",
+    CHI: "中文",
+    KO_KR: "韩语",
+    KOR: "韩语",
+    SPA: "西班牙语",
+    GER: "德语",
+    FRE: "法语",
+    IND: "印尼语",
+    ITA: "意大利语",
+    POR: "葡萄牙语",
+    SWE: "瑞典语",
+    THA: "泰语",
+    VIE: "越南语",
+  };
+
+  function normalizedLanguageCode(value, product = null) {
+    const explicit = String(value || "").trim().toUpperCase();
+    if (explicit) return explicit;
+    const options = String(product?.raw?.options || product?.raw?.option || "")
+      .toUpperCase().split(/[# ,]+/);
+    return ["CHI_HANS", "CHI_HANT", "KO_KR", "ENG", "JPN"]
+      .find((code) => options.includes(code)) || "JPN";
+  }
+
+  function languageDisplayName(code, fallback = "") {
+    return LANGUAGE_LABELS[normalizedLanguageCode(code)] ||
+      dealPlainText(fallback) || normalizedLanguageCode(code) || "未知语言";
+  }
+
+  function productLanguageIdentity(product, fallbackId = "") {
+    const id = String(product?.id || fallbackId || "").toUpperCase();
+    const info = product?.translationInfo || product?.raw?.translation_info || {};
+    const isChild = Boolean(info?.is_child);
+    const isParent = Boolean(info?.is_parent);
+    const isOriginal = Boolean(info?.is_original);
+    const parentId = String(
+      isChild ? info?.parent_workno : isParent ? id : id,
+    ).toUpperCase() || id;
+    const familyId = String(
+      info?.original_workno || (isOriginal ? id : parentId),
+    ).toUpperCase() || parentId || id;
+    const lang = normalizedLanguageCode(
+      info?.lang || (isOriginal ? "JPN" : ""),
+      product,
+    );
+    return { id, parentId, familyId, lang };
+  }
+
+  function emptyAccountIndex() {
+    return {
+      loaded: false,
+      active: [],
+      later: [],
+      bought: [],
+      entries: {},
+      indexed: 0,
+      total: 0,
+      complete: false,
+      failedIds: [],
+      updatedAt: 0,
+      lastManualAt: 0,
+      accountFingerprint: "",
+    };
+  }
+
+  function loadAccountIndex() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(ACCOUNT_INDEX_STORAGE_KEY) || "null");
+      if (!parsed || typeof parsed !== "object") return emptyAccountIndex();
+      return {
+        ...emptyAccountIndex(),
+        ...parsed,
+        active: Array.isArray(parsed.active) ? parsed.active : [],
+        later: Array.isArray(parsed.later) ? parsed.later : [],
+        bought: Array.isArray(parsed.bought) ? parsed.bought : [],
+        entries: parsed.entries && typeof parsed.entries === "object"
+          ? parsed.entries
+          : {},
+        failedIds: Array.isArray(parsed.failedIds) ? parsed.failedIds : [],
+      };
+    } catch {
+      return emptyAccountIndex();
+    }
+  }
+
+  function saveAccountIndex(index) {
+    try {
+      localStorage.setItem(ACCOUNT_INDEX_STORAGE_KEY, JSON.stringify(index));
+    } catch (error) {
+      console.warn(`[${APP_NAME}] account index write failed:`, error);
+    }
+    return index;
+  }
+
+  function clearAccountIndex() {
+    try { localStorage.removeItem(ACCOUNT_INDEX_STORAGE_KEY); } catch { /* noop */ }
+    accountIndexRuntimeFingerprint = "";
+    return emptyAccountIndex();
+  }
+
+  function accountEntryFromProduct(id, product) {
+    const identity = productLanguageIdentity(product, id);
+    return {
+      id: String(id || "").toUpperCase(),
+      parentId: identity.parentId,
+      familyId: identity.familyId,
+      lang: identity.lang,
+      language: languageDisplayName(identity.lang),
+    };
+  }
+
+  function accountEntriesForFamily(familyId, index = loadAccountIndex()) {
+    const target = String(familyId || "").toUpperCase();
+    return Object.values(index.entries || {}).filter((entry) =>
+      String(entry?.familyId || "").toUpperCase() === target);
+  }
+
+  async function fetchSameOriginJson(url, label, options = {}) {
+    if (dealSessionStopped) throw new Error("本页请求已因风控信号停止");
+    const response = await fetch(url, {
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+        ...(options.headers || {}),
+      },
+      ...options,
+    });
+    const text = await response.text();
+    if (response.status === 403 || response.status === 429) {
+      stopDealRequests(`${label} HTTP ${response.status}`);
+      throw new Error(`${label}返回 HTTP ${response.status}`);
+    }
+    if (!response.ok) throw new Error(`${label}返回 HTTP ${response.status}`);
+    if (/captcha|reCAPTCHA|認証|验证|アクセスが集中/i.test(text) && /^\s*</.test(text)) {
+      stopDealRequests(`${label}返回验证页`);
+      throw new Error(`${label}返回了验证页`);
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      if (/^\s*</.test(text)) stopDealRequests(`${label}返回网页`);
+      throw new Error(`${label}没有返回 JSON`);
+    }
+  }
+
+  function cartIdsFromMemberStatus(status) {
+    const active = [];
+    const later = [];
+    for (const item of Array.isArray(status?.cart) ? status.cart : []) {
+      const id = String(item?.product_id || item?.workno || "").toUpperCase();
+      if (!isValidProductCode(id)) continue;
+      if (!item?.status || Number(item.status) === 1) active.push(id);
+      else later.push(id);
+    }
+    return { active: [...new Set(active)], later: [...new Set(later)] };
+  }
+
+  async function refreshAccountIndex({ manual = false } = {}) {
+    if (accountIndexRefreshInFlight) return accountIndexRefreshInFlight;
+    const previous = loadAccountIndex();
+    if (manual && Date.now() - dealNumber(previous.lastManualAt) < ACCOUNT_REFRESH_COOLDOWN_MS) {
+      const seconds = Math.max(1, Math.ceil(
+        (ACCOUNT_REFRESH_COOLDOWN_MS - (Date.now() - previous.lastManualAt)) / 1000,
+      ));
+      throw new Error(`请等待 ${seconds} 秒后再读取`);
+    }
+    const manualStartedAt = manual ? Date.now() : dealNumber(previous.lastManualAt);
+    if (manual) saveAccountIndex({ ...previous, lastManualAt: manualStartedAt });
+    accountIndexRefreshInFlight = (async () => {
+      if (!isDlsiteMemberLoggedIn()) return clearAccountIndex();
+      const section = currentDlsiteSection();
+      const status = await fetchSameOriginJson(
+        `/${section}${DLSITE_MEMBER_STATUS_PATH}`,
+        "账号购物车信息",
+      );
+      const token = dlsiteBoughtToken();
+      const rawFingerprint = String(
+        token || status?.customer_id || status?.login_id || "",
+      );
+      const fingerprint = rawFingerprint ? `account-${quickHash(rawFingerprint)}` : "";
+      if (accountIndexRuntimeFingerprint && fingerprint &&
+        accountIndexRuntimeFingerprint !== fingerprint) {
+        clearAccountIndex();
+      }
+      if (previous.accountFingerprint && fingerprint &&
+        previous.accountFingerprint !== fingerprint) {
+        clearAccountIndex();
+      }
+      accountIndexRuntimeFingerprint = fingerprint;
+      const boughtUrl = new URL(`/${section}${DLSITE_BOUGHT_PRODUCTS_PATH}`, location.origin);
+      if (token) boughtUrl.searchParams.set("_", token);
+      const boughtPayload = await fetchSameOriginJson(boughtUrl, "已购清单");
+      const cartIds = cartIdsFromMemberStatus(status);
+      const bought = (Array.isArray(boughtPayload?.boughts)
+        ? boughtPayload.boughts
+        : Array.isArray(boughtPayload) ? boughtPayload : [])
+        .map((id) => String(id || "").toUpperCase())
+        .filter(isValidProductCode);
+      const ids = [...new Set([...cartIds.active, ...cartIds.later, ...bought])];
+      const entries = {};
+      const failedIds = [];
+      for (let start = 0; start < ids.length; start += MAX_PRODUCT_METADATA_BATCH) {
+        const batchIds = ids.slice(start, start + MAX_PRODUCT_METADATA_BATCH);
+        const metadata = await ensureProductMetadata(batchIds);
+        for (const id of batchIds) {
+          const product = metadata.get(id);
+          if (product) entries[id] = accountEntryFromProduct(id, product);
+          else {
+            entries[id] = accountEntryFromProduct(id, { id });
+            failedIds.push(id);
+          }
+        }
+        saveAccountIndex({
+          ...emptyAccountIndex(),
+          loaded: true,
+          active: cartIds.active,
+          later: cartIds.later,
+          bought: [...new Set(bought)],
+          entries,
+          indexed: Object.keys(entries).length - failedIds.length,
+          total: ids.length,
+          complete: false,
+          failedIds,
+          updatedAt: Date.now(),
+          lastManualAt: manualStartedAt,
+          accountFingerprint: fingerprint,
+        });
+        refreshAccountInformationPanels();
+        if (dealSessionStopped) {
+          for (const remainingId of ids.slice(start + batchIds.length)) {
+            if (!entries[remainingId]) {
+              entries[remainingId] = accountEntryFromProduct(remainingId, { id: remainingId });
+              failedIds.push(remainingId);
+            }
+          }
+          break;
+        }
+        if (start + MAX_PRODUCT_METADATA_BATCH < ids.length) {
+          await sleep(ACCOUNT_METADATA_BATCH_PAUSE_MS);
+        }
+      }
+      const next = {
+        ...emptyAccountIndex(),
+        loaded: true,
+        active: cartIds.active,
+        later: cartIds.later,
+        bought: [...new Set(bought)],
+        entries,
+        indexed: Object.keys(entries).length - failedIds.length,
+        total: ids.length,
+        complete: failedIds.length === 0,
+        failedIds,
+        updatedAt: Date.now(),
+        lastManualAt: manualStartedAt,
+        accountFingerprint: fingerprint,
+      };
+      saveAccountIndex(next);
+      return next;
+    })().finally(() => {
+      accountIndexRefreshInFlight = null;
+      refreshAccountInformationPanels();
+    });
+    return accountIndexRefreshInFlight;
+  }
+
+  async function ensureInitialAccountIndex() {
+    if (!isDlsiteMemberLoggedIn()) {
+      if (loadAccountIndex().loaded) clearAccountIndex();
+      return loadAccountIndex();
+    }
+    const index = loadAccountIndex();
+    const token = dlsiteBoughtToken();
+    const visibleFingerprint = token
+      ? `account-${quickHash(token)}`
+      : currentAccountKey();
+    if (index.loaded && index.accountFingerprint &&
+      visibleFingerprint !== "account-unresolved" &&
+      index.accountFingerprint !== visibleFingerprint) {
+      clearAccountIndex();
+      return refreshAccountIndex();
+    }
+    const purchaseKey = "dltracker-account-purchase-refresh-marker";
+    const purchaseComplete = /(?:order|purchase|payment).*(?:complete|finish|thanks)|thanks.*(?:order|purchase)/i
+      .test(location.pathname);
+    let purchaseAlreadyHandled = false;
+    try {
+      if (!purchaseComplete) sessionStorage.removeItem(purchaseKey);
+      purchaseAlreadyHandled = sessionStorage.getItem(purchaseKey) === location.href;
+    } catch { /* noop */ }
+    if (purchaseComplete && !purchaseAlreadyHandled) {
+      try { sessionStorage.setItem(purchaseKey, location.href); } catch { /* noop */ }
+      return refreshAccountIndex();
+    }
+    if (!index.loaded) return refreshAccountIndex();
+    return index;
+  }
+
+  function updateAccountIndexCart(activeIds, laterIds) {
+    const index = loadAccountIndex();
+    if (!index.loaded) return index;
+    const active = [...new Set((activeIds || []).map((id) => String(id).toUpperCase()))];
+    const later = [...new Set((laterIds || []).map((id) => String(id).toUpperCase()))];
+    const next = saveAccountIndex({ ...index, active, later, updatedAt: Date.now() });
+    refreshAccountInformationPanels();
+    refreshOpenLanguageDialog();
+    return next;
+  }
+
+  function emptyLanguageFamilyCache() {
+    return { families: {}, parents: {} };
+  }
+
+  function loadLanguageFamilyCache() {
+    try {
+      const parsed = JSON.parse(
+        localStorage.getItem(LANGUAGE_FAMILY_CACHE_STORAGE_KEY) || "null",
+      );
+      if (!parsed || typeof parsed !== "object") return emptyLanguageFamilyCache();
+      return {
+        families: parsed.families && typeof parsed.families === "object"
+          ? parsed.families
+          : {},
+        parents: parsed.parents && typeof parsed.parents === "object"
+          ? parsed.parents
+          : {},
+      };
+    } catch {
+      return emptyLanguageFamilyCache();
+    }
+  }
+
+  function saveLanguageFamilyCache(cache) {
+    try {
+      localStorage.setItem(LANGUAGE_FAMILY_CACHE_STORAGE_KEY, JSON.stringify(cache));
+    } catch (error) {
+      console.warn(`[${APP_NAME}] language cache write failed:`, error);
+    }
+  }
+
+  function languageEditionsFromDocument(doc, fallbackId = "") {
+    const selector = doc?.querySelector?.(
+      '[data-vue-component="language-edition-selector"][data-language-editions]',
+    );
+    let raw = [];
+    try { raw = JSON.parse(selector?.getAttribute("data-language-editions") || "[]"); } catch { /* noop */ }
+    const editions = (Array.isArray(raw) ? raw : []).map((edition, order) => ({
+      parentId: String(edition?.workno || "").toUpperCase(),
+      lang: normalizedLanguageCode(edition?.lang),
+      language: languageDisplayName(edition?.lang, edition?.display_label),
+      displayLabel: dealPlainText(edition?.display_label),
+      displayOrder: dealNumber(edition?.display_order, order),
+      price: dealNumber(edition?.price, NaN),
+      officialPrice: dealNumber(edition?.official_price, NaN),
+    })).filter((edition) => isValidProductCode(edition.parentId));
+    if (editions.length) return editions;
+    const id = String(fallbackId || "").toUpperCase();
+    return isValidProductCode(id)
+      ? [{ parentId: id, lang: "JPN", language: "日语", displayLabel: "日语", displayOrder: 0 }]
+      : [];
+  }
+
+  async function ensureLanguageFamily(productId) {
+    const id = String(productId || "").toUpperCase();
+    const metadata = await ensureProductMetadataBatches([id]);
+    const product = metadata.get(id) || { id };
+    const identity = productLanguageIdentity(product, id);
+    const cache = loadLanguageFamilyCache();
+    const cachedFamilyId = cache.parents[identity.parentId] || identity.familyId;
+    const cached = cache.families[cachedFamilyId];
+    if (cached && Date.now() - dealNumber(cached.fetchedAt) < LANGUAGE_FAMILY_TTL_MS) {
+      return cached;
+    }
+    let editions = [];
+    const currentId = extractRjCodeFromUrl(location.href);
+    if (isProductPage(location.href) && [id, identity.parentId].includes(currentId)) {
+      editions = languageEditionsFromDocument(document, identity.parentId);
+    }
+    if (!editions.length || editions.length === 1 && editions[0].parentId === identity.parentId) {
+      const url = new URL(
+        `/${currentDlsiteSection()}/work/=/product_id/${identity.parentId}.html`,
+        location.origin,
+      );
+      const html = await fetchSameOriginText(url, "语言版本详情");
+      if (!/^\s*</.test(html)) throw new Error("语言版本详情没有返回网页");
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      editions = languageEditionsFromDocument(doc, identity.parentId);
+    }
+    const familyId = identity.familyId || editions.find((entry) => entry.lang === "JPN")?.parentId || identity.parentId;
+    const family = { familyId, fetchedAt: Date.now(), editions };
+    cache.families[familyId] = family;
+    cache.parents[id] = familyId;
+    cache.parents[identity.parentId] = familyId;
+    editions.forEach((edition) => { cache.parents[edition.parentId] = familyId; });
+    saveLanguageFamilyCache(cache);
+    return family;
+  }
+  // </language-account-core>
 
   function loadCartSnapshot() {
     const empty = { loaded: false, active: [], later: [], products: [], updatedAt: 0 };
@@ -3286,7 +3734,16 @@
         void applyBrowseSortAndFilter();
       });
       filterLabel.appendChild(filter);
-      controls.append(sortLabel, filterLabel);
+      const accountButton = document.createElement("button");
+      accountButton.type = "button";
+      accountButton.className = "dltracker-account-info-button";
+      accountButton.textContent = "账号信息";
+      accountButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openAccountInformationDialog();
+      });
+      controls.append(sortLabel, filterLabel, accountButton);
     }
     if (anchor.before !== controls &&
       (controls.parentElement !== anchor.parent ||
@@ -5029,6 +5486,931 @@
     host.replaceChildren(layout);
   }
 
+  function accountIndexTimeText(value) {
+    const time = dealNumber(value, 0);
+    if (!time) return "尚未读取";
+    return new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date(time));
+  }
+
+  function renderAccountInformationPanel(panel) {
+    if (!panel) return;
+    const index = loadAccountIndex();
+    panel.className = "dltracker-account-info-panel";
+    const summary = document.createElement("div");
+    summary.className = "dltracker-account-info-summary";
+    const values = index.loaded
+      ? [
+          ["立即购买", index.active.length],
+          ["稍后再买", index.later.length],
+          ["已购买", index.bought.length],
+          ["索引", `${index.indexed}/${index.total}${index.complete ? "" : "（不完整）"}`],
+          ["上次读取", accountIndexTimeText(index.updatedAt)],
+        ]
+      : [["状态", isDlsiteMemberLoggedIn() ? "尚未读取" : "未登录"]];
+    for (const [label, value] of values) {
+      const row = document.createElement("span");
+      const strong = document.createElement("strong");
+      strong.textContent = `${label}：`;
+      row.append(strong, document.createTextNode(String(value)));
+      summary.appendChild(row);
+    }
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "dltracker-account-refresh";
+    action.textContent = accountIndexRefreshInFlight
+      ? `读取中 ${index.indexed}/${index.total || "?"}`
+      : "读取购物车和已购清单（请勿频繁读取）";
+    const cooldown = Date.now() - dealNumber(index.lastManualAt) < ACCOUNT_REFRESH_COOLDOWN_MS;
+    action.disabled = Boolean(accountIndexRefreshInFlight) || cooldown || !isDlsiteMemberLoggedIn();
+    if (cooldown && !accountIndexRefreshInFlight) {
+      const remaining = ACCOUNT_REFRESH_COOLDOWN_MS -
+        (Date.now() - dealNumber(index.lastManualAt));
+      setTimeout(() => {
+        if (panel.isConnected) renderAccountInformationPanel(panel);
+      }, Math.max(100, remaining + 50));
+    }
+    action.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      action.disabled = true;
+      action.textContent = "正在读取…";
+      try {
+        await refreshAccountIndex({ manual: true });
+        await refreshAllAccountReminders();
+        await refreshOpenLanguageDialog();
+      } catch (error) {
+        showDealToast(error instanceof Error ? error.message : String(error), true, 6000);
+      } finally {
+        refreshAccountInformationPanels();
+      }
+    });
+    panel.replaceChildren(summary, action);
+  }
+
+  function refreshAccountInformationPanels() {
+    document.querySelectorAll(".dltracker-account-info-panel")
+      .forEach(renderAccountInformationPanel);
+  }
+
+  function closeAccountInformationDialog() {
+    document.querySelector(".dltracker-account-overlay")?.remove();
+    unlockReachDialogScroll();
+  }
+
+  function openAccountInformationDialog() {
+    closeLanguageDialog();
+    closeReachDialog();
+    const overlay = document.createElement("div");
+    overlay.className = "dltracker-reach-overlay dltracker-account-overlay";
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) closeAccountInformationDialog();
+    });
+    const dialog = document.createElement("section");
+    dialog.className = "dltracker-reach-dialog dltracker-account-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.tabIndex = -1;
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeAccountInformationDialog();
+    });
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    title.textContent = "账号信息";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "关闭");
+    close.addEventListener("click", closeAccountInformationDialog);
+    header.append(title, close);
+    const body = document.createElement("div");
+    body.className = "dltracker-reach-dialog-body";
+    const panel = document.createElement("section");
+    renderAccountInformationPanel(panel);
+    body.appendChild(panel);
+    dialog.append(header, body);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    lockReachDialogScroll();
+    dialog.focus({ preventScroll: true });
+  }
+
+  function groupedAccountEntries(entries, ids) {
+    const idSet = new Set((ids || []).map((id) => String(id).toUpperCase()));
+    const groups = new Map();
+    for (const entry of entries) {
+      if (!idSet.has(String(entry?.id || "").toUpperCase())) continue;
+      const key = normalizedLanguageCode(entry.lang);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(entry);
+    }
+    return groups;
+  }
+
+  function compressedLanguageNames(groups, currentLang = "") {
+    const names = [...groups.keys()]
+      .filter((lang) => lang !== currentLang)
+      .map((lang) => `${languageDisplayName(lang)}版`);
+    const visible = names.slice(0, 2);
+    if (names.length > 2) visible.push(`+${names.length - 2}个版本`);
+    return visible.join("、");
+  }
+
+  function metadataProductFromCache(id) {
+    const entry = loadDealCache().metadata[String(id || "").toUpperCase()];
+    return entry?.raw
+      ? normalizedMetadataProduct(String(id).toUpperCase(), entry.raw)
+      : null;
+  }
+
+  async function theoreticalPriceForAccountEntry(entry) {
+    const id = String(entry?.parentId || entry?.id || "").toUpperCase();
+    let insight = dealInsightById.get(id);
+    if (!insight) {
+      const metadata = await ensureProductMetadataBatches([id]);
+      const product = metadata.get(id);
+      if (!product) return null;
+      insight = await buildInsight(
+        product,
+        latestDealContext.coupons,
+        latestDealContext.cartSnapshot.active || [],
+      );
+    }
+    const price = calculateHypotheticalPrice(insight.product, insight.bestReach);
+    return Number.isFinite(price) ? { price, insight } : null;
+  }
+
+  async function accountReminderData(productId) {
+    const id = String(productId || "").toUpperCase();
+    const index = loadAccountIndex();
+    if (!index.loaded) return null;
+    let product = metadataProductFromCache(id);
+    if (!product) product = (await ensureProductMetadataBatches([id])).get(id);
+    if (!product) return null;
+    const identity = productLanguageIdentity(product, id);
+    const familyEntries = accountEntriesForFamily(identity.familyId, index);
+    const exactIndexed = index.entries[id];
+    const exactKnown = index.active.includes(id) || index.later.includes(id) ||
+      index.bought.includes(id);
+    if (exactKnown && !familyEntries.some((entry) => entry.id === id)) {
+      familyEntries.push({
+        ...(exactIndexed || {}),
+        id,
+        parentId: identity.parentId,
+        familyId: identity.familyId,
+        lang: identity.lang,
+        language: languageDisplayName(identity.lang),
+      });
+    }
+    if (!familyEntries.length) return null;
+    const boughtGroups = groupedAccountEntries(familyEntries, index.bought);
+    const activeGroups = groupedAccountEntries(familyEntries, index.active);
+    const laterGroups = groupedAccountEntries(familyEntries, index.later);
+    const lines = [];
+    let purchased = false;
+    if (boughtGroups.has(identity.lang)) {
+      lines.push("已购买");
+      purchased = true;
+    } else {
+      const otherBought = compressedLanguageNames(boughtGroups, identity.lang);
+      if (otherBought) {
+        lines.push(`已购买${otherBought}`);
+        purchased = true;
+      }
+    }
+    if (activeGroups.has(identity.lang)) {
+      lines.push("已在购物车");
+    } else if (laterGroups.has(identity.lang)) {
+      lines.push("已在稍后再买");
+    } else {
+      const otherCartEntries = [];
+      for (const [lang, values] of activeGroups) {
+        if (lang !== identity.lang) otherCartEntries.push({ lang, entry: values[0], area: "购物车" });
+      }
+      for (const [lang, values] of laterGroups) {
+        if (lang !== identity.lang && !otherCartEntries.some((item) => item.lang === lang)) {
+          otherCartEntries.push({ lang, entry: values[0], area: "稍后再买" });
+        }
+      }
+      if (otherCartEntries.length) {
+        const currentPrice = await theoreticalPriceForAccountEntry({
+          id,
+          parentId: identity.parentId,
+        });
+        const parts = [];
+        for (const item of otherCartEntries.slice(0, 2)) {
+          const otherPrice = await theoreticalPriceForAccountEntry(item.entry);
+          let compare = "";
+          if (currentPrice && otherPrice) {
+            if (otherPrice.price < currentPrice.price) compare = "，比当前便宜";
+            else if (otherPrice.price > currentPrice.price) compare = "，当前更便宜";
+            else compare = "，与当前同价";
+          }
+          parts.push(`${languageDisplayName(item.lang)}版在${item.area}${compare}`);
+        }
+        if (otherCartEntries.length > 2) parts.push(`+${otherCartEntries.length - 2}个版本`);
+        lines.push(parts.join("｜"));
+      }
+    }
+    return lines.length ? { lines, purchased, identity } : null;
+  }
+
+  async function renderAccountReminderForCard(node, id) {
+    const host = node?.querySelector?.(".dltracker-browse-analysis-host");
+    const layout = host?.querySelector?.(".dltracker-browse-analysis");
+    if (!layout) return;
+    layout.querySelector(".dltracker-account-reminders")?.remove();
+    layout.classList.remove("is-account-purchased");
+    const data = await accountReminderData(id);
+    if (!data || !layout.isConnected) return;
+    const reminders = document.createElement("div");
+    reminders.className = "dltracker-account-reminders";
+    if (data.purchased) layout.classList.add("is-account-purchased");
+    for (const line of data.lines) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "dltracker-account-reminder";
+      button.textContent = line;
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void openLanguageComparison(id, button);
+      });
+      reminders.appendChild(button);
+    }
+    layout.prepend(reminders);
+  }
+
+  async function refreshAllAccountReminders() {
+    const cards = collectBrowseCards().filter(({ cartItem }) => !cartItem);
+    await mapWithConcurrency(cards, 1, ({ node, id }) =>
+      renderAccountReminderForCard(node, id));
+  }
+
+  function languageDetailUrl(parentId, childId = "") {
+    const url = new URL(
+      `/${currentDlsiteSection()}/work/=/product_id/${String(parentId).toUpperCase()}.html`,
+      location.origin,
+    );
+    if (childId && String(childId).toUpperCase() !== String(parentId).toUpperCase()) {
+      url.searchParams.set("translation", String(childId).toUpperCase());
+    }
+    return url.href;
+  }
+
+  function currentTranslationSelection() {
+    return String(new URL(location.href).searchParams.get("translation") || "").toUpperCase();
+  }
+
+  function cartStateIdSets() {
+    const index = loadAccountIndex();
+    const snapshot = latestDealContext.cartSnapshot || loadCartSnapshot();
+    return {
+      active: new Set([
+        ...index.active,
+        ...(snapshot.active || snapshot.products || []).map((item) => item.id),
+      ].map((id) => String(id).toUpperCase())),
+      later: new Set([
+        ...index.later,
+        ...(snapshot.later || []).map((item) => item.id),
+      ].map((id) => String(id).toUpperCase())),
+      bought: new Set(index.bought.map((id) => String(id).toUpperCase())),
+    };
+  }
+
+  function firstMatchingId(ids, set) {
+    return ids.find((id) => set.has(String(id).toUpperCase())) || "";
+  }
+
+  async function buildLanguageComparisonRows(state, onlyParents = null) {
+    const sourceMetadata = await ensureProductMetadataBatches([state.sourceId]);
+    const sourceProduct = sourceMetadata.get(state.sourceId) || { id: state.sourceId };
+    const sourceIdentity = productLanguageIdentity(sourceProduct, state.sourceId);
+    state.currentParentId = sourceIdentity.parentId;
+    const editions = state.family.editions;
+    const parentIds = onlyParents || editions.map((edition) => edition.parentId);
+    const parentMetadata = await ensureProductMetadataBatches(parentIds);
+    const childIds = [];
+    for (const edition of editions) {
+      const info = parentMetadata.get(edition.parentId)?.translationInfo || {};
+      childIds.push(...dealTokens(info.child_worknos)
+        .map((id) => String(id).toUpperCase())
+        .filter(isValidProductCode));
+    }
+    const childMetadata = await ensureProductMetadataBatches(childIds);
+    const cartSets = cartStateIdSets();
+    const querySelection = currentTranslationSelection();
+    const rows = [];
+    for (const edition of editions) {
+      if (onlyParents && !onlyParents.includes(edition.parentId)) continue;
+      try {
+        const product = parentMetadata.get(edition.parentId);
+        if (!product) throw new Error("作品信息读取失败");
+        const info = product.translationInfo || {};
+        const editionChildIds = dealTokens(info.child_worknos)
+          .map((id) => String(id).toUpperCase())
+          .filter(isValidProductCode);
+        if (editionChildIds.some((id) => !childMetadata.has(id))) {
+          throw new Error("译者信息读取失败");
+        }
+        const children = editionChildIds.map((id) => childMetadata.get(id));
+        const purchasableChildren = children.filter((child) => child.onSale);
+        const purchasableIds = purchasableChildren.length
+          ? purchasableChildren.map((child) => child.id)
+          : product.onSale ? [edition.parentId] : [];
+        const allIds = [...new Set([edition.parentId, ...children.map((child) => child.id)])];
+        const statusId = firstMatchingId(allIds, cartSets.active) ||
+          firstMatchingId(allIds, cartSets.later) ||
+          firstMatchingId(allIds, cartSets.bought);
+        const chosen = state.selectedByParent[edition.parentId] ||
+          (allIds.includes(querySelection) ? querySelection : "") ||
+          (purchasableIds.includes(statusId) ? statusId : "") ||
+          (purchasableIds.length === 1 ? purchasableIds[0] : "");
+        if (chosen) state.selectedByParent[edition.parentId] = chosen;
+        const insight = await buildInsight(
+          product,
+          latestDealContext.coupons,
+          latestDealContext.cartSnapshot.active || [],
+          false,
+        );
+        const theoreticalPrice = calculateHypotheticalPrice(product, insight.bestReach);
+        const record = /^[RB]J/i.test(edition.parentId)
+          ? await buildOrUpdateRecord({
+              rjCode: edition.parentId,
+              title: product.title || edition.parentId,
+              currentPrice: product.price || undefined,
+              forceFetch: false,
+            })
+          : null;
+        const activeId = firstMatchingId(allIds, cartSets.active);
+        const laterId = firstMatchingId(allIds, cartSets.later);
+        const boughtId = firstMatchingId(allIds, cartSets.bought);
+        rows.push({
+          ...edition,
+          product,
+          children,
+          purchasableIds,
+          allIds,
+          selectedId: chosen,
+          selectedProduct: children.find((child) => child.id === chosen) ||
+            (chosen === edition.parentId ? product : null),
+          activeId,
+          laterId,
+          boughtId,
+          purchased: Boolean(boughtId),
+          stopped: purchasableIds.length === 0,
+          insight,
+          theoreticalPrice,
+          record: record || { rjCode: edition.parentId },
+          current: edition.parentId === sourceIdentity.parentId,
+          error: "",
+        });
+      } catch (error) {
+        rows.push({
+          ...edition,
+          current: edition.parentId === sourceIdentity.parentId,
+          stopped: true,
+          error: error instanceof Error ? error.message : String(error),
+          theoreticalPrice: Number.POSITIVE_INFINITY,
+        });
+      }
+    }
+    return rows;
+  }
+
+  function sortLanguageComparisonRows(rows) {
+    return [...rows].sort((a, b) => {
+      if (a.current !== b.current) return a.current ? -1 : 1;
+      const aPrice = Number.isFinite(a.theoreticalPrice)
+        ? a.theoreticalPrice
+        : Number.POSITIVE_INFINITY;
+      const bPrice = Number.isFinite(b.theoreticalPrice)
+        ? b.theoreticalPrice
+        : Number.POSITIVE_INFINITY;
+      return aPrice - bPrice || a.displayOrder - b.displayOrder;
+    });
+  }
+
+  function languageWinnerRows(rows) {
+    const eligible = rows.filter((row) => !row.error && !row.stopped &&
+      Number.isFinite(row.theoreticalPrice));
+    if (!eligible.length) return [];
+    const best = Math.min(...eligible.map((row) => row.theoreticalPrice));
+    return eligible.filter((row) => row.theoreticalPrice === best);
+  }
+
+  function languageComparisonConclusion(rows, cnyRate) {
+    const winners = languageWinnerRows(rows);
+    const current = rows.find((row) => row.current && !row.error);
+    const failed = rows.filter((row) => row.error).length;
+    if (!winners.length || !current || !Number.isFinite(current.theoreticalPrice)) {
+      return `比较数据不足${failed ? `，${failed} 个语言读取失败` : ""}`;
+    }
+    const suffix = failed ? `｜另有 ${failed} 个语言读取失败` : "";
+    if (winners.some((row) => row.current)) {
+      if (winners.length > 1) {
+        return `${winners.map((row) => row.language).join("、")}理论最低价并列${suffix}`;
+      }
+      return `当前${current.language}版本理论最低价最优惠${suffix}`;
+    }
+    const winner = winners[0];
+    const difference = Math.max(0, current.theoreticalPrice - winner.theoreticalPrice);
+    return `${winner.language}版本更优惠，比当前便宜${cartLocalizedMoney(difference, cnyRate)}${suffix}`;
+  }
+
+  function languageRowStatusText(row) {
+    const states = [];
+    if (row.purchased) states.push("已购买");
+    if (row.activeId) states.push("已在购物车");
+    else if (row.laterId) states.push("已在稍后再买");
+    else if (row.stopped) states.push("停售");
+    else states.push("可购买");
+    if (row.children?.length > 1) {
+      const selected = row.selectedProduct;
+      states.push(`当前选择：${selected
+        ? `${selected.makerName || "译者"}（${selected.id}）`
+        : "未选择"}`);
+    }
+    return `状态：${states.join("｜")}`;
+  }
+
+  async function postOfficialCartAdd(productId) {
+    const response = await fetch(`/${currentDlsiteSection()}/cart/ajax`, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: new URLSearchParams({
+        mode: "cart",
+        obj_nocheck: "1",
+        product_id: String(productId).toUpperCase(),
+      }),
+    });
+    const text = await response.text();
+    if (response.status === 403 || response.status === 429) {
+      stopDealRequests(`购物车操作 HTTP ${response.status}`);
+      throw new Error(`购物车操作返回 HTTP ${response.status}`);
+    }
+    if (!response.ok) throw new Error(`购物车操作返回 HTTP ${response.status}`);
+    const xml = new DOMParser().parseFromString(text, "text/xml");
+    const result = xml.querySelector("result_code")?.textContent || "-1";
+    const message = dealPlainText(xml.querySelector("res_msg")?.textContent);
+    if (result === "-1") throw new Error(message || "DLsite 未能加入购物车");
+    return true;
+  }
+
+  function mutateAccountCartId(id, nextArea) {
+    const index = loadAccountIndex();
+    if (!index.loaded) return;
+    const target = String(id || "").toUpperCase();
+    const active = index.active.filter((value) => String(value).toUpperCase() !== target);
+    const later = index.later.filter((value) => String(value).toUpperCase() !== target);
+    if (nextArea === "active") active.push(target);
+    if (nextArea === "later") later.push(target);
+    const product = metadataProductFromCache(target);
+    const entries = { ...index.entries };
+    if (nextArea && product) entries[target] = accountEntryFromProduct(target, product);
+    saveAccountIndex({
+      ...index,
+      active: [...new Set(active)],
+      later: [...new Set(later)],
+      entries,
+      updatedAt: Date.now(),
+    });
+  }
+
+  function nativeCartItemForProduct(id) {
+    const target = String(id || "").toUpperCase();
+    return getCartItems().find((item) => {
+      const ids = extractFallbackRjCodesFromCartItem(item, extractRjCodeFromCartItem(item));
+      const primary = extractRjCodeFromCartItem(item);
+      return [primary, ...ids].filter(Boolean)
+        .some((value) => String(value).toUpperCase() === target);
+    }) || null;
+  }
+
+  async function triggerNativeCartAction(productId, action) {
+    const item = nativeCartItemForProduct(productId);
+    const selector = action === "remove" ? "a.link_delete" : "a.link_move_cart";
+    const nativeAction = item?.querySelector?.(selector);
+    if (!nativeAction) {
+      location.href = `/${currentDlsiteSection()}/cart`;
+      return false;
+    }
+    const owner = item.closest("li.cart_list_item, li.n_work_list_item") || item;
+    nativeAction.click();
+    await sleep(900);
+    const succeeded = action === "move"
+      ? isHiddenOrRemovedCartItem(owner)
+      : !owner.classList.contains("loading");
+    if (!succeeded) throw new Error("DLsite 购物车操作未完成，请稍后手动重试");
+    const snapshot = cartSnapshotFromRoot(document);
+    saveCartSnapshot(snapshot);
+    updateAccountIndexCart(
+      snapshot.active.map((item) => item.id),
+      snapshot.later.map((item) => item.id),
+    );
+    return true;
+  }
+
+  async function performLanguageCartAction(row, button) {
+    const selectedId = row.activeId || row.laterId || row.selectedId || row.purchasableIds?.[0];
+    if (!selectedId) throw new Error("请先选择译者");
+    button.disabled = true;
+    try {
+      if (row.activeId) {
+        const confirmed = window.confirm(`确认从购物车永久移出${row.language}版本 ${row.parentId}？`);
+        if (!confirmed) return;
+        if (await triggerNativeCartAction(row.activeId, "remove")) {
+          mutateAccountCartId(row.activeId, null);
+        }
+      } else if (row.laterId) {
+        if (await triggerNativeCartAction(row.laterId, "move")) {
+          mutateAccountCartId(row.laterId, "active");
+        }
+      } else {
+        await postOfficialCartAdd(selectedId);
+        mutateAccountCartId(selectedId, "active");
+        let snapshot;
+        if (isCartPage(location.href)) {
+          const current = latestDealContext.cartSnapshot || loadCartSnapshot();
+          const product = metadataProductFromCache(selectedId) || { id: selectedId };
+          snapshot = saveCartSnapshot({
+            ...current,
+            loaded: true,
+            active: [
+              ...(current.active || current.products || [])
+                .filter((item) => String(item.id).toUpperCase() !== selectedId),
+              product,
+            ],
+            later: (current.later || [])
+              .filter((item) => String(item.id).toUpperCase() !== selectedId),
+          });
+        } else {
+          snapshot = await refreshCartSnapshotAfterAdd();
+        }
+        if (snapshot?.loaded) {
+          latestDealContext = {
+            ...latestDealContext,
+            cartSnapshot: snapshot,
+          };
+          updateAccountIndexCart(
+            (snapshot.active || []).map((item) => item.id),
+            (snapshot.later || []).map((item) => item.id),
+          );
+        }
+      }
+      await refreshOpenLanguageDialog();
+      await refreshAllAccountReminders();
+    } catch (error) {
+      showDealToast(error instanceof Error ? error.message : String(error), true, 7000);
+      throw error;
+    } finally {
+      if (button.isConnected) button.disabled = false;
+      refreshAccountInformationPanels();
+    }
+  }
+
+  function appendLanguageDiscountCell(row, parent) {
+    const rates = [
+      dealNumber(row.insight?.bestReach?.totalRate),
+      dealNumber(row.insight?.bestReach?.saleRate),
+      Number.isFinite(row.record?.lowestPrice) && dealNumber(row.record?.regularPrice) > 0
+        ? (1 - row.record.lowestPrice /
+          Math.max(dealNumber(row.record.regularPrice), dealNumber(row.product?.officialPrice))) * 100
+        : null,
+    ];
+    const max = Math.max(...rates.filter(Number.isFinite));
+    rates.forEach((rate, index) => {
+      if (index) parent.appendChild(document.createTextNode("/"));
+      const span = document.createElement("span");
+      span.textContent = Number.isFinite(rate)
+        ? rate > 0 ? compactOff(rate) : "无折扣"
+        : index === 2 ? "暂无" : "—";
+      if (Number.isFinite(rate) && rate > 0 && Math.abs(rate - max) < 0.01) {
+        span.className = "dltracker-language-best-rate";
+      }
+      parent.appendChild(span);
+    });
+  }
+
+  function languageActionCell(row, state) {
+    const cell = document.createElement("td");
+    if (row.error || row.stopped && !row.activeId) {
+      const disabled = document.createElement("button");
+      disabled.type = "button";
+      disabled.disabled = true;
+      disabled.textContent = row.error ? "读取失败" : "停售";
+      cell.appendChild(disabled);
+      return cell;
+    }
+    if (row.purchased && !row.activeId) {
+      const disabled = document.createElement("button");
+      disabled.type = "button";
+      disabled.disabled = true;
+      disabled.textContent = "已购买";
+      cell.appendChild(disabled);
+      return cell;
+    }
+    if (!row.activeId && !row.laterId && row.purchasableIds.length > 1 && !row.selectedId) {
+      const choose = document.createElement("button");
+      choose.type = "button";
+      choose.textContent = "选择译者";
+      choose.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const select = document.createElement("select");
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "请选择译者";
+        select.appendChild(placeholder);
+        row.purchasableIds.forEach((id) => {
+          const product = row.children.find((child) => child.id === id);
+          const option = document.createElement("option");
+          option.value = id;
+          option.textContent = `${product?.makerName || "译者"}（${id}）`;
+          select.appendChild(option);
+        });
+        select.addEventListener("change", () => {
+          if (!select.value) return;
+          state.selectedByParent[row.parentId] = select.value;
+          void refreshOpenLanguageDialog();
+        });
+        cell.replaceChildren(select);
+        select.focus();
+      });
+      cell.appendChild(choose);
+      return cell;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = row.activeId ? "移出购物车" : "加购物车";
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void performLanguageCartAction(row, button).catch(() => {});
+    });
+    cell.appendChild(button);
+    return cell;
+  }
+
+  async function renderLanguageComparisonDialog() {
+    const state = openLanguageDialogState;
+    const body = document.querySelector(".dltracker-language-dialog-body");
+    if (!state || !body) return;
+    const token = ++state.renderToken;
+    body.textContent = "正在读取语言版本与理论最低价…";
+    const retryParents = Array.isArray(state.retryParents) && state.retryParents.length
+      ? [...state.retryParents]
+      : null;
+    state.retryParents = null;
+    const refreshedRows = await buildLanguageComparisonRows(state, retryParents);
+    const mergedRows = retryParents && state.rows.length
+      ? state.rows.map((row) =>
+          refreshedRows.find((candidate) => candidate.parentId === row.parentId) || row)
+      : refreshedRows;
+    const rows = sortLanguageComparisonRows(mergedRows);
+    if (!openLanguageDialogState || token !== state.renderToken || !body.isConnected) return;
+    state.rows = rows;
+    const cnyRate = currencyRateFromProducts(rows.map((row) => row.product));
+    const winners = new Set(languageWinnerRows(rows).map((row) => row.parentId));
+    const root = document.createDocumentFragment();
+    const conclusion = document.createElement("p");
+    conclusion.className = "dltracker-language-conclusion";
+    conclusion.textContent = languageComparisonConclusion(rows, cnyRate);
+    root.appendChild(conclusion);
+    const wrap = document.createElement("div");
+    wrap.className = "dltracker-language-table-wrap";
+    const table = document.createElement("table");
+    table.className = "dltracker-language-table";
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    ["语言", "作品", "人民币/日元", "现在/平台/史低", "备注", "看详情", "购物车"]
+      .forEach((label) => {
+        const th = document.createElement("th");
+        th.textContent = label;
+        headRow.appendChild(th);
+      });
+    head.appendChild(headRow);
+    const tbody = document.createElement("tbody");
+    for (const row of rows) {
+      const tr = document.createElement("tr");
+      if (winners.has(row.parentId)) tr.classList.add("is-best");
+      if (row.purchased || row.stopped || row.error) tr.classList.add("is-muted");
+      const language = document.createElement("td");
+      language.textContent = row.language;
+      if (row.current) {
+        const badge = document.createElement("small");
+        badge.textContent = "当前";
+        language.appendChild(badge);
+      }
+      if (winners.has(row.parentId)) {
+        const badge = document.createElement("small");
+        badge.textContent = "最优惠";
+        language.appendChild(badge);
+      }
+      const work = document.createElement("td");
+      work.textContent = row.parentId;
+      const price = document.createElement("td");
+      const priceButton = document.createElement("button");
+      priceButton.type = "button";
+      priceButton.className = "dltracker-language-price-button";
+      priceButton.textContent = row.error
+        ? "读取失败"
+        : cartFrameLocalizedMoney(row.theoreticalPrice, cnyRate);
+      priceButton.disabled = Boolean(row.error);
+      if (!row.error) priceButton.addEventListener("click", () => {
+        closeLanguageDialog();
+        openReachDialog(row.insight, row.record?.lowestPrice, "price");
+      });
+      price.appendChild(priceButton);
+      const discounts = document.createElement("td");
+      if (row.error) discounts.textContent = "—/—/—";
+      else {
+        const discountButton = document.createElement("button");
+        discountButton.type = "button";
+        discountButton.className = "dltracker-language-discount-button";
+        appendLanguageDiscountCell(row, discountButton);
+        discountButton.addEventListener("click", () => {
+          closeLanguageDialog();
+          openReachDialog(row.insight, row.record?.lowestPrice, "price");
+        });
+        discounts.appendChild(discountButton);
+      }
+      const note = document.createElement("td");
+      note.textContent = row.error ? "状态：读取失败" : languageRowStatusText(row);
+      const detail = document.createElement("td");
+      const detailLink = document.createElement("a");
+      detailLink.href = languageDetailUrl(row.parentId, row.selectedId);
+      detailLink.target = "_blank";
+      detailLink.rel = "noopener noreferrer";
+      detailLink.textContent = "看详情";
+      detail.appendChild(detailLink);
+      tr.append(language, work, price, discounts, note, detail, languageActionCell(row, state));
+      tbody.appendChild(tr);
+    }
+    table.append(head, tbody);
+    wrap.appendChild(table);
+    root.appendChild(wrap);
+    const failed = rows.filter((row) => row.error);
+    if (failed.length) {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "dltracker-language-retry";
+      retry.textContent = `重试失败项（${failed.length}）`;
+      retry.addEventListener("click", () => {
+        state.retryParents = failed.map((row) => row.parentId);
+        void refreshOpenLanguageDialog();
+      });
+      root.appendChild(retry);
+    }
+    const account = document.createElement("details");
+    account.className = "dltracker-language-account-details";
+    const accountSummary = document.createElement("summary");
+    accountSummary.textContent = "账号信息";
+    const accountPanel = document.createElement("section");
+    renderAccountInformationPanel(accountPanel);
+    account.append(accountSummary, accountPanel);
+    root.appendChild(account);
+    body.replaceChildren(root);
+  }
+
+  function closeLanguageDialog() {
+    if (!openLanguageDialogState) return;
+    openLanguageDialogState.renderToken += 1;
+    openLanguageDialogState = null;
+    document.querySelector(".dltracker-language-overlay")?.remove();
+    unlockReachDialogScroll();
+  }
+
+  async function refreshOpenLanguageDialog() {
+    if (!openLanguageDialogState) return;
+    return renderLanguageComparisonDialog();
+  }
+
+  async function openLanguageComparison(productId, trigger = null) {
+    const id = String(productId || "").toUpperCase();
+    if (!isValidProductCode(id)) return;
+    const originalText = trigger?.textContent;
+    if (trigger) {
+      trigger.disabled = true;
+      trigger.textContent = "正在读取…";
+    }
+    try {
+      const family = await ensureLanguageFamily(id);
+      if (family.editions.length <= 1) {
+        if (trigger) trigger.textContent = "无其他语言";
+        return;
+      }
+      closeAccountInformationDialog();
+      closeReachDialog();
+      openLanguageDialogState = {
+        sourceId: id,
+        family,
+        selectedByParent: {},
+        rows: [],
+        renderToken: 0,
+      };
+      const overlay = document.createElement("div");
+      overlay.className = "dltracker-reach-overlay dltracker-language-overlay";
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) closeLanguageDialog();
+      });
+      const dialog = document.createElement("section");
+      dialog.className = "dltracker-reach-dialog dltracker-language-dialog";
+      dialog.setAttribute("role", "dialog");
+      dialog.setAttribute("aria-modal", "true");
+      dialog.tabIndex = -1;
+      dialog.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") closeLanguageDialog();
+      });
+      const header = document.createElement("header");
+      const title = document.createElement("strong");
+      title.textContent = "语言版本优惠比较";
+      const close = document.createElement("button");
+      close.type = "button";
+      close.textContent = "×";
+      close.setAttribute("aria-label", "关闭");
+      close.addEventListener("click", closeLanguageDialog);
+      header.append(title, close);
+      const body = document.createElement("div");
+      body.className = "dltracker-reach-dialog-body dltracker-language-dialog-body";
+      dialog.append(header, body);
+      overlay.appendChild(dialog);
+      document.body.appendChild(overlay);
+      lockReachDialogScroll();
+      dialog.focus({ preventScroll: true });
+      await renderLanguageComparisonDialog();
+    } catch (error) {
+      showDealToast(error instanceof Error ? error.message : String(error), true, 7000);
+    } finally {
+      if (trigger && trigger.textContent === "正在读取…") {
+        trigger.disabled = false;
+        trigger.textContent = originalText || "比较语言版本";
+      }
+    }
+  }
+
+  function createLanguageComparisonEntry(productId) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "dltracker-language-entry-button";
+    button.dataset.productId = String(productId || "").toUpperCase();
+    const cache = loadLanguageFamilyCache();
+    const familyId = cache.parents[button.dataset.productId];
+    const family = familyId ? cache.families[familyId] : null;
+    const noOther = family && Date.now() - dealNumber(family.fetchedAt) < LANGUAGE_FAMILY_TTL_MS &&
+      family.editions?.length <= 1;
+    button.textContent = noOther ? "无其他语言" : "比较语言版本";
+    button.disabled = Boolean(noOther);
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void openLanguageComparison(button.dataset.productId, button);
+    });
+    return button;
+  }
+
+  function injectCartLanguageEntries() {
+    for (const item of getCartItems()) {
+      if (!isRenderableCartItem(item)) continue;
+      const id = extractRjCodeFromCartItem(item);
+      if (!id) continue;
+      const owner = item.closest("li.cart_list_item, li.n_work_list_item") || item;
+      if (owner.querySelector(":scope .dltracker-language-entry")) continue;
+      const nativeAction = owner.querySelector("a.link_move_later, a.link_move_cart");
+      const nativeHost = nativeAction?.parentElement;
+      const entry = document.createElement("div");
+      entry.className = "dltracker-language-entry";
+      entry.appendChild(createLanguageComparisonEntry(id));
+      if (nativeHost?.parentElement) nativeHost.parentElement.insertBefore(entry, nativeHost);
+      else owner.querySelector(".dltracker-cart-host")?.insertAdjacentElement("beforebegin", entry);
+    }
+  }
+
+  function injectDetailLanguageEntry(productId) {
+    if (!isProductPage(location.href)) return;
+    const host = findProductRenderHost();
+    if (!host) return;
+    let entry = host.querySelector(":scope > .dltracker-language-entry");
+    if (!entry) {
+      entry = document.createElement("div");
+      entry.className = "dltracker-language-entry dltracker-language-entry-detail";
+      host.appendChild(entry);
+    }
+    if (!entry.querySelector(".dltracker-language-entry-button")) {
+      entry.appendChild(createLanguageComparisonEntry(productId));
+    }
+  }
+
   function renderCompactInsight(host, insight) {
     if (!host) return;
     host.querySelector(`.${DEAL_INSIGHT_CLASSNAME}`)?.remove();
@@ -5065,7 +6447,9 @@
       partial.textContent = "部分优惠未确认";
       box.appendChild(partial);
     }
-    host.appendChild(box);
+    const languageEntry = host.querySelector(":scope > .dltracker-language-entry");
+    if (languageEntry) host.insertBefore(box, languageEntry);
+    else host.appendChild(box);
   }
 
   function renderDetailInsight(host, insight) {
@@ -5117,7 +6501,9 @@
       partial.textContent = "部分优惠未确认";
       box.appendChild(partial);
     }
-    host.appendChild(box);
+    const languageEntry = host.querySelector(":scope > .dltracker-language-entry");
+    if (languageEntry) host.insertBefore(box, languageEntry);
+    else host.appendChild(box);
   }
 
   function cartDealStatus(insight) {
@@ -5153,6 +6539,16 @@
     const yen = toYen(rounded);
     return Number.isFinite(cnyRate) && cnyRate > 0
       ? `约${(rounded * cnyRate).toFixed(2)}元（${yen}）`
+      : yen;
+  }
+
+  function cartFrameLocalizedMoney(value, cnyRate = null) {
+    const yenValue = dealNumber(value, NaN);
+    if (!Number.isFinite(yenValue)) return "价格读取中";
+    const rounded = Math.round(yenValue);
+    const yen = toYen(rounded);
+    return Number.isFinite(cnyRate) && cnyRate > 0
+      ? `约${(rounded * cnyRate).toFixed(2)}元/${yen}`
       : yen;
   }
 
@@ -5356,7 +6752,7 @@
             : "",
         ].filter(Boolean).join(" "),
         label: insight.partial ? "当前已知可到" : "本次可到",
-        price: cartLocalizedMoney(reachPrice, cnyRate),
+        price: cartFrameLocalizedMoney(reachPrice, cnyRate),
         rate: insight.bestReach.totalRate,
         onActivate: () => openReachDialog(insight, record.lowestPrice, "price"),
       }));
@@ -5381,7 +6777,7 @@
       price: !insight
         ? "价格读取中"
         : Number.isFinite(record.lowestPrice)
-          ? cartLocalizedMoney(record.lowestPrice, cnyRate)
+          ? cartFrameLocalizedMoney(record.lowestPrice, cnyRate)
           : "暂无数据",
       rate: insight && Number.isFinite(record.lowestPrice) ? historyRate : null,
     }));
@@ -5389,7 +6785,7 @@
       className: "dltracker-cart-platform",
       label: "平台折扣",
       price: insight
-        ? cartLocalizedMoney(insight.product.price, cnyRate)
+        ? cartFrameLocalizedMoney(insight.product.price, cnyRate)
         : "价格读取中",
       rate: insight ? insight.bestReach.saleRate : null,
     }));
@@ -5630,6 +7026,7 @@
     });
     injectBrowseControls();
     await applyBrowseSortAndFilter();
+    await refreshAllAccountReminders();
   }
 
   async function enhanceProductDealDetail(coupons, cartProducts) {
@@ -5657,6 +7054,7 @@
     appendJpyPrice(priceHost, product);
     const renderHost = findProductRenderHost();
     renderDetailInsight(renderHost, insight);
+    injectDetailLanguageEntry(id);
     markDealProcessed(renderHost, id);
   }
 
@@ -5664,6 +7062,11 @@
     if (insightBootstrapInFlight) return insightBootstrapInFlight;
     insightBootstrapInFlight = (async () => {
       invalidateCouponCacheAfterPurchase();
+      try {
+        await ensureInitialAccountIndex();
+      } catch (error) {
+        console.warn(`[${APP_NAME}] initial account index failed:`, error);
+      }
       let rawCoupons = [];
       let dealDataPartial = false;
       try {
@@ -5722,6 +7125,7 @@
       await enhanceGenericBrowseCards(coupons, cartProducts);
       if (isCartPage(location.href)) await sortBuyLaterItems();
       refreshOpenReachDialog();
+      await refreshOpenLanguageDialog();
     })().finally(() => {
       insightBootstrapInFlight = null;
     });
@@ -7934,6 +9338,7 @@
 
     if (!tasks.length) {
       await sortBuyLaterItems();
+      injectCartLanguageEntries();
       return;
     }
 
@@ -7959,6 +9364,7 @@
     });
 
     await sortBuyLaterItems();
+    injectCartLanguageEntries();
   }
 
   function queueCartBootstrap() {
@@ -7983,7 +9389,13 @@
       nextFingerprint !== lastCartSnapshotFingerprint;
     const shouldSave = !hadFingerprint || thresholdChanged;
     lastCartSnapshotFingerprint = nextFingerprint;
-    if (shouldSave) saveCartSnapshot(cartSnapshot);
+    if (shouldSave) {
+      saveCartSnapshot(cartSnapshot);
+      updateAccountIndexCart(
+        cartSnapshot.active.map((item) => item.id),
+        cartSnapshot.later.map((item) => item.id),
+      );
+    }
     if (thresholdChanged) {
       scheduleCartBootstrap();
       return true;
@@ -8349,6 +9761,41 @@
   font-size: 12px;
 }
 
+.dltracker-account-info-button,
+.dltracker-account-refresh,
+.dltracker-language-entry-button,
+.dltracker-language-table button,
+.dltracker-language-retry {
+  border: 1px solid #aebdc6;
+  border-radius: 6px;
+  background: #fff;
+  color: #344b58;
+  cursor: pointer;
+  font: inherit;
+}
+
+.dltracker-account-info-button {
+  min-height: 28px;
+  padding: 3px 10px;
+}
+
+.dltracker-account-info-button:hover,
+.dltracker-account-refresh:hover,
+.dltracker-language-entry-button:hover,
+.dltracker-language-table button:hover,
+.dltracker-language-retry:hover {
+  border-color: #52758a;
+  background: #f2f7fa;
+}
+
+.dltracker-account-info-button:disabled,
+.dltracker-account-refresh:disabled,
+.dltracker-language-entry-button:disabled,
+.dltracker-language-table button:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
 .dltracker-browse-filtered-out {
   display: none !important;
 }
@@ -8389,6 +9836,55 @@ dl > .dltracker-browse-analysis-host {
   gap: 4px;
   color: #40515b;
   font-size: 8px;
+}
+
+.dltracker-account-reminders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: 100%;
+  margin-bottom: 3px;
+}
+
+.dltracker-account-reminder {
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid #bcc9d0;
+  border-radius: 6px;
+  background: #f6f8f9;
+  color: #43535c;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.dltracker-browse-analysis.is-account-purchased {
+  padding: 5px;
+  border: 1px solid #c8ced2;
+  border-radius: 7px;
+  background: #f0f1f2;
+  filter: grayscale(0.38);
+}
+
+.dltracker-language-entry {
+  display: flex;
+  width: 100%;
+  margin: 4px 0;
+  box-sizing: border-box;
+}
+
+.dltracker-language-entry-button {
+  width: 100%;
+  min-height: 27px;
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.dltracker-language-entry-detail {
+  margin-top: 7px;
 }
 
 .dltracker-browse-analysis-grid {
@@ -8643,6 +10139,137 @@ a.dltracker-browse-analysis-frame {
   padding: 12px;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.dltracker-account-dialog {
+  width: min(520px, 100%);
+}
+
+.dltracker-account-info-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dltracker-account-info-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 9px;
+  border-radius: 7px;
+  background: #f4f7f9;
+}
+
+.dltracker-account-info-summary span {
+  white-space: nowrap;
+}
+
+.dltracker-account-refresh {
+  align-self: flex-start;
+  padding: 6px 10px;
+}
+
+.dltracker-language-dialog {
+  width: min(1100px, 100%);
+}
+
+.dltracker-language-conclusion {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: #eef5f8;
+  color: #294c60;
+  font-weight: 700;
+}
+
+.dltracker-language-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.dltracker-language-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+}
+
+.dltracker-language-table th,
+.dltracker-language-table td {
+  padding: 7px 8px;
+  border: 1px solid #d9e1e5;
+  vertical-align: middle;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.dltracker-language-table th {
+  background: #edf3f6;
+  color: #40545f;
+}
+
+.dltracker-language-table tr.is-best:not(.is-muted) td {
+  background: #fff3c4;
+}
+
+.dltracker-language-table tr.is-muted td {
+  background: #eceff1;
+  color: #68757c;
+}
+
+.dltracker-language-table td small {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 4px;
+  border-radius: 999px;
+  background: #d7e6ee;
+  color: #36586b;
+  font-size: 9px;
+}
+
+.dltracker-language-table tr.is-muted td small {
+  background: #fff0b0;
+  color: #6c5200;
+}
+
+.dltracker-language-table button,
+.dltracker-language-table select {
+  min-height: 25px;
+  padding: 3px 7px;
+  font-size: 11px;
+}
+
+.dltracker-language-price-button,
+.dltracker-language-discount-button {
+  white-space: nowrap;
+}
+
+.dltracker-language-best-rate {
+  color: #a14800;
+  font-weight: 800;
+}
+
+.dltracker-language-retry {
+  margin-top: 9px;
+  padding: 5px 9px;
+}
+
+.dltracker-language-account-details {
+  margin-top: 10px;
+  padding: 7px 9px;
+  border: 1px solid #dce4e8;
+  border-radius: 7px;
+  background: #fafcfd;
+}
+
+.dltracker-language-account-details summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.dltracker-language-account-details .dltracker-account-info-panel {
+  margin-top: 9px;
 }
 
 .dltracker-reach-section + .dltracker-reach-section {
