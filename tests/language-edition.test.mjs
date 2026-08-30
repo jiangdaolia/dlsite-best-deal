@@ -48,6 +48,8 @@ vm.runInNewContext(
     normalizedLanguageCode,
     languageDisplayName,
     productLanguageIdentity,
+    productNeedsLanguageFamilyLookup,
+    languageFamilyIdFromEditions,
     cartSkuFromSignals,
     accountEntryFromProduct,
     cartIdsFromMemberStatus,
@@ -62,6 +64,8 @@ vm.runInNewContext(
 const {
   languageDisplayName,
   productLanguageIdentity,
+  productNeedsLanguageFamilyLookup,
+  languageFamilyIdFromEditions,
   cartSkuFromSignals,
   accountEntryFromProduct,
   cartIdsFromMemberStatus,
@@ -91,6 +95,44 @@ test("翻译子 SKU 归并到语言母作品与日文原作家族", () => {
     },
   );
   assert.equal(accountEntryFromProduct(product.id, product).language, "简体中文");
+});
+
+test("RJ01285872这类非日语原作标记改用详情页日语版本作为家族", () => {
+  const product = {
+    id: "RJ01285872",
+    raw: { options: "SND#CHI#CHI_HANS#REV" },
+    translationInfo: {
+      is_original: true,
+      original_workno: null,
+      parent_workno: null,
+      lang: null,
+    },
+  };
+  const identity = productLanguageIdentity(product);
+  assert.equal(identity.lang, "CHI_HANS");
+  assert.equal(identity.familyId, "RJ01285872");
+  assert.equal(productNeedsLanguageFamilyLookup(product), true);
+  const family = {
+    familyId: languageFamilyIdFromEditions(identity, [
+      { parentId: "RJ421140", lang: "JPN", language: "日语" },
+      { parentId: "RJ01285872", lang: "CHI_HANS", language: "简体中文" },
+    ]),
+    editions: [
+      { parentId: "RJ421140", lang: "JPN", language: "日语" },
+      { parentId: "RJ01285872", lang: "CHI_HANS", language: "简体中文" },
+    ],
+  };
+  assert.equal(family.familyId, "RJ421140");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(accountEntryFromProduct(product.id, product, family))),
+    {
+      id: "RJ01285872",
+      parentId: "RJ01285872",
+      familyId: "RJ421140",
+      lang: "CHI_HANS",
+      language: "简体中文",
+    },
+  );
 });
 
 test("语言选择器一次给出父编号、中文语言名和 DLsite 顺序", () => {
@@ -234,7 +276,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 40/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 \* 1000/);
-  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 8/);
+  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 9/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_STORAGE_KEY = "dltracker-account-index-lock-v1"/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_TTL_MS = 60 \* 1000/);
   assert.match(source, /fetchSameOriginText\(url, "作品信息接口", \{\s*anonymous: true/);
@@ -286,6 +328,8 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /retryAccountIndexWriteAfterMetadataPrune\(serialized\)/);
   assert.match(source, /saveAccountIndex\(index, \{\s*throwOnFailure: true/);
   assert.match(source, /const bought = boughtIdsFromPayload\(boughtPayload\)/);
+  assert.match(source, /productNeedsLanguageFamilyLookup\(product\)[\s\S]*?ensureLanguageFamily\(id, \{[\s\S]*?requestSession: "account"/);
+  assert.match(source, /fetchSameOriginText\(url, "语言版本详情", \{\s*anonymous: true,/);
   assert.match(source, /`\$\{label\}请求失败：\$\{error instanceof Error/);
   assert.match(source, /\["状态", index\.loaded \? "正在重新读取…" : "正在读取购物车和已购清单…"\]/);
   assert.match(source, /`读取失败：\$\{accountIndexRuntimeError\}`/);

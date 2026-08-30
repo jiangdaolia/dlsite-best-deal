@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.44
+// @version      0.6.45
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.44";
+  const APP_VERSION = "0.6.45";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -66,7 +66,7 @@
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_SIZE = 40;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
-  const ACCOUNT_INDEX_REQUEST_VERSION = 8;
+  const ACCOUNT_INDEX_REQUEST_VERSION = 9;
   const ACCOUNT_INDEX_LOCK_TTL_MS = 60 * 1000;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
@@ -75,6 +75,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.45": [
+      "兼容RJ01285872这类被作品接口标为原作、实际却是非日语版本的独立翻译作品",
+      "仅对关系不明确的非日语原作匿名读取公开语言选择器并缓存，恢复跨语言已购提醒",
+    ],
     "0.6.44": [
       "购物车立即购买与稍后再买卡片也显示已购买或已购买其他语言版本提醒",
       "账号提醒优先复用当页作品分析数据，元数据缓存清理后也不会漏掉提醒",
@@ -2415,11 +2419,14 @@
     const familyId = String(
       info?.original_workno || (isOriginal ? id : parentId),
     ).toUpperCase() || parentId || id;
-    const lang = normalizedLanguageCode(
-      info?.lang || (isOriginal ? "JPN" : ""),
-      product,
-    );
+    const lang = normalizedLanguageCode(info?.lang, product);
     return { id, parentId, familyId, lang };
+  }
+
+  function productNeedsLanguageFamilyLookup(product) {
+    const info = product?.translationInfo || product?.raw?.translation_info || {};
+    if (!info?.is_original || info?.original_workno || info?.parent_workno) return false;
+    return normalizedLanguageCode(info?.lang, product) !== "JPN";
   }
 
   function cartSkuFromSignals(signals = {}) {
@@ -2612,21 +2619,29 @@
     return emptyAccountIndex();
   }
 
-  function accountEntryFromProduct(id, product) {
+  function accountEntryFromProduct(id, product, family = null) {
     const identity = productLanguageIdentity(product, id);
+    const edition = (family?.editions || []).find((item) =>
+      [identity.id, identity.parentId].includes(String(item?.parentId || "").toUpperCase()));
+    const lang = normalizedLanguageCode(edition?.lang || identity.lang, product);
     return {
       id: String(id || "").toUpperCase(),
       parentId: identity.parentId,
-      familyId: identity.familyId,
-      lang: identity.lang,
-      language: languageDisplayName(identity.lang),
+      familyId: String(family?.familyId || identity.familyId).toUpperCase(),
+      lang,
+      language: languageDisplayName(lang, edition?.language),
     };
   }
 
   function accountEntriesForFamily(familyId, index = loadAccountIndex()) {
     const target = String(familyId || "").toUpperCase();
-    return Object.values(index.entries || {}).filter((entry) =>
-      String(entry?.familyId || "").toUpperCase() === target);
+    const cache = loadLanguageFamilyCache();
+    return Object.values(index.entries || {}).filter((entry) => {
+      const resolved = cache.parents[String(entry?.id || "").toUpperCase()] ||
+        cache.parents[String(entry?.parentId || "").toUpperCase()] ||
+        entry?.familyId;
+      return String(resolved || "").toUpperCase() === target;
+    });
   }
 
   async function fetchSameOriginJson(url, label, options = {}) {
@@ -2803,8 +2818,30 @@
         if (!renewAccountIndexLock()) return loadAccountIndex();
         for (const id of batchIds) {
           const product = metadata.get(id);
-          if (product) entries[id] = accountEntryFromProduct(id, product);
-          else if (!accountIndexSessionStopped) {
+          if (product) {
+            let family = null;
+            if (productNeedsLanguageFamilyLookup(product)) {
+              persistAccountIndex({
+                ...loadAccountIndex(),
+                indexing: true,
+                stage: `解析语言关系 ${id}`,
+                updatedAt: Date.now(),
+              });
+              refreshAccountInformationPanels();
+              try {
+                family = await ensureLanguageFamily(id, {
+                  requestSession: "account",
+                  knownProduct: product,
+                });
+              } catch (error) {
+                console.warn(`[${APP_NAME}] account language family failed for ${id}:`, error);
+                failedIds.push(id);
+              }
+              if (!renewAccountIndexLock()) return loadAccountIndex();
+            }
+            entries[id] = accountEntryFromProduct(id, product, family);
+            if (accountIndexSessionStopped) break;
+          } else if (!accountIndexSessionStopped) {
             entries[id] = accountEntryFromProduct(id, { id });
             failedIds.push(id);
           }
@@ -3010,16 +3047,39 @@
       : [];
   }
 
-  async function ensureLanguageFamily(productId) {
+  function languageFamilyIdFromEditions(identity, editions) {
+    return String(
+      (editions || []).find((entry) => normalizedLanguageCode(entry?.lang) === "JPN")
+        ?.parentId || identity?.familyId || identity?.parentId || identity?.id || "",
+    ).toUpperCase();
+  }
+
+  async function ensureLanguageFamily(
+    productId,
+    { requestSession = "deal", knownProduct = null } = {},
+  ) {
     const id = String(productId || "").toUpperCase();
-    const metadata = await ensureProductMetadataBatches([id]);
+    const metadata = knownProduct
+      ? new Map([[id, knownProduct]])
+      : await ensureProductMetadataBatches([id], { requestSession });
     const product = metadata.get(id) || { id };
     const identity = productLanguageIdentity(product, id);
     const cache = loadLanguageFamilyCache();
     const cachedFamilyId = cache.parents[identity.parentId] || identity.familyId;
     const cached = cache.families[cachedFamilyId];
     if (cached && Date.now() - dealNumber(cached.fetchedAt) < LANGUAGE_FAMILY_TTL_MS) {
-      return cached;
+      const resolvedFamilyId = languageFamilyIdFromEditions(identity, cached.editions);
+      if (resolvedFamilyId === cachedFamilyId) return cached;
+      const migrated = { ...cached, familyId: resolvedFamilyId };
+      cache.families[resolvedFamilyId] = migrated;
+      delete cache.families[cachedFamilyId];
+      (cached.editions || []).forEach((edition) => {
+        cache.parents[edition.parentId] = resolvedFamilyId;
+      });
+      cache.parents[id] = resolvedFamilyId;
+      cache.parents[identity.parentId] = resolvedFamilyId;
+      saveLanguageFamilyCache(cache);
+      return migrated;
     }
     let editions = [];
     const currentId = extractRjCodeFromUrl(location.href);
@@ -3031,12 +3091,15 @@
         `/${currentDlsiteSection()}/work/=/product_id/${identity.parentId}.html`,
         location.origin,
       );
-      const html = await fetchSameOriginText(url, "语言版本详情");
+      const html = await fetchSameOriginText(url, "语言版本详情", {
+        anonymous: true,
+        requestSession,
+      });
       if (!/^\s*</.test(html)) throw new Error("语言版本详情没有返回网页");
       const doc = new DOMParser().parseFromString(html, "text/html");
       editions = languageEditionsFromDocument(doc, identity.parentId);
     }
-    const familyId = identity.familyId || editions.find((entry) => entry.lang === "JPN")?.parentId || identity.parentId;
+    const familyId = languageFamilyIdFromEditions(identity, editions);
     const family = { familyId, fetchedAt: Date.now(), editions };
     cache.families[familyId] = family;
     cache.parents[id] = familyId;
@@ -6264,7 +6327,18 @@
     if (!product) product = (await ensureProductMetadataBatches([id])).get(id);
     if (!product) return null;
     const identity = productLanguageIdentity(product, id);
-    const familyEntries = accountEntriesForFamily(identity.familyId, index);
+    const languageCache = loadLanguageFamilyCache();
+    let familyId = languageCache.parents[id] ||
+      languageCache.parents[identity.parentId] || identity.familyId;
+    if (productNeedsLanguageFamilyLookup(product) && !languageCache.parents[id]) {
+      try {
+        const family = await ensureLanguageFamily(id, { knownProduct: product });
+        familyId = family.familyId;
+      } catch (error) {
+        console.warn(`[${APP_NAME}] card language family failed for ${id}:`, error);
+      }
+    }
+    const familyEntries = accountEntriesForFamily(familyId, index);
     const exactIndexed = index.entries[id];
     const exactKnown = index.active.includes(id) || index.later.includes(id) ||
       index.bought.includes(id);
@@ -6273,7 +6347,7 @@
         ...(exactIndexed || {}),
         id,
         parentId: identity.parentId,
-        familyId: identity.familyId,
+        familyId,
         lang: identity.lang,
         language: languageDisplayName(identity.lang),
       });
@@ -6329,7 +6403,9 @@
         lines.push(parts.join("｜"));
       }
     }
-    return lines.length ? { lines, purchased, carted, identity } : null;
+    return lines.length
+      ? { lines, purchased, carted, identity: { ...identity, familyId } }
+      : null;
   }
 
   async function renderAccountReminderForCard(node, id) {
