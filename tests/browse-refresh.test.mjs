@@ -16,36 +16,11 @@ function functionSource(name) {
   return matched[0];
 }
 
-test("筛选选项未变化时不重建 select", () => {
+test("平台活动和优惠券可以各选一种并按交集筛选", () => {
   const sandbox = {};
   vm.runInNewContext(
-    `${functionSource("browseSelectOptionsMatch")}
-    globalThis.matches = browseSelectOptionsMatch;`,
-    sandbox,
-  );
-  const select = {
-    options: [
-      { value: "all", textContent: "全部作品" },
-      { value: "offer:any", textContent: "所有优惠券和平台活动" },
-    ],
-  };
-  const options = [
-    { value: "all", label: "全部作品" },
-    { value: "offer:any", label: "所有优惠券和平台活动" },
-  ];
-  assert.equal(sandbox.matches(select, options), true);
-  assert.equal(sandbox.matches(select, [...options, { value: "x", label: "X" }]), false);
-  assert.match(
-    functionSource("syncBundleFilterSelect"),
-    /if \(!browseSelectOptionsMatch\(filter, options\)\)/,
-  );
-});
-
-test("优惠券和平台活动筛选覆盖全部优惠券及分类入口", () => {
-  const sandbox = {};
-  vm.runInNewContext(
-    `${functionSource("browseCardMatchesFilter")}
-    globalThis.matches = browseCardMatchesFilter;`,
+    `${functionSource("browseCardMatchesOfferFilters")}
+    globalThis.matches = browseCardMatchesOfferFilters;`,
     sandbox,
   );
   const insight = {
@@ -56,21 +31,26 @@ test("优惠券和平台活动筛选覆盖全部优惠券及分类入口", () =>
       { groupKey: "spend", minSpend: 1200 },
     ],
   };
-  assert.equal(sandbox.matches(insight, "offer:any"), true);
-  assert.equal(sandbox.matches(insight, "coupon:any"), true);
-  assert.equal(sandbox.matches(insight, "activity:any"), true);
-  assert.equal(sandbox.matches(insight, "coupon:no-threshold"), true);
-  assert.equal(sandbox.matches(insight, "coupon:spend"), true);
-  assert.equal(sandbox.matches(insight, "activity:three-works"), true);
-  assert.equal(sandbox.matches(insight, "coupon:missing"), false);
+  assert.equal(sandbox.matches(insight, { activity: "", coupon: "" }), true);
+  assert.equal(sandbox.matches(insight, {
+    activity: "activity:three-works",
+    coupon: "coupon:no-threshold",
+  }), true);
+  assert.equal(sandbox.matches(insight, {
+    activity: "activity:missing",
+    coupon: "coupon:no-threshold",
+  }), false);
+  assert.equal(sandbox.matches(insight, {
+    activity: "activity:three-works",
+    coupon: "coupon:missing",
+  }), false);
 
-  const optionsSource = functionSource("browseBundleFilterOptions");
-  assert.match(optionsSource, /value: "offer:any", label: "所有优惠券和平台活动"/);
-  assert.match(optionsSource, /value: "coupon:any", label: "所有优惠券"/);
-  assert.match(optionsSource, /value: "activity:any", label: "所有平台活动"/);
-  assert.doesNotMatch(optionsSource, /if \(coupon\.minCount <= 1\) continue/);
-  assert.match(functionSource("injectBrowseControls"), /优惠券和平台活动/);
-  assert.match(functionSource("injectBuyLaterSortToggle"), /优惠券和平台活动/);
+  const dialogSource = functionSource("openBrowseOfferFilterDialog");
+  assert.match(dialogSource, /不选择平台活动/);
+  assert.match(dialogSource, /不选择优惠券/);
+  assert.match(dialogSource, /setBrowseOfferFilters\(activityField\.select\.value, couponField\.select\.value\)/);
+  assert.match(functionSource("injectBrowseControls"), /dltracker-offer-filter-button/);
+  assert.match(functionSource("injectBuyLaterSortToggle"), /dltracker-offer-filter-button/);
 });
 
 test("具体优惠券和平台活动按优惠力度降序且同力度稳定", () => {
@@ -91,8 +71,8 @@ test("具体优惠券和平台活动按优惠力度降序且同力度稳定", ()
     ["activity:60", "coupon:50-a", "coupon:50-b", "coupon:30"],
   );
   assert.match(
-    functionSource("browseBundleFilterOptions"),
-    /options\.push\(\.\.\.sortBrowseOfferFilterOptions\(offerOptions\)/,
+    functionSource("browseOfferFilterChoices"),
+    /const sorted = sortBrowseOfferFilterOptions\(offerOptions\)/,
   );
 });
 
@@ -114,14 +94,13 @@ test("浏览排序控件已在原生排序区后方时不重复插入自身", ()
   );
 });
 
-test("稍后再买复用浏览列表的凑单筛选", () => {
+test("稍后再买复用浏览列表的活动与优惠券按钮筛选", () => {
   const controlsSource = functionSource("injectBuyLaterSortToggle");
   const filterSource = functionSource("applyBuyLaterBundleFilter");
   const sortSource = functionSource("sortBuyLaterItems");
-  assert.match(controlsSource, /dltracker-buy-later-filter-select/);
-  assert.match(controlsSource, /setBrowseBundleFilter\(filterSelect\.value\)/);
-  assert.match(filterSource, /syncBundleFilterSelect\(filter, cards\)/);
-  assert.match(filterSource, /browseCardMatchesFilter\(insight, selected\)/);
+  assert.match(controlsSource, /dltracker-offer-filter-button/);
+  assert.match(filterSource, /syncBrowseOfferFilterButtons\(cards\)/);
+  assert.match(filterSource, /browseCardMatchesOfferFilters\(insight, selected\)/);
   assert.match(filterSource, /dltracker-buy-later-filtered-out/);
   assert.match(sortSource, /applyBuyLaterBundleFilter\(ownerItems\)/);
   assert.match(source, /\.dltracker-buy-later-filtered-out \{\s*display: none !important;/);

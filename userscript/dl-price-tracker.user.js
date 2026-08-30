@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.54
+// @version      0.6.55
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.54";
+  const APP_VERSION = "0.6.55";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -48,6 +48,8 @@
   const BUY_LATER_SORT_MODE_PLATFORM_EXPIRY = "platform-expiry";
   const BROWSE_SORT_MODE_STORAGE_KEY = "dltracker-browse-sort-mode";
   const BROWSE_FILTER_STORAGE_KEY = "dltracker-browse-bundle-filter";
+  const BROWSE_ACTIVITY_FILTER_STORAGE_KEY = "dltracker-browse-activity-filter";
+  const BROWSE_COUPON_FILTER_STORAGE_KEY = "dltracker-browse-coupon-filter";
   const BROWSE_HIDE_PURCHASED_STORAGE_KEY = "dltracker-browse-hide-purchased";
   const BROWSE_HIDE_CARTED_STORAGE_KEY = "dltracker-browse-hide-carted";
   const BROWSE_SORT_MODE_NATIVE = "native";
@@ -77,6 +79,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.55": [
+      "优惠筛选改为按钮弹窗，平台活动和优惠券可以各选一种",
+      "活动与券按交集筛选，两项都不选时显示全部作品",
+    ],
     "0.6.54": [
       "具体优惠券和平台活动按显示的优惠力度从高到低排列",
       "同力度优惠保持稳定顺序，四个总筛选入口仍固定在顶部",
@@ -3818,6 +3824,12 @@
         ? event.target.closest("button, a, input[type='button'], input[type='submit']")
         : null;
       if (!target) return;
+      if (target.matches(".dltracker-offer-filter-button")) {
+        event.preventDefault();
+        event.stopPropagation();
+        openBrowseOfferFilterDialog();
+        return;
+      }
       if (target.matches(".dltracker-account-info-button")) {
         event.preventDefault();
         event.stopPropagation();
@@ -4267,19 +4279,31 @@
     }
   }
 
-  function getBrowseBundleFilter() {
+  function getBrowseOfferFilters() {
     try {
-      const value = localStorage.getItem(BROWSE_FILTER_STORAGE_KEY) || "all";
-      // 旧版“所有需要凑单的优惠”平滑迁移为全部优惠券和平台活动。
-      return value === "bundle" ? "offer:any" : value;
+      const storedActivity = localStorage.getItem(BROWSE_ACTIVITY_FILTER_STORAGE_KEY);
+      const storedCoupon = localStorage.getItem(BROWSE_COUPON_FILTER_STORAGE_KEY);
+      if (storedActivity !== null || storedCoupon !== null) {
+        return {
+          activity: storedActivity || "",
+          coupon: storedCoupon || "",
+        };
+      }
+      const legacy = localStorage.getItem(BROWSE_FILTER_STORAGE_KEY) || "";
+      return {
+        activity: legacy.startsWith("activity:") ? legacy : "",
+        coupon: legacy.startsWith("coupon:") ? legacy : "",
+      };
     } catch {
-      return "all";
+      return { activity: "", coupon: "" };
     }
   }
 
-  function setBrowseBundleFilter(value) {
+  function setBrowseOfferFilters(activity, coupon) {
     try {
-      localStorage.setItem(BROWSE_FILTER_STORAGE_KEY, value || "all");
+      localStorage.setItem(BROWSE_ACTIVITY_FILTER_STORAGE_KEY, activity || "");
+      localStorage.setItem(BROWSE_COUPON_FILTER_STORAGE_KEY, coupon || "");
+      localStorage.removeItem(BROWSE_FILTER_STORAGE_KEY);
     } catch {
       // noop
     }
@@ -4361,22 +4385,18 @@
       .forEach(({ node }) => syncBrowseCardVisibility(node));
   }
 
-  function browseCardMatchesFilter(insight, filter) {
-    if (filter === "all") return true;
+  function browseCardMatchesOfferFilters(insight, filters) {
+    const activity = String(filters?.activity || "");
+    const coupon = String(filters?.coupon || "");
     const couponOptions = insight?.couponOptions || [];
     const hasActivity = Boolean(insight?.bulkRule && insight?.product?.bulkbuyKey);
-    if (filter === "offer:any") return hasActivity || couponOptions.length > 0;
-    if (filter === "coupon:any") return couponOptions.length > 0;
-    if (filter === "activity:any") return hasActivity;
-    if (filter.startsWith("activity:")) {
-      return hasActivity &&
-        String(insight?.product?.bulkbuyKey || "") === filter.slice(9);
-    }
-    if (filter.startsWith("coupon:")) {
-      return couponOptions.some((coupon) =>
-        String(coupon.groupKey || coupon.id) === filter.slice(7));
-    }
-    return true;
+    const activityMatches = !activity || (
+      hasActivity &&
+      activity === `activity:${String(insight?.product?.bulkbuyKey || "")}`
+    );
+    const couponMatches = !coupon || couponOptions.some((option) =>
+      coupon === `coupon:${String(option.groupKey || option.id)}`);
+    return activityMatches && couponMatches;
   }
 
   function stampBrowseOriginalOrder(cards) {
@@ -4410,11 +4430,11 @@
     if (!cards.length) return;
     stampBrowseOriginalOrder(cards);
     const mode = getBrowseSortMode();
-    const filter = getBrowseBundleFilter();
+    const filters = getBrowseOfferFilters();
     const grouped = new Map();
     for (const { id, node } of cards) {
       const insight = dealInsightById.get(String(id).toUpperCase());
-      const bundleHidden = !browseCardMatchesFilter(insight, filter);
+      const bundleHidden = !browseCardMatchesOfferFilters(insight, filters);
       node.classList.toggle("dltracker-browse-filtered-out", bundleHidden);
       syncBrowseCardVisibility(node);
       const parent = node.parentElement;
@@ -4455,17 +4475,11 @@
       (a.order || 0) - (b.order || 0));
   }
 
-  function browseBundleFilterOptions(cards) {
+  function browseOfferFilterChoices(cards) {
     const active = latestDealContext.cartSnapshot.active || [];
     const activeSubtotal = active.reduce((sum, item) =>
       sum + Math.max(0, dealNumber(item?.price)), 0);
-    const options = [
-      { value: "all", label: "全部作品" },
-      { value: "offer:any", label: "所有优惠券和平台活动" },
-      { value: "coupon:any", label: "所有优惠券" },
-      { value: "activity:any", label: "所有平台活动" },
-    ];
-    const seen = new Set(options.map((option) => option.value));
+    const seen = new Set();
     const offerOptions = [];
     const cacheRules = loadDealCache().bulkRules || {};
     for (const [key, rule] of Object.entries(cacheRules)) {
@@ -4509,11 +4523,14 @@
         order: offerOptions.length,
       });
     }
-    options.push(...sortBrowseOfferFilterOptions(offerOptions).map(({ value, label }) => ({
+    const sorted = sortBrowseOfferFilterOptions(offerOptions).map(({ value, label }) => ({
       value,
       label,
-    })));
-    return options;
+    }));
+    return {
+      activities: sorted.filter((option) => option.value.startsWith("activity:")),
+      coupons: sorted.filter((option) => option.value.startsWith("coupon:")),
+    };
   }
 
   function browseControlsInsertionBefore(group, controls) {
@@ -4548,34 +4565,140 @@
     return list ? { parent: list, before: first } : null;
   }
 
-  function browseSelectOptionsMatch(select, options) {
-    if (!select || select.options.length !== options.length) return false;
-    return options.every((option, index) =>
-      select.options[index]?.value === option.value &&
-      select.options[index]?.textContent === option.label);
+  function resolveBrowseOfferFilterState(cards, resetMissing = true) {
+    const choices = browseOfferFilterChoices(cards);
+    const filters = getBrowseOfferFilters();
+    const activityValid = !filters.activity || choices.activities.some((option) =>
+      option.value === filters.activity);
+    const couponValid = !filters.coupon || choices.coupons.some((option) =>
+      option.value === filters.coupon);
+    if (resetMissing && (!activityValid || !couponValid)) {
+      const next = {
+        activity: activityValid ? filters.activity : "",
+        coupon: couponValid ? filters.coupon : "",
+      };
+      setBrowseOfferFilters(next.activity, next.coupon);
+      showDealToast("已选优惠券或平台活动已失效，已取消对应筛选", false, 5000);
+      return { choices, filters: next };
+    }
+    return { choices, filters };
   }
 
-  function syncBundleFilterSelect(filter, cards, resetMissing = true) {
-    if (!filter) return;
-    const options = browseBundleFilterOptions(cards);
-    const selected = getBrowseBundleFilter();
-    if (!browseSelectOptionsMatch(filter, options)) {
-      filter.replaceChildren(...options.map((option) => {
-        const node = document.createElement("option");
-        node.value = option.value;
-        node.textContent = option.label;
-        return node;
-      }));
+  function syncBrowseOfferFilterButtons(cards, resetMissing = true) {
+    const { choices, filters } = resolveBrowseOfferFilterState(cards, resetMissing);
+    const selected = [filters.activity, filters.coupon].filter(Boolean);
+    const labels = [...choices.activities, ...choices.coupons]
+      .filter((option) => selected.includes(option.value))
+      .map((option) => option.label);
+    for (const button of document.querySelectorAll(".dltracker-offer-filter-button")) {
+      button.textContent = `优惠券和平台活动${selected.length ? `（已选${selected.length}项）` : ""}`;
+      button.title = labels.length ? labels.join("\n") : "未选择平台活动或优惠券";
+      button.classList.toggle("is-active", selected.length > 0);
     }
-    if (options.some((option) => option.value === selected)) {
-      filter.value = selected;
-    } else if (resetMissing) {
-      filter.value = "all";
-      setBrowseBundleFilter("all");
-      showDealToast("已选优惠券或平台活动已失效，已恢复全部作品", false, 5000);
-    } else {
-      filter.value = "all";
+  }
+
+  function closeBrowseOfferFilterDialog() {
+    const overlay = document.querySelector(".dltracker-offer-filter-overlay");
+    if (!overlay) return;
+    overlay.remove();
+    unlockReachDialogScroll();
+  }
+
+  function browseOfferFilterCardsForPage() {
+    return isCartPage(location.href)
+      ? buyLaterBrowseCards()
+      : collectBrowseCards().filter(({ cartItem }) => !cartItem);
+  }
+
+  function createBrowseOfferFilterSelect(label, emptyLabel, options, selected) {
+    const wrap = document.createElement("label");
+    wrap.className = "dltracker-offer-filter-field";
+    const title = document.createElement("strong");
+    title.textContent = label;
+    const select = document.createElement("select");
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = emptyLabel;
+    select.appendChild(empty);
+    for (const option of options) {
+      const node = document.createElement("option");
+      node.value = option.value;
+      node.textContent = option.label;
+      select.appendChild(node);
     }
+    select.value = options.some((option) => option.value === selected) ? selected : "";
+    wrap.append(title, select);
+    return { wrap, select };
+  }
+
+  function openBrowseOfferFilterDialog() {
+    closeReachDialog();
+    closeBrowseOfferFilterDialog();
+    const cards = browseOfferFilterCardsForPage();
+    const { choices, filters } = resolveBrowseOfferFilterState(cards, false);
+    const overlay = document.createElement("div");
+    overlay.className = "dltracker-reach-overlay dltracker-offer-filter-overlay";
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) closeBrowseOfferFilterDialog();
+    });
+    const dialog = document.createElement("section");
+    dialog.className = "dltracker-reach-dialog dltracker-offer-filter-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.tabIndex = -1;
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeBrowseOfferFilterDialog();
+    });
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    title.textContent = "优惠券和平台活动";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "关闭");
+    close.addEventListener("click", closeBrowseOfferFilterDialog);
+    header.append(title, close);
+    const form = document.createElement("form");
+    form.className = "dltracker-reach-dialog-body dltracker-offer-filter-form";
+    const activityField = createBrowseOfferFilterSelect(
+      "平台活动",
+      "不选择平台活动",
+      choices.activities,
+      filters.activity,
+    );
+    const couponField = createBrowseOfferFilterSelect(
+      "优惠券",
+      "不选择优惠券",
+      choices.coupons,
+      filters.coupon,
+    );
+    const hint = document.createElement("p");
+    hint.textContent = "活动和优惠券同时选择时，只显示两项都适用的作品；两项都不选则显示全部作品。";
+    const actions = document.createElement("div");
+    actions.className = "dltracker-offer-filter-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", closeBrowseOfferFilterDialog);
+    const apply = document.createElement("button");
+    apply.type = "submit";
+    apply.className = "is-primary";
+    apply.textContent = "应用筛选";
+    actions.append(cancel, apply);
+    form.append(activityField.wrap, couponField.wrap, hint, actions);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      setBrowseOfferFilters(activityField.select.value, couponField.select.value);
+      closeBrowseOfferFilterDialog();
+      syncBrowseOfferFilterButtons(cards);
+      if (isCartPage(location.href)) void sortBuyLaterItems();
+      else void applyBrowseSortAndFilter();
+    });
+    dialog.append(header, form);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    lockReachDialogScroll();
+    dialog.focus({ preventScroll: true });
   }
 
   function injectBrowseControls(resetMissing = true) {
@@ -4604,20 +4727,15 @@
         void applyBrowseSortAndFilter();
       });
       sortLabel.appendChild(sort);
-      const filterLabel = document.createElement("label");
-      filterLabel.textContent = "优惠券和平台活动 ";
-      const filter = document.createElement("select");
-      filter.className = "dltracker-browse-filter";
-      filter.addEventListener("change", () => {
-        setBrowseBundleFilter(filter.value);
-        void applyBrowseSortAndFilter();
-      });
-      filterLabel.appendChild(filter);
+      const offerFilterButton = document.createElement("button");
+      offerFilterButton.type = "button";
+      offerFilterButton.className = "dltracker-offer-filter-button";
+      offerFilterButton.textContent = "优惠券和平台活动";
       const accountButton = document.createElement("button");
       accountButton.type = "button";
       accountButton.className = "dltracker-account-info-button";
       accountButton.textContent = "账号信息";
-      controls.append(sortLabel, filterLabel, accountButton);
+      controls.append(sortLabel, offerFilterButton, accountButton);
     }
     if (anchor.before !== controls &&
       (controls.parentElement !== anchor.parent ||
@@ -4626,7 +4744,6 @@
     }
     const sort = controls.querySelector(".dltracker-browse-sort");
     if (sort) sort.value = getBrowseSortMode();
-    const filter = controls.querySelector(".dltracker-browse-filter");
     let purchasedButton = controls.querySelector(".dltracker-hide-purchased-button");
     if (!purchasedButton) {
       purchasedButton = document.createElement("button");
@@ -4642,7 +4759,7 @@
       controls.appendChild(cartedButton);
     }
     syncBrowseAccountVisibilityButtons();
-    syncBundleFilterSelect(filter, cards, resetMissing);
+    syncBrowseOfferFilterButtons(cards, resetMissing);
   }
 
   function detailProductFromDom(id) {
@@ -9288,27 +9405,13 @@
       modeWrap.appendChild(modeLabel);
       modeWrap.appendChild(modeSelect);
 
-      const filterWrap = document.createElement("label");
+      const filterWrap = document.createElement("div");
       filterWrap.className = "dltracker-buy-later-filter";
-
-      const filterLabel = document.createElement("span");
-      filterLabel.textContent = "优惠券和平台活动";
-
-      const filterSelect = document.createElement("select");
-      filterSelect.className = "dltracker-buy-later-filter-select";
-      filterSelect.innerHTML = `
-        <option value="all">全部作品</option>
-        <option value="offer:any">所有优惠券和平台活动</option>
-        <option value="coupon:any">所有优惠券</option>
-        <option value="activity:any">所有平台活动</option>
-      `;
-      filterSelect.addEventListener("change", () => {
-        setBrowseBundleFilter(filterSelect.value);
-        void sortBuyLaterItems();
-      });
-
-      filterWrap.appendChild(filterLabel);
-      filterWrap.appendChild(filterSelect);
+      const offerFilterButton = document.createElement("button");
+      offerFilterButton.type = "button";
+      offerFilterButton.className = "dltracker-offer-filter-button";
+      offerFilterButton.textContent = "优惠券和平台活动";
+      filterWrap.appendChild(offerFilterButton);
 
       controls.appendChild(toggle);
       controls.appendChild(modeWrap);
@@ -9333,9 +9436,6 @@
       ".dltracker-buy-later-mode-select",
     );
     const modeWrap = controls.querySelector(".dltracker-buy-later-mode");
-    const filterSelect = controls.querySelector(
-      ".dltracker-buy-later-filter-select",
-    );
 
     if (input) {
       input.checked = isBuyLaterSortEnabled();
@@ -9347,9 +9447,7 @@
     if (modeWrap && modeSelect) {
       modeWrap.classList.toggle("is-disabled", modeSelect.disabled);
     }
-    if (filterSelect && !filterSelect.value) {
-      filterSelect.value = "all";
-    }
+    syncBrowseOfferFilterButtons(buyLaterBrowseCards(), false);
   }
 
   function getCartOwnerItem(item) {
@@ -9395,16 +9493,13 @@
       dealInsightById.has(String(id).toUpperCase()));
     if (!hasInsights) return;
 
-    const filter = document.querySelector(
-      ".dltracker-buy-later-filter-select",
-    );
-    syncBundleFilterSelect(filter, cards);
-    const selected = getBrowseBundleFilter();
+    syncBrowseOfferFilterButtons(cards);
+    const selected = getBrowseOfferFilters();
     for (const { id, node } of cards) {
       const insight = dealInsightById.get(String(id).toUpperCase());
       node.classList.toggle(
         "dltracker-buy-later-filtered-out",
-        !browseCardMatchesFilter(insight, selected),
+        !browseCardMatchesOfferFilters(insight, selected),
       );
     }
   }
@@ -11079,6 +11174,7 @@
 }
 
 .dltracker-account-info-button,
+.dltracker-offer-filter-button,
 .dltracker-hide-purchased-button,
 .dltracker-hide-carted-button,
 .dltracker-account-refresh,
@@ -11096,6 +11192,17 @@
 .dltracker-account-info-button {
   min-height: 28px;
   padding: 3px 10px;
+}
+
+.dltracker-browse-controls > .dltracker-offer-filter-button {
+  min-height: 28px;
+  padding: 3px 10px;
+}
+
+.dltracker-offer-filter-button.is-active {
+  border-color: #3f7a99;
+  background: #e9f4fa;
+  color: #245b78;
 }
 
 .dltracker-hide-purchased-button,
@@ -11510,6 +11617,60 @@ a.dltracker-browse-analysis-frame {
 
 .dltracker-account-dialog {
   width: min(520px, 100%);
+}
+
+.dltracker-offer-filter-dialog {
+  width: min(520px, 100%);
+}
+
+.dltracker-offer-filter-form {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.dltracker-offer-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.dltracker-offer-filter-field select {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid #bdc9d0;
+  border-radius: 6px;
+  background: #fff;
+  color: #34434c;
+  font-size: 12px;
+}
+
+.dltracker-offer-filter-form p {
+  margin: 0;
+  color: #64727a;
+  font-size: 11px;
+}
+
+.dltracker-offer-filter-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dltracker-offer-filter-actions button {
+  min-height: 30px;
+  border: 1px solid #aebdc6;
+  border-radius: 6px;
+  padding: 4px 12px;
+  background: #fff;
+  color: #344b58;
+  cursor: pointer;
+}
+
+.dltracker-offer-filter-actions button.is-primary {
+  border-color: #3f6074;
+  background: #3f6074;
+  color: #fff;
 }
 
 .dltracker-account-info-panel {
@@ -12197,8 +12358,7 @@ a.dltracker-cart-deal-frame:focus-visible {
   opacity: 0.55;
 }
 
-.dltracker-buy-later-mode .dltracker-buy-later-mode-select,
-.dltracker-buy-later-filter .dltracker-buy-later-filter-select {
+.dltracker-buy-later-mode .dltracker-buy-later-mode-select {
   height: 22px;
   max-width: min(68vw, 290px);
   padding: 0 6px;
@@ -12206,6 +12366,17 @@ a.dltracker-cart-deal-frame:focus-visible {
   border: 1px solid #c9c9c9;
   background: #fff;
   color: #444;
+  font-size: 12px;
+}
+
+.dltracker-buy-later-filter .dltracker-offer-filter-button {
+  min-height: 22px;
+  border: 1px solid #c9c9c9;
+  border-radius: 6px;
+  padding: 0 7px;
+  background: #fff;
+  color: #444;
+  cursor: pointer;
   font-size: 12px;
 }
 
