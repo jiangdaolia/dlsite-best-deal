@@ -161,10 +161,22 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 40/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 \* 1000/);
+  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 2/);
+  assert.match(source, /fetchSameOriginText\(url, "作品信息接口", \{\s*anonymous: true/);
+  assert.match(source, /credentials: anonymous \? "omit" : "include"/);
+  assert.match(source, /anonymous \? \{ referrerPolicy: "no-referrer" \} : \{\}/);
+  assert.match(
+    functionSource("enhanceDealInsights"),
+    /await enhanceGenericBrowseCards[\s\S]*?void ensureInitialAccountIndex\(\)[\s\S]*?refreshAllAccountReminders/,
+  );
+  assert.doesNotMatch(
+    functionSource("enhanceDealInsights"),
+    /\(async \(\) => \{\s*invalidateCouponCacheAfterPurchase\(\);\s*try \{\s*await ensureInitialAccountIndex/,
+  );
   assert.match(source, /loaded: true,[\s\S]*?total: ids\.length,[\s\S]*?refreshAccountInformationPanels\(\);[\s\S]*?for \(let start = 0; start < ids\.length/);
   assert.match(source, /start \+= ACCOUNT_METADATA_BATCH_SIZE[\s\S]*?slice\(start, start \+ ACCOUNT_METADATA_BATCH_SIZE\)/);
   assert.match(source, /ids\.length && next\.indexed === 0[\s\S]*?语言索引未取得任何作品信息/);
-  assert.match(source, /index\.loaded && !index\.complete && processed < index\.total && !index\.pausedReason[\s\S]*?return refreshAccountIndex\(\)/);
+  assert.match(source, /requestStrategyChanged = dealNumber\(index\.requestVersion\)[\s\S]*?\(!index\.pausedReason \|\| requestStrategyChanged\)[\s\S]*?return refreshAccountIndex\(\)/);
   assert.match(source, /语言索引已暂停：[\s\S]*?剩余\$\{remaining\}项/);
   assert.match(source, /已暂停，剩余\$\{remaining\}项/);
   assert.match(source, /pausedReason: dealSessionStopped \? dealSessionStopReason : ""/);

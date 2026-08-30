@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.37
+// @version      0.6.38
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.37";
+  const APP_VERSION = "0.6.38";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -65,6 +65,7 @@
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_SIZE = 40;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
+  const ACCOUNT_INDEX_REQUEST_VERSION = 2;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
@@ -72,6 +73,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.38": [
+      "公开作品信息批量请求不再携带登录Cookie，旧的0/88暂停状态会自动匿名重试一次",
+      "账号索引与账号提醒改为页面优惠渲染完成后的后台任务，不再阻塞购物车和浏览页",
+    ],
     "0.6.37": [
       "账号语言索引改为每批40部且批间等待10秒，避免88部单请求被DLsite拒绝",
     ],
@@ -2075,10 +2080,11 @@
     }, durationMs);
   }
 
-  async function fetchSameOriginText(url, label) {
+  async function fetchSameOriginText(url, label, { anonymous = false } = {}) {
     if (dealSessionStopped) throw new Error("本页请求已因风控信号停止");
     const response = await fetch(url, {
-      credentials: "include",
+      credentials: anonymous ? "omit" : "include",
+      ...(anonymous ? { referrerPolicy: "no-referrer" } : {}),
       headers: { Accept: "application/json, text/html;q=0.9" },
     });
     const text = await response.text();
@@ -2240,7 +2246,9 @@
     const url = new URL(DLSITE_PRODUCT_INFO_PATH, location.origin);
     url.searchParams.set("product_id", batch.join(","));
     try {
-      const text = await fetchSameOriginText(url, "作品信息接口");
+      const text = await fetchSameOriginText(url, "作品信息接口", {
+        anonymous: true,
+      });
       let payload;
       try {
         payload = JSON.parse(text);
@@ -2401,6 +2409,7 @@
       lastManualAt: 0,
       accountFingerprint: "",
       pausedReason: "",
+      requestVersion: 0,
     };
   }
 
@@ -2514,7 +2523,13 @@
     }
     accountIndexRuntimeError = "";
     const manualStartedAt = manual ? Date.now() : dealNumber(previous.lastManualAt);
-    if (manual) saveAccountIndex({ ...previous, lastManualAt: manualStartedAt });
+    if (manual || dealNumber(previous.requestVersion) < ACCOUNT_INDEX_REQUEST_VERSION) {
+      saveAccountIndex({
+        ...previous,
+        lastManualAt: manualStartedAt,
+        requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
+      });
+    }
     accountIndexRefreshInFlight = (async () => {
       if (!isDlsiteMemberLoggedIn()) return clearAccountIndex();
       const section = currentDlsiteSection();
@@ -2563,6 +2578,7 @@
         lastManualAt: manualStartedAt,
         accountFingerprint: fingerprint,
         pausedReason: "",
+        requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
       });
       refreshAccountInformationPanels();
       for (let start = 0; start < ids.length; start += ACCOUNT_METADATA_BATCH_SIZE) {
@@ -2590,6 +2606,7 @@
           updatedAt: Date.now(),
           lastManualAt: manualStartedAt,
           accountFingerprint: fingerprint,
+          requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
         });
         refreshAccountInformationPanels();
         if (dealSessionStopped) {
@@ -2618,6 +2635,7 @@
         lastManualAt: manualStartedAt,
         accountFingerprint: fingerprint,
         pausedReason: dealSessionStopped ? dealSessionStopReason : "",
+        requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
       };
       if (ids.length && next.indexed === 0 && !accountIndexRuntimeError) {
         accountIndexRuntimeError = "语言索引未取得任何作品信息，请稍后重新读取";
@@ -2664,7 +2682,10 @@
       return refreshAccountIndex();
     }
     const processed = Object.keys(index.entries || {}).length;
-    if (index.loaded && !index.complete && processed < index.total && !index.pausedReason) {
+    const requestStrategyChanged = dealNumber(index.requestVersion) <
+      ACCOUNT_INDEX_REQUEST_VERSION;
+    if (index.loaded && !index.complete && processed < index.total &&
+      (!index.pausedReason || requestStrategyChanged)) {
       return refreshAccountIndex();
     }
     if (!index.loaded) return refreshAccountIndex();
@@ -7491,7 +7512,9 @@
     });
     injectBrowseControls();
     await applyBrowseSortAndFilter();
-    await refreshAllAccountReminders();
+    void refreshAllAccountReminders().catch((error) => {
+      console.warn(`[${APP_NAME}] account reminder refresh failed:`, error);
+    });
   }
 
   async function enhanceProductDealDetail(coupons, cartProducts) {
@@ -7527,11 +7550,6 @@
     if (insightBootstrapInFlight) return insightBootstrapInFlight;
     insightBootstrapInFlight = (async () => {
       invalidateCouponCacheAfterPurchase();
-      try {
-        await ensureInitialAccountIndex();
-      } catch (error) {
-        console.warn(`[${APP_NAME}] initial account index failed:`, error);
-      }
       let rawCoupons = [];
       let dealDataPartial = false;
       try {
@@ -7591,6 +7609,16 @@
       if (isCartPage(location.href)) await sortBuyLaterItems();
       refreshOpenReachDialog();
       await refreshOpenLanguageDialog();
+      // 账号索引可能需要多批串行请求和安全间隔；
+      // 先完成当页价格与优惠渲染，再在后台更新账号提醒。
+      void ensureInitialAccountIndex()
+        .then(async () => {
+          await refreshAllAccountReminders();
+          await refreshOpenLanguageDialog();
+        })
+        .catch((error) => {
+          console.warn(`[${APP_NAME}] initial account index failed:`, error);
+        });
     })().finally(() => {
       insightBootstrapInFlight = null;
     });
