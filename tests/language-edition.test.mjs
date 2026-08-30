@@ -156,12 +156,67 @@ test("当前语言固定第一行，最优惠按理论日元价允许并列", ()
   );
 });
 
+test("账号索引写入超出配额时清理最旧作品元数据并重试", () => {
+  const values = new Map();
+  const metadata = Object.fromEntries(Array.from({ length: 41 }, (_, index) => [
+    `RJ${String(index).padStart(8, "0")}`,
+    { fetchedAt: index + 1, raw: { value: "x".repeat(50) } },
+  ]));
+  values.set("deal-cache", JSON.stringify({
+    coupons: { loaded: true, raw: [] },
+    metadata,
+    bulkRules: {},
+  }));
+  const quotaSandbox = {
+    console: { warn() {} },
+    localStorage: {
+      getItem(key) {
+        return values.get(key) || null;
+      },
+      setItem(key, value) {
+        if (key === "account-index") {
+          const cache = JSON.parse(values.get("deal-cache"));
+          if (Object.keys(cache.metadata).length > 1) {
+            const error = new Error("storage quota reached");
+            error.name = "QuotaExceededError";
+            throw error;
+          }
+        }
+        values.set(key, value);
+      },
+    },
+    loadDealCache() {
+      return JSON.parse(values.get("deal-cache"));
+    },
+    dealNumber(value, fallback = 0) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    },
+  };
+  vm.runInNewContext(`
+    const APP_NAME = "test";
+    const DEAL_CACHE_STORAGE_KEY = "deal-cache";
+    const ACCOUNT_INDEX_STORAGE_KEY = "account-index";
+    let accountIndexRuntimeError = "";
+    ${functionSource("storageQuotaExceeded")}
+    ${functionSource("retryAccountIndexWriteAfterMetadataPrune")}
+    ${functionSource("saveAccountIndex")}
+    globalThis.saveAccountIndexForTest = saveAccountIndex;
+  `, quotaSandbox);
+  quotaSandbox.saveAccountIndexForTest({ indexed: 40 }, { throwOnFailure: true });
+  assert.equal(JSON.parse(values.get("account-index")).indexed, 40);
+  assert.equal(
+    Object.keys(JSON.parse(values.get("deal-cache")).metadata).length,
+    1,
+  );
+});
+
 test("语言比较使用七列表、账号冷却与官方单件购物车请求", () => {
   assert.match(source, /"语言", "作品", "人民币\/日元", "现在\/平台\/史低", "备注", "看详情", "购物车"/);
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 40/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 \* 1000/);
-  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 6/);
+  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 7/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_STORAGE_KEY = "dltracker-account-index-lock-v1"/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_TTL_MS = 60 \* 1000/);
   assert.match(source, /fetchSameOriginText\(url, "作品信息接口", \{\s*anonymous: true/);
@@ -209,6 +264,8 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
     functionSource("refreshAccountIndex"),
     /\.finally\(\(\) => \{\s*releaseAccountIndexLock\(\)/,
   );
+  assert.match(source, /retryAccountIndexWriteAfterMetadataPrune\(serialized\)/);
+  assert.match(source, /saveAccountIndex\(index, \{\s*throwOnFailure: true/);
   assert.match(source, /`\$\{label\}请求失败：\$\{error instanceof Error/);
   assert.match(source, /\["状态", index\.loaded \? "正在重新读取…" : "正在读取购物车和已购清单…"\]/);
   assert.match(source, /`读取失败：\$\{accountIndexRuntimeError\}`/);

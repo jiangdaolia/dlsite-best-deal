@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.42
+// @version      0.6.43
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.42";
+  const APP_VERSION = "0.6.43";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -66,7 +66,7 @@
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_SIZE = 40;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
-  const ACCOUNT_INDEX_REQUEST_VERSION = 6;
+  const ACCOUNT_INDEX_REQUEST_VERSION = 7;
   const ACCOUNT_INDEX_LOCK_TTL_MS = 60 * 1000;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
@@ -75,6 +75,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.43": [
+      "修复浏览器存储配额不足时只留下读取阶段、作品索引却一直为0的问题",
+      "索引写入不足时仅清理可重新获取的旧作品元数据并重试，仍失败则显示原因",
+    ],
     "0.6.42": [
       "账号索引新增跨标签页租约，同一时间只有一个DLsite页面能写入进度",
       "语言索引显示当前读取阶段，页面离开时释放租约供新页面续接",
@@ -2489,11 +2493,55 @@
     }
   }
 
-  function saveAccountIndex(index) {
+  function storageQuotaExceeded(error) {
+    return error?.name === "QuotaExceededError" ||
+      error?.name === "NS_ERROR_DOM_QUOTA_REACHED" ||
+      Number(error?.code) === 22 || Number(error?.code) === 1014 ||
+      /quota/i.test(String(error?.message || ""));
+  }
+
+  function retryAccountIndexWriteAfterMetadataPrune(serializedIndex) {
+    const cache = loadDealCache();
+    const metadata = Object.entries(cache.metadata || {})
+      .sort((left, right) =>
+        dealNumber(left[1]?.fetchedAt, 0) - dealNumber(right[1]?.fetchedAt, 0));
+    let removed = 0;
+    while (metadata.length) {
+      removed += metadata.splice(0, Math.min(20, metadata.length)).length;
+      cache.metadata = Object.fromEntries(metadata);
+      localStorage.setItem(DEAL_CACHE_STORAGE_KEY, JSON.stringify(cache));
+      try {
+        localStorage.setItem(ACCOUNT_INDEX_STORAGE_KEY, serializedIndex);
+        console.warn(
+          `[${APP_NAME}] pruned ${removed} cached product metadata records to save account index`,
+        );
+        return true;
+      } catch (error) {
+        if (!storageQuotaExceeded(error)) throw error;
+      }
+    }
+    return false;
+  }
+
+  function saveAccountIndex(index, { throwOnFailure = false } = {}) {
+    const serialized = JSON.stringify(index);
     try {
-      localStorage.setItem(ACCOUNT_INDEX_STORAGE_KEY, JSON.stringify(index));
+      localStorage.setItem(ACCOUNT_INDEX_STORAGE_KEY, serialized);
     } catch (error) {
-      console.warn(`[${APP_NAME}] account index write failed:`, error);
+      let writeError = error;
+      if (storageQuotaExceeded(error)) {
+        try {
+          if (retryAccountIndexWriteAfterMetadataPrune(serialized)) return index;
+        } catch (recoveryError) {
+          writeError = recoveryError;
+        }
+      }
+      const detail = writeError instanceof Error
+        ? writeError.message
+        : String(writeError || "未知错误");
+      accountIndexRuntimeError = `账号索引存储失败：${detail}`;
+      console.warn(`[${APP_NAME}] account index write failed:`, writeError);
+      if (throwOnFailure) throw new Error(accountIndexRuntimeError);
     }
     return index;
   }
@@ -2645,16 +2693,19 @@
     accountIndexSessionStopReason = "";
     accountIndexRuntimeError = "";
     const manualStartedAt = manual ? Date.now() : dealNumber(previous.lastManualAt);
-    saveAccountIndex({
-      ...previous,
-      lastManualAt: manualStartedAt,
-      pausedReason: "",
-      indexing: true,
-      stage: "读取账号购物车信息",
-      requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
-      updatedAt: Date.now(),
+    const persistAccountIndex = (index) => saveAccountIndex(index, {
+      throwOnFailure: true,
     });
     accountIndexRefreshInFlight = (async () => {
+      persistAccountIndex({
+        ...previous,
+        lastManualAt: manualStartedAt,
+        pausedReason: "",
+        indexing: true,
+        stage: "读取账号购物车信息",
+        requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
+        updatedAt: Date.now(),
+      });
       if (!isDlsiteMemberLoggedIn()) return clearAccountIndex();
       const section = currentDlsiteSection();
       if (!renewAccountIndexLock()) return loadAccountIndex();
@@ -2677,7 +2728,7 @@
         clearAccountIndex();
       }
       accountIndexRuntimeFingerprint = fingerprint;
-      saveAccountIndex({
+      persistAccountIndex({
         ...loadAccountIndex(),
         indexing: true,
         stage: "读取已购清单",
@@ -2697,7 +2748,7 @@
       const ids = [...new Set([...cartIds.active, ...cartIds.later, ...bought])];
       const entries = {};
       const failedIds = [];
-      saveAccountIndex({
+      persistAccountIndex({
         ...emptyAccountIndex(),
         loaded: true,
         active: cartIds.active,
@@ -2720,7 +2771,7 @@
       for (let start = 0; start < ids.length; start += ACCOUNT_METADATA_BATCH_SIZE) {
         const batchIds = ids.slice(start, start + ACCOUNT_METADATA_BATCH_SIZE);
         if (!renewAccountIndexLock()) return loadAccountIndex();
-        saveAccountIndex({
+        persistAccountIndex({
           ...loadAccountIndex(),
           indexing: true,
           stage: `读取作品信息 ${start + 1}-${start + batchIds.length}/${ids.length}`,
@@ -2739,7 +2790,7 @@
             failedIds.push(id);
           }
         }
-        saveAccountIndex({
+        persistAccountIndex({
           ...emptyAccountIndex(),
           loaded: true,
           active: cartIds.active,
@@ -2795,7 +2846,7 @@
       if (ids.length && next.indexed === 0 && !accountIndexRuntimeError) {
         accountIndexRuntimeError = "语言索引未取得任何作品信息，请稍后重新读取";
       }
-      saveAccountIndex(next);
+      persistAccountIndex(next);
       return next;
     })().catch((error) => {
       accountIndexRuntimeError = error instanceof Error ? error.message : String(error);
