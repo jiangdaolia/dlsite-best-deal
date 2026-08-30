@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.35
+// @version      0.6.36
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.35";
+  const APP_VERSION = "0.6.36";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -47,6 +47,7 @@
   const BROWSE_SORT_MODE_STORAGE_KEY = "dltracker-browse-sort-mode";
   const BROWSE_FILTER_STORAGE_KEY = "dltracker-browse-bundle-filter";
   const BROWSE_HIDE_PURCHASED_STORAGE_KEY = "dltracker-browse-hide-purchased";
+  const BROWSE_HIDE_CARTED_STORAGE_KEY = "dltracker-browse-hide-carted";
   const BROWSE_SORT_MODE_NATIVE = "native";
   const UPDATE_NOTICE_SEEN_VERSION_KEY = "dltracker-update-notice-seen-version";
   const DEAL_PLANNER_STORAGE_KEY = "dltracker-deal-planner-v1";
@@ -62,7 +63,7 @@
   const LANGUAGE_DIALOG_RESTORE_STORAGE_KEY = "dltracker-language-dialog-restore-v1";
   const ACCOUNT_REFRESH_COOLDOWN_MS = 60 * 1000;
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
-  const ACCOUNT_METADATA_BATCH_SIZE = 10;
+  const ACCOUNT_METADATA_BATCH_SIZE = 100;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 1000;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
@@ -71,6 +72,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.36": [
+      "账号语言索引恢复每批最多100部，减少请求次数并持久显示安全暂停原因",
+      "浏览隐藏开关改用页面级点击代理，并新增隐藏购物车与稍后再买作品",
+    ],
     "0.6.35": [
       "自动续接被页面刷新或跳转中断的账号语言索引，并显示暂停原因与剩余数量",
       "浏览优惠区重绘时迁移现有购买状态节点，彻底避免已购买按钮闪烁",
@@ -2392,6 +2397,7 @@
       updatedAt: 0,
       lastManualAt: 0,
       accountFingerprint: "",
+      pausedReason: "",
     };
   }
 
@@ -2497,6 +2503,12 @@
       ));
       throw new Error(`请等待 ${seconds} 秒后再读取`);
     }
+    if (manual) {
+      // 仅明确的用户操作能在冷却后开始新请求会话；
+      // 自动启动不会绕过已持久化的风控暂停。
+      dealSessionStopped = false;
+      dealSessionStopReason = "";
+    }
     accountIndexRuntimeError = "";
     const manualStartedAt = manual ? Date.now() : dealNumber(previous.lastManualAt);
     if (manual) saveAccountIndex({ ...previous, lastManualAt: manualStartedAt });
@@ -2547,6 +2559,7 @@
         updatedAt: Date.now(),
         lastManualAt: manualStartedAt,
         accountFingerprint: fingerprint,
+        pausedReason: "",
       });
       refreshAccountInformationPanels();
       for (let start = 0; start < ids.length; start += ACCOUNT_METADATA_BATCH_SIZE) {
@@ -2601,6 +2614,7 @@
         updatedAt: Date.now(),
         lastManualAt: manualStartedAt,
         accountFingerprint: fingerprint,
+        pausedReason: dealSessionStopped ? dealSessionStopReason : "",
       };
       if (ids.length && next.indexed === 0 && !accountIndexRuntimeError) {
         accountIndexRuntimeError = "语言索引未取得任何作品信息，请稍后重新读取";
@@ -2647,7 +2661,7 @@
       return refreshAccountIndex();
     }
     const processed = Object.keys(index.entries || {}).length;
-    if (index.loaded && !index.complete && processed < index.total) {
+    if (index.loaded && !index.complete && processed < index.total && !index.pausedReason) {
       return refreshAccountIndex();
     }
     if (!index.loaded) return refreshAccountIndex();
@@ -3252,6 +3266,20 @@
         ? event.target.closest("button, a, input[type='button'], input[type='submit']")
         : null;
       if (!target) return;
+      if (target.matches(".dltracker-account-info-button")) {
+        event.preventDefault();
+        event.stopPropagation();
+        openAccountInformationDialog();
+        return;
+      }
+      if (target.matches(".dltracker-hide-purchased-button, .dltracker-hide-carted-button")) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleBrowseAccountVisibility(
+          target.matches(".dltracker-hide-carted-button") ? "carted" : "purchased",
+        );
+        return;
+      }
       const signature = [
         target.id,
         target.className,
@@ -3699,13 +3727,58 @@
     }
   }
 
+  function getBrowseHideCarted() {
+    try {
+      return localStorage.getItem(BROWSE_HIDE_CARTED_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function setBrowseHideCarted(hidden) {
+    try {
+      localStorage.setItem(BROWSE_HIDE_CARTED_STORAGE_KEY, hidden ? "1" : "0");
+    } catch {
+      // noop
+    }
+  }
+
+  function syncBrowseAccountVisibilityButtons() {
+    const purchasedHidden = getBrowseHidePurchased();
+    const cartedHidden = getBrowseHideCarted();
+    for (const button of document.querySelectorAll(".dltracker-hide-purchased-button")) {
+      button.textContent = purchasedHidden ? "显示已购买" : "隐藏已购买";
+      button.setAttribute("aria-pressed", purchasedHidden ? "true" : "false");
+      button.classList.toggle("is-active", purchasedHidden);
+    }
+    for (const button of document.querySelectorAll(".dltracker-hide-carted-button")) {
+      button.textContent = cartedHidden
+        ? "显示购物车/稍后再买"
+        : "隐藏购物车/稍后再买";
+      button.setAttribute("aria-pressed", cartedHidden ? "true" : "false");
+      button.classList.toggle("is-active", cartedHidden);
+    }
+  }
+
+  function toggleBrowseAccountVisibility(kind) {
+    if (kind === "carted") setBrowseHideCarted(!getBrowseHideCarted());
+    else setBrowseHidePurchased(!getBrowseHidePurchased());
+    syncBrowseAccountVisibilityButtons();
+    refreshBrowsePurchasedVisibility();
+  }
+
   function syncBrowseCardVisibility(node) {
     if (!node) return;
     const bundleHidden = node.classList.contains("dltracker-browse-filtered-out");
     const purchasedHidden = getBrowseHidePurchased() &&
       node.classList.contains("dltracker-browse-purchased-card");
-    node.classList.toggle("dltracker-browse-purchased-hidden", purchasedHidden);
-    node.hidden = bundleHidden || purchasedHidden;
+    const cartedHidden = getBrowseHideCarted() &&
+      node.classList.contains("dltracker-browse-carted-card");
+    node.classList.toggle(
+      "dltracker-browse-account-hidden",
+      purchasedHidden || cartedHidden,
+    );
+    node.hidden = bundleHidden || purchasedHidden || cartedHidden;
   }
 
   function refreshBrowsePurchasedVisibility() {
@@ -3949,14 +4022,6 @@
     const sort = controls.querySelector(".dltracker-browse-sort");
     if (sort) sort.value = getBrowseSortMode();
     const filter = controls.querySelector(".dltracker-browse-filter");
-    const accountButton = controls.querySelector(".dltracker-account-info-button");
-    if (accountButton) {
-      accountButton.onclick = (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        openAccountInformationDialog();
-      };
-    }
     let purchasedButton = controls.querySelector(".dltracker-hide-purchased-button");
     if (!purchasedButton) {
       purchasedButton = document.createElement("button");
@@ -3964,20 +4029,14 @@
       purchasedButton.className = "dltracker-hide-purchased-button";
       controls.appendChild(purchasedButton);
     }
-    const syncPurchasedButton = () => {
-      const hidden = getBrowseHidePurchased();
-      purchasedButton.textContent = hidden ? "显示已购买" : "隐藏已购买";
-      purchasedButton.setAttribute("aria-pressed", hidden ? "true" : "false");
-      purchasedButton.classList.toggle("is-active", hidden);
-    };
-    purchasedButton.onclick = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setBrowseHidePurchased(!getBrowseHidePurchased());
-      syncPurchasedButton();
-      refreshBrowsePurchasedVisibility();
-    };
-    syncPurchasedButton();
+    let cartedButton = controls.querySelector(".dltracker-hide-carted-button");
+    if (!cartedButton) {
+      cartedButton = document.createElement("button");
+      cartedButton.type = "button";
+      cartedButton.className = "dltracker-hide-carted-button";
+      controls.appendChild(cartedButton);
+    }
+    syncBrowseAccountVisibilityButtons();
     syncBundleFilterSelect(filter, cards, resetMissing);
   }
 
@@ -5764,9 +5823,11 @@
         ["状态", index.loaded ? "正在重新读取…" : "正在读取购物车和已购清单…"],
         ...(index.loaded ? loadedValues : []),
       ];
-    } else if (accountIndexRuntimeError) {
+    } else if (accountIndexRuntimeError || index.pausedReason) {
       values = [
-        ["状态", `读取失败：${accountIndexRuntimeError}`],
+        ["状态", index.pausedReason
+          ? `读取暂停：${index.pausedReason}`
+          : `读取失败：${accountIndexRuntimeError}`],
         ...(index.loaded ? loadedValues : []),
       ];
     } else {
@@ -5930,6 +5991,7 @@
     const boughtGroups = groupedAccountEntries(familyEntries, index.bought);
     const activeGroups = groupedAccountEntries(familyEntries, index.active);
     const laterGroups = groupedAccountEntries(familyEntries, index.later);
+    const carted = activeGroups.size > 0 || laterGroups.size > 0;
     const lines = [];
     let purchased = false;
     if (boughtGroups.has(identity.lang)) {
@@ -5976,7 +6038,7 @@
         lines.push(parts.join("｜"));
       }
     }
-    return lines.length ? { lines, purchased, identity } : null;
+    return lines.length ? { lines, purchased, carted, identity } : null;
   }
 
   async function renderAccountReminderForCard(node, id) {
@@ -5992,12 +6054,18 @@
       existing?.remove();
       layout.classList.remove("is-account-purchased");
       node.classList.remove("dltracker-browse-purchased-card");
+      node.classList.remove("dltracker-browse-carted-card");
       syncBrowseCardVisibility(node);
       return;
     }
     node.classList.toggle("dltracker-browse-purchased-card", Boolean(data.purchased));
+    node.classList.toggle("dltracker-browse-carted-card", Boolean(data.carted));
     syncBrowseCardVisibility(node);
-    const signature = JSON.stringify({ lines: data.lines, purchased: data.purchased });
+    const signature = JSON.stringify({
+      lines: data.lines,
+      purchased: data.purchased,
+      carted: data.carted,
+    });
     if (existing?.dataset.reminderSignature === signature &&
       layout.classList.contains("is-account-purchased") === Boolean(data.purchased)) {
       return;
@@ -10161,6 +10229,8 @@
 }
 
 .dltracker-account-info-button,
+.dltracker-hide-purchased-button,
+.dltracker-hide-carted-button,
 .dltracker-account-refresh,
 .dltracker-language-entry-button,
 .dltracker-language-table button,
@@ -10174,6 +10244,12 @@
 }
 
 .dltracker-account-info-button {
+  min-height: 28px;
+  padding: 3px 10px;
+}
+
+.dltracker-hide-purchased-button,
+.dltracker-hide-carted-button {
   min-height: 28px;
   padding: 3px 10px;
 }
@@ -11283,7 +11359,7 @@ a.dltracker-cart-deal-frame:focus-visible {
   display: none !important;
 }
 
-.dltracker-browse-purchased-hidden {
+.dltracker-browse-account-hidden {
   display: none !important;
 }
 

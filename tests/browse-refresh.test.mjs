@@ -86,13 +86,26 @@ test("浏览列表与稍后再买提供平台折扣失效时间排序", () => {
 test("浏览控制区可以持久隐藏已购买作品并与凑单筛选合并", () => {
   const controlsSource = functionSource("injectBrowseControls");
   const visibilitySource = functionSource("syncBrowseCardVisibility");
+  const delegatedSource = functionSource("installDealEventListeners");
   const reminderSource = functionSource("renderAccountReminderForCard");
-  assert.match(controlsSource, /隐藏已购买/);
-  assert.match(controlsSource, /显示已购买/);
-  assert.match(controlsSource, /setBrowseHidePurchased\(!getBrowseHidePurchased\(\)\)/);
-  assert.match(visibilitySource, /bundleHidden \|\| purchasedHidden/);
+  assert.match(source, /隐藏已购买/);
+  assert.match(source, /显示已购买/);
+  assert.match(delegatedSource, /dltracker-hide-purchased-button[\s\S]*?toggleBrowseAccountVisibility/);
+  assert.match(functionSource("toggleBrowseAccountVisibility"), /setBrowseHidePurchased\(!getBrowseHidePurchased\(\)\)/);
+  assert.match(visibilitySource, /bundleHidden \|\| purchasedHidden \|\| cartedHidden/);
   assert.match(reminderSource, /dltracker-browse-purchased-card/);
-  assert.match(source, /\.dltracker-browse-purchased-hidden \{\s*display: none !important;/);
+  assert.match(source, /\.dltracker-browse-account-hidden \{\s*display: none !important;/);
+});
+
+test("浏览控制区可单独隐藏购物车或稍后再买的语言家族", () => {
+  assert.match(functionSource("injectBrowseControls"), /dltracker-hide-carted-button/);
+  assert.match(source, /隐藏购物车\/稍后再买/);
+  assert.match(source, /显示购物车\/稍后再买/);
+  assert.match(
+    functionSource("accountReminderData"),
+    /const carted = activeGroups\.size > 0 \|\| laterGroups\.size > 0/,
+  );
+  assert.match(functionSource("renderAccountReminderForCard"), /dltracker-browse-carted-card/);
 });
 
 test("浏览优惠区重绘时迁移已有购买状态而不是先删除", () => {
@@ -130,8 +143,8 @@ test("从详情页返回列表时恢复已选筛选和排序", () => {
     /window\.addEventListener\("pageshow", restoreBrowseStateOnPageShow\)/,
   );
   assert.match(
-    functionSource("injectBrowseControls"),
-    /accountButton\.onclick = \(event\) => \{[\s\S]*?openAccountInformationDialog\(\)/,
+    functionSource("installDealEventListeners"),
+    /dltracker-account-info-button[\s\S]*?openAccountInformationDialog\(\)/,
   );
 });
 
