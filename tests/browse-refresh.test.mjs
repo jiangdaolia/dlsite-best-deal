@@ -26,12 +26,12 @@ test("筛选选项未变化时不重建 select", () => {
   const select = {
     options: [
       { value: "all", textContent: "全部作品" },
-      { value: "bundle", textContent: "所有需要凑单的优惠" },
+      { value: "offer:any", textContent: "所有优惠券和平台活动" },
     ],
   };
   const options = [
     { value: "all", label: "全部作品" },
-    { value: "bundle", label: "所有需要凑单的优惠" },
+    { value: "offer:any", label: "所有优惠券和平台活动" },
   ];
   assert.equal(sandbox.matches(select, options), true);
   assert.equal(sandbox.matches(select, [...options, { value: "x", label: "X" }]), false);
@@ -39,6 +39,38 @@ test("筛选选项未变化时不重建 select", () => {
     functionSource("syncBundleFilterSelect"),
     /if \(!browseSelectOptionsMatch\(filter, options\)\)/,
   );
+});
+
+test("优惠券和平台活动筛选覆盖全部优惠券及分类入口", () => {
+  const sandbox = {};
+  vm.runInNewContext(
+    `${functionSource("browseCardMatchesFilter")}
+    globalThis.matches = browseCardMatchesFilter;`,
+    sandbox,
+  );
+  const insight = {
+    product: { bulkbuyKey: "three-works" },
+    bulkRule: { minCount: 3, discountRate: 60 },
+    couponOptions: [
+      { groupKey: "no-threshold", minCount: 1 },
+      { groupKey: "spend", minSpend: 1200 },
+    ],
+  };
+  assert.equal(sandbox.matches(insight, "offer:any"), true);
+  assert.equal(sandbox.matches(insight, "coupon:any"), true);
+  assert.equal(sandbox.matches(insight, "activity:any"), true);
+  assert.equal(sandbox.matches(insight, "coupon:no-threshold"), true);
+  assert.equal(sandbox.matches(insight, "coupon:spend"), true);
+  assert.equal(sandbox.matches(insight, "activity:three-works"), true);
+  assert.equal(sandbox.matches(insight, "coupon:missing"), false);
+
+  const optionsSource = functionSource("browseBundleFilterOptions");
+  assert.match(optionsSource, /value: "offer:any", label: "所有优惠券和平台活动"/);
+  assert.match(optionsSource, /value: "coupon:any", label: "所有优惠券"/);
+  assert.match(optionsSource, /value: "activity:any", label: "所有平台活动"/);
+  assert.doesNotMatch(optionsSource, /if \(coupon\.minCount <= 1\) continue/);
+  assert.match(functionSource("injectBrowseControls"), /优惠券和平台活动/);
+  assert.match(functionSource("injectBuyLaterSortToggle"), /优惠券和平台活动/);
 });
 
 test("浏览排序控件已在原生排序区后方时不重复插入自身", () => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.52
+// @version      0.6.53
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.52";
+  const APP_VERSION = "0.6.53";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -77,6 +77,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.53": [
+      "浏览筛选改为优惠券和平台活动，支持分别查看全部券或全部活动",
+      "每一种有效优惠券都可单独筛选，不再只显示凑件券",
+    ],
     "0.6.52": [
       "浏览卡完成计算后不再退回读取中，相同结果不重复重绘",
       "单张史低读取失败会结束该卡任务，不再触发整页循环刷新",
@@ -4261,7 +4265,9 @@
 
   function getBrowseBundleFilter() {
     try {
-      return localStorage.getItem(BROWSE_FILTER_STORAGE_KEY) || "all";
+      const value = localStorage.getItem(BROWSE_FILTER_STORAGE_KEY) || "all";
+      // 旧版“所有需要凑单的优惠”平滑迁移为全部优惠券和平台活动。
+      return value === "bundle" ? "offer:any" : value;
     } catch {
       return "all";
     }
@@ -4353,15 +4359,17 @@
 
   function browseCardMatchesFilter(insight, filter) {
     if (filter === "all") return true;
-    const bundleCoupons = insight?.couponOptions?.filter((coupon) => coupon.minCount > 1) || [];
-    if (filter === "bundle") {
-      return dealNumber(insight?.bulkRule?.minCount, 1) > 1 || bundleCoupons.length > 0;
-    }
+    const couponOptions = insight?.couponOptions || [];
+    const hasActivity = Boolean(insight?.bulkRule && insight?.product?.bulkbuyKey);
+    if (filter === "offer:any") return hasActivity || couponOptions.length > 0;
+    if (filter === "coupon:any") return couponOptions.length > 0;
+    if (filter === "activity:any") return hasActivity;
     if (filter.startsWith("activity:")) {
-      return String(insight?.product?.bulkbuyKey || "") === filter.slice(9);
+      return hasActivity &&
+        String(insight?.product?.bulkbuyKey || "") === filter.slice(9);
     }
     if (filter.startsWith("coupon:")) {
-      return bundleCoupons.some((coupon) =>
+      return couponOptions.some((coupon) =>
         String(coupon.groupKey || coupon.id) === filter.slice(7));
     }
     return true;
@@ -4439,9 +4447,13 @@
 
   function browseBundleFilterOptions(cards) {
     const active = latestDealContext.cartSnapshot.active || [];
+    const activeSubtotal = active.reduce((sum, item) =>
+      sum + Math.max(0, dealNumber(item?.price)), 0);
     const options = [
       { value: "all", label: "全部作品" },
-      { value: "bundle", label: "所有需要凑单的优惠" },
+      { value: "offer:any", label: "所有优惠券和平台活动" },
+      { value: "coupon:any", label: "所有优惠券" },
+      { value: "activity:any", label: "所有平台活动" },
     ];
     const seen = new Set(options.map((option) => option.value));
     const cacheRules = loadDealCache().bulkRules || {};
@@ -4454,11 +4466,10 @@
       const count = active.filter((item) => item.bulkbuyKey === key).length;
       options.push({
         value,
-        label: `${rule.minCount}件${compactOff(rule.discountRate)}｜${count >= rule.minCount ? "已满" : "已有"}${count}/${rule.minCount}`,
+        label: `平台活动｜${rule.minCount}件${compactOff(rule.discountRate)}｜${count >= rule.minCount ? "已满" : "已有"}${count}/${rule.minCount}`,
       });
     }
     for (const coupon of latestDealContext.coupons) {
-      if (coupon.minCount <= 1) continue;
       const value = `coupon:${coupon.groupKey || coupon.id}`;
       if (seen.has(value)) continue;
       seen.add(value);
@@ -4467,9 +4478,20 @@
         .map(({ id }) => dealInsightById.get(String(id).toUpperCase())?.product)
         .find((product) => product && couponMatchesDealProduct(coupon, product));
       const rate = couponEquivalentRate(coupon, sample || active[0] || { price: 1 });
+      const progress = [];
+      if (coupon.minCount > 1) {
+        progress.push(`${count >= coupon.minCount ? "已满" : "已有"}${count}/${coupon.minCount}部`);
+      }
+      if (coupon.minSpend > 0) {
+        progress.push(`${activeSubtotal >= coupon.minSpend ? "已满" : "已有"}${Math.round(activeSubtotal).toLocaleString("ja-JP")}/${Math.round(coupon.minSpend).toLocaleString("ja-JP")}円`);
+      }
+      if (!progress.length) progress.push("无门槛");
       options.push({
         value,
-        label: `${compactOff(rate, "券")}·${coupon.minCount}部起用｜${count >= coupon.minCount ? "已满" : "已有"}${count}/${coupon.minCount}`,
+        label: `优惠券｜${compactCouponListLabel({
+          ...coupon,
+          equivalentRate: rate,
+        })}｜${progress.join("＋")}`,
       });
     }
     return options;
@@ -4531,7 +4553,7 @@
     } else if (resetMissing) {
       filter.value = "all";
       setBrowseBundleFilter("all");
-      showDealToast("已选凑单优惠已失效，已恢复全部作品", false, 5000);
+      showDealToast("已选优惠券或平台活动已失效，已恢复全部作品", false, 5000);
     } else {
       filter.value = "all";
     }
@@ -4564,7 +4586,7 @@
       });
       sortLabel.appendChild(sort);
       const filterLabel = document.createElement("label");
-      filterLabel.textContent = "凑单优惠 ";
+      filterLabel.textContent = "优惠券和平台活动 ";
       const filter = document.createElement("select");
       filter.className = "dltracker-browse-filter";
       filter.addEventListener("change", () => {
@@ -9251,13 +9273,15 @@
       filterWrap.className = "dltracker-buy-later-filter";
 
       const filterLabel = document.createElement("span");
-      filterLabel.textContent = "凑单优惠";
+      filterLabel.textContent = "优惠券和平台活动";
 
       const filterSelect = document.createElement("select");
       filterSelect.className = "dltracker-buy-later-filter-select";
       filterSelect.innerHTML = `
         <option value="all">全部作品</option>
-        <option value="bundle">所有需要凑单的优惠</option>
+        <option value="offer:any">所有优惠券和平台活动</option>
+        <option value="coupon:any">所有优惠券</option>
+        <option value="activity:any">所有平台活动</option>
       `;
       filterSelect.addEventListener("change", () => {
         setBrowseBundleFilter(filterSelect.value);
