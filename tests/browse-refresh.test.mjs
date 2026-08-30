@@ -119,6 +119,19 @@ test("浏览优惠区重绘时迁移已有购买状态而不是先删除", () =>
   );
 });
 
+test("账号提醒同时覆盖购物车卡片并复用当页语言元数据", () => {
+  const dataSource = functionSource("accountReminderData");
+  const reminderSource = functionSource("renderAccountReminderForCard");
+  const refreshSource = functionSource("refreshAllAccountReminders");
+  const cartLayoutSource = functionSource("renderCartDealLayout");
+  assert.match(dataSource, /dealInsightById\.get\(id\)\?\.product \|\| metadataProductFromCache\(id\)/);
+  assert.match(reminderSource, /\.dltracker-cart-host \.dltracker-cart-layout/);
+  assert.doesNotMatch(refreshSource, /filter\(\(\{ cartItem \}\) => !cartItem\)/);
+  assert.match(cartLayoutSource, /preservedReminders = previousLayout\?\.querySelector/);
+  assert.match(cartLayoutSource, /if \(preservedReminders\) card\.prepend\(preservedReminders\)/);
+  assert.match(source, /\.dltracker-cart-layout\.is-account-purchased \{\s*filter: grayscale\(0\.38\);/);
+});
+
 test("无优惠作品也会留下已处理标记供观察器识别", () => {
   assert.match(functionSource("enhanceGenericBrowseCards"), /markDealProcessed\(node, id\)/);
   assert.match(functionSource("installSpaListeners"), /needsDealProcessing\(node, id\)/);

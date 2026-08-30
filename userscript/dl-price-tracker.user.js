@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.43
+// @version      0.6.44
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.43";
+  const APP_VERSION = "0.6.44";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -66,7 +66,7 @@
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_SIZE = 40;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
-  const ACCOUNT_INDEX_REQUEST_VERSION = 7;
+  const ACCOUNT_INDEX_REQUEST_VERSION = 8;
   const ACCOUNT_INDEX_LOCK_TTL_MS = 60 * 1000;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
@@ -75,6 +75,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.44": [
+      "购物车立即购买与稍后再买卡片也显示已购买或已购买其他语言版本提醒",
+      "账号提醒优先复用当页作品分析数据，元数据缓存清理后也不会漏掉提醒",
+      "兼容DLsite已购接口的bought.boughts嵌套结构，修复已购买集合为空导致漏标",
+    ],
     "0.6.43": [
       "修复浏览器存储配额不足时只留下读取阶段、作品索引却一直为0的问题",
       "索引写入不足时仅清理可重新获取的旧作品元数据并重试，仍失败则显示原因",
@@ -2674,6 +2679,24 @@
     return { active: [...new Set(active)], later: [...new Set(later)] };
   }
 
+  function boughtIdsFromPayload(payload) {
+    const nested = payload?.bought;
+    const items = Array.isArray(nested?.boughts)
+      ? nested.boughts
+      : Array.isArray(payload?.boughts)
+        ? payload.boughts
+        : Array.isArray(nested)
+          ? nested
+          : Array.isArray(payload)
+            ? payload
+            : [];
+    return [...new Set(items.map((item) => String(
+      item && typeof item === "object"
+        ? item.product_id || item.workno || item.id || ""
+        : item || "",
+    ).toUpperCase()).filter(isValidProductCode))];
+  }
+
   async function refreshAccountIndex({ manual = false } = {}) {
     if (accountIndexRefreshInFlight) return accountIndexRefreshInFlight;
     const previous = loadAccountIndex();
@@ -2740,11 +2763,7 @@
       const boughtPayload = await fetchSameOriginJson(boughtUrl, "已购清单");
       if (!renewAccountIndexLock()) return loadAccountIndex();
       const cartIds = cartIdsFromMemberStatus(status);
-      const bought = (Array.isArray(boughtPayload?.boughts)
-        ? boughtPayload.boughts
-        : Array.isArray(boughtPayload) ? boughtPayload : [])
-        .map((id) => String(id || "").toUpperCase())
-        .filter(isValidProductCode);
+      const bought = boughtIdsFromPayload(boughtPayload);
       const ids = [...new Set([...cartIds.active, ...cartIds.later, ...bought])];
       const entries = {};
       const failedIds = [];
@@ -2902,6 +2921,7 @@
     const processed = Object.keys(index.entries || {}).length;
     const requestStrategyChanged = dealNumber(index.requestVersion) <
       ACCOUNT_INDEX_REQUEST_VERSION;
+    if (requestStrategyChanged) return refreshAccountIndex();
     if (index.loaded && !index.complete && processed < index.total &&
       (!index.pausedReason || requestStrategyChanged)) {
       return refreshAccountIndex();
@@ -6240,7 +6260,7 @@
     const id = String(productId || "").toUpperCase();
     const index = loadAccountIndex();
     if (!index.loaded) return null;
-    let product = metadataProductFromCache(id);
+    let product = dealInsightById.get(id)?.product || metadataProductFromCache(id);
     if (!product) product = (await ensureProductMetadataBatches([id])).get(id);
     if (!product) return null;
     const identity = productLanguageIdentity(product, id);
@@ -6313,9 +6333,15 @@
   }
 
   async function renderAccountReminderForCard(node, id) {
-    const host = node?.querySelector?.(".dltracker-browse-analysis-host");
-    const layout = host?.querySelector?.(".dltracker-browse-analysis");
+    const browseLayout = node?.querySelector?.(
+      ".dltracker-browse-analysis-host .dltracker-browse-analysis",
+    );
+    const cartLayout = node?.querySelector?.(
+      ".dltracker-cart-host .dltracker-cart-layout",
+    );
+    const layout = browseLayout || cartLayout;
     if (!layout) return;
+    const isBrowseLayout = layout === browseLayout;
     const renderToken = (accountReminderRenderTokens.get(layout) || 0) + 1;
     accountReminderRenderTokens.set(layout, renderToken);
     const data = await accountReminderData(id);
@@ -6324,14 +6350,18 @@
     if (!data) {
       existing?.remove();
       layout.classList.remove("is-account-purchased");
-      node.classList.remove("dltracker-browse-purchased-card");
-      node.classList.remove("dltracker-browse-carted-card");
-      syncBrowseCardVisibility(node);
+      if (isBrowseLayout) {
+        node.classList.remove("dltracker-browse-purchased-card");
+        node.classList.remove("dltracker-browse-carted-card");
+        syncBrowseCardVisibility(node);
+      }
       return;
     }
-    node.classList.toggle("dltracker-browse-purchased-card", Boolean(data.purchased));
-    node.classList.toggle("dltracker-browse-carted-card", Boolean(data.carted));
-    syncBrowseCardVisibility(node);
+    if (isBrowseLayout) {
+      node.classList.toggle("dltracker-browse-purchased-card", Boolean(data.purchased));
+      node.classList.toggle("dltracker-browse-carted-card", Boolean(data.carted));
+      syncBrowseCardVisibility(node);
+    }
     const signature = JSON.stringify({
       lines: data.lines,
       purchased: data.purchased,
@@ -6362,7 +6392,7 @@
   }
 
   async function refreshAllAccountReminders() {
-    const cards = collectBrowseCards().filter(({ cartItem }) => !cartItem);
+    const cards = collectBrowseCards();
     await mapWithConcurrency(cards, 1, ({ node, id }) =>
       renderAccountReminderForCard(node, id));
   }
@@ -7447,8 +7477,15 @@
 
   function renderCartDealLayout(host, record, insight) {
     if (!host || !record) return;
+    const previousLayout = host.querySelector(".dltracker-cart-layout");
+    const preservedReminders = previousLayout?.querySelector(
+      ":scope > .dltracker-account-reminders",
+    );
+    const wasPurchased = previousLayout?.classList.contains("is-account-purchased");
     const card = document.createElement("section");
-    card.className = `${UI_CLASSNAME} dltracker-cart-layout`;
+    card.className = `${UI_CLASSNAME} dltracker-cart-layout${
+      wasPurchased ? " is-account-purchased" : ""
+    }`;
     card.dataset.productId = String(record.rjCode || insight?.product?.id || "").toUpperCase();
     if (typeof record.lowestPrice === "number") {
       card.dataset.lowestPrice = String(record.lowestPrice);
@@ -7557,6 +7594,7 @@
         card.appendChild(partial);
       }
     }
+    if (preservedReminders) card.prepend(preservedReminders);
     host.replaceChildren(card);
   }
 
@@ -10610,6 +10648,10 @@ dl > .dltracker-browse-analysis-host {
   border: 1px solid #c8ced2;
   border-radius: 7px;
   background: #f0f1f2;
+  filter: grayscale(0.38);
+}
+
+.dltracker-cart-layout.is-account-purchased {
   filter: grayscale(0.38);
 }
 

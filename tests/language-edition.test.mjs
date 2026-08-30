@@ -51,6 +51,7 @@ vm.runInNewContext(
     cartSkuFromSignals,
     accountEntryFromProduct,
     cartIdsFromMemberStatus,
+    boughtIdsFromPayload,
     languageEditionsFromDocument,
     sortLanguageComparisonRows,
     languageWinnerRows,
@@ -64,6 +65,7 @@ const {
   cartSkuFromSignals,
   accountEntryFromProduct,
   cartIdsFromMemberStatus,
+  boughtIdsFromPayload,
   languageEditionsFromDocument,
   sortLanguageComparisonRows,
   languageWinnerRows,
@@ -121,6 +123,22 @@ test("官方账号状态按 status 区分立即购买与稍后再买", () => {
     active: ["RJ01094726"],
     later: ["RJ01111460"],
   });
+});
+
+test("官方已购响应从 bought.boughts 读取并兼容对象作品编号", () => {
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(boughtIdsFromPayload({
+      bought: {
+        boughts: ["RJ01094726", { product_id: "RJ01111460" }, "bad"],
+        rentals: [],
+      },
+    }))),
+    ["RJ01094726", "RJ01111460"],
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(boughtIdsFromPayload({ boughts: ["RJ01257758"] }))),
+    ["RJ01257758"],
+  );
 });
 
 test("未知语言使用官方标签，已知语言统一显示中文", () => {
@@ -216,7 +234,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 40/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 \* 1000/);
-  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 7/);
+  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 8/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_STORAGE_KEY = "dltracker-account-index-lock-v1"/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_TTL_MS = 60 \* 1000/);
   assert.match(source, /fetchSameOriginText\(url, "作品信息接口", \{\s*anonymous: true/);
@@ -238,6 +256,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /start \+= ACCOUNT_METADATA_BATCH_SIZE[\s\S]*?slice\(start, start \+ ACCOUNT_METADATA_BATCH_SIZE\)/);
   assert.match(source, /ids\.length && next\.indexed === 0[\s\S]*?语言索引未取得任何作品信息/);
   assert.match(source, /requestStrategyChanged = dealNumber\(index\.requestVersion\)[\s\S]*?\(!index\.pausedReason \|\| requestStrategyChanged\)[\s\S]*?return refreshAccountIndex\(\)/);
+  assert.match(source, /if \(requestStrategyChanged\) return refreshAccountIndex\(\)/);
   assert.match(source, /语言索引已暂停：[\s\S]*?剩余\$\{remaining\}项/);
   assert.match(source, /已暂停：\$\{reason\}；剩余\$\{remaining\}项/);
   assert.match(source, /pausedReason: accountIndexSessionStopped \? accountIndexSessionStopReason : ""/);
@@ -266,6 +285,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   );
   assert.match(source, /retryAccountIndexWriteAfterMetadataPrune\(serialized\)/);
   assert.match(source, /saveAccountIndex\(index, \{\s*throwOnFailure: true/);
+  assert.match(source, /const bought = boughtIdsFromPayload\(boughtPayload\)/);
   assert.match(source, /`\$\{label\}请求失败：\$\{error instanceof Error/);
   assert.match(source, /\["状态", index\.loaded \? "正在重新读取…" : "正在读取购物车和已购清单…"\]/);
   assert.match(source, /`读取失败：\$\{accountIndexRuntimeError\}`/);
