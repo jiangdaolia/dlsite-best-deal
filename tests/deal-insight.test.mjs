@@ -24,6 +24,7 @@ const sandbox = {};
 vm.runInNewContext(
   `${matched[1]}
   ${formatMatched[1]}
+  const BULK_RULE_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
   ${campaignMatched[1]}
   globalThis.dealInsightCore = {
     normalizeDealCoupon,
@@ -50,6 +51,8 @@ vm.runInNewContext(
     compactCouponListLabel,
     bestReachColorClass,
     campaignEndFromHtml,
+    bulkRuleIsActive,
+    cachedBulkRuleDecision,
   };`,
   sandbox,
 );
@@ -77,6 +80,8 @@ const {
   compactCouponListLabel,
   bestReachColorClass,
   campaignEndFromHtml,
+  bulkRuleIsActive,
+  cachedBulkRuleDecision,
 } = sandbox.dealInsightCore;
 
 const future = Math.floor(Date.parse("2026-10-01T00:00:00+08:00") / 1000);
@@ -248,6 +253,21 @@ test("活动优先读取结构化结束时间且不为纯日期虚构 23:59", ()
   }), /9月3日 12:59中国时间到期/);
   assert.equal(campaignEndFromHtml("終了 2026年9月3日", null), null);
   assert.equal(campaignEndFromHtml("", { period_end: "2026-09-03" }), null);
+});
+
+test("同一平台活动24小时内不重复读取且到期后立即停用", () => {
+  const readAt = Date.parse("2026-08-30T08:00:00Z");
+  const cacheUntil = readAt + 24 * 60 * 60 * 1000;
+  const active = {
+    fetchedAt: readAt,
+    cacheUntil: readAt + 2 * 60 * 60 * 1000,
+    expiresAt: readAt + 2 * 60 * 60 * 1000,
+  };
+  assert.equal(cachedBulkRuleDecision(active, readAt + 60 * 60 * 1000), active);
+  assert.equal(cachedBulkRuleDecision(active, readAt + 3 * 60 * 60 * 1000), null);
+  assert.equal(cachedBulkRuleDecision(active, cacheUntil), undefined);
+  assert.equal(bulkRuleIsActive(active, readAt + 3 * 60 * 60 * 1000), false);
+  assert.match(source, /cacheUntil: fetchedAt \+ BULK_RULE_REFRESH_INTERVAL_MS/);
 });
 
 test("两种新排序都在主字段相同时优先当前史低", () => {

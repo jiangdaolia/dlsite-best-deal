@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.50
+// @version      0.6.51
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.50";
+  const APP_VERSION = "0.6.51";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -36,6 +36,7 @@
   const RETRYABLE_FETCH_ATTEMPTS = 1;
   const RETRY_BASE_DELAY_MS = 450;
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+  const BULK_RULE_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
   const MAX_FAVORITES = 500;
   const ENABLE_WISHLIST_ACTION_PANEL = false;
   const ENABLE_CART_DIAGNOSTIC_PANEL = false;
@@ -76,6 +77,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.51": [
+      "同一平台活动页24小时内最多读取一次",
+      "活动到期后立即停用，但不会因到期在当天重复请求",
+    ],
     "0.6.50": [
       "浏览卡史低并行补全，慢请求不再逐张堵住整个列表",
       "账号提醒复用整页缓存，不再为陌生浏览卡逐个读取详情页",
@@ -3923,6 +3928,24 @@
     }
     return result.getTime();
   }
+  function bulkRuleIsActive(rule, now = Date.now()) {
+    if (!rule) return false;
+    const expiresAt = Number(rule.expiresAt);
+    return !rule.expiresAt || !Number.isFinite(expiresAt) || expiresAt > now;
+  }
+
+  function bulkRuleRefreshAfter(rule) {
+    const fetchedAt = Number(rule?.fetchedAt);
+    if (Number.isFinite(fetchedAt) && fetchedAt > 0) {
+      return fetchedAt + BULK_RULE_REFRESH_INTERVAL_MS;
+    }
+    return Number(rule?.cacheUntil);
+  }
+
+  function cachedBulkRuleDecision(rule, now = Date.now()) {
+    if (!rule || bulkRuleRefreshAfter(rule) <= now) return undefined;
+    return bulkRuleIsActive(rule, now) ? rule : null;
+  }
   // </campaign-time-core>
 
   async function ensureBulkRule(product) {
@@ -3930,7 +3953,8 @@
     if (!key) return null;
     const cache = loadDealCache();
     const cached = cache.bulkRules[key];
-    if (cached && (!cached.cacheUntil || cached.cacheUntil > Date.now())) return cached;
+    const cachedDecision = cachedBulkRuleDecision(cached);
+    if (cachedDecision !== undefined) return cachedDecision;
     try {
       const html = await fetchSameOriginText(
         new URL(dealCampaignPath(product, key), location.origin),
@@ -3948,18 +3972,19 @@
       const minCount = Math.max(1, Math.round(dealNumber(embedded?.per_item, titleMatch ? dealNumber(titleMatch[1]) : 3)));
       if (!discountRate) return null;
       const parsedEnd = campaignEndFromHtml(html, embedded);
+      const fetchedAt = Date.now();
       const rule = {
         key,
         discountRate,
         minCount,
         expiresAt: parsedEnd,
-        // 未识别到结束时间时只缓存 24 小时，宁可低频复核，也不沿用过期活动。
-        cacheUntil: parsedEnd || Date.now() + 24 * 60 * 60 * 1000,
-        fetchedAt: Date.now(),
+        // 活动有效性由 expiresAt 判断；无论何时结束，同一活动页 24 小时内不再请求。
+        cacheUntil: fetchedAt + BULK_RULE_REFRESH_INTERVAL_MS,
+        fetchedAt,
       };
       cache.bulkRules[key] = rule;
       saveDealCache(cache);
-      return rule;
+      return bulkRuleIsActive(rule) ? rule : null;
     } catch (error) {
       console.warn(`[${APP_NAME}] bulkbuy rule failed:`, error);
       return null;
@@ -4418,7 +4443,7 @@
     const cacheRules = loadDealCache().bulkRules || {};
     for (const [key, rule] of Object.entries(cacheRules)) {
       if (!rule || dealNumber(rule.minCount, 1) <= 1 ||
-        (rule.cacheUntil && rule.cacheUntil <= Date.now())) continue;
+        cachedBulkRuleDecision(rule) !== rule) continue;
       const value = `activity:${key}`;
       if (seen.has(value)) continue;
       seen.add(value);
@@ -6519,8 +6544,7 @@
         if (context?.cacheOnly) {
           const key = String(product.bulkbuyKey || "");
           const cachedRule = key ? context.dealCache?.bulkRules?.[key] : null;
-          if (key && (!cachedRule ||
-            cachedRule.cacheUntil && cachedRule.cacheUntil <= Date.now())) {
+          if (key && cachedBulkRuleDecision(cachedRule) !== cachedRule) {
             return null;
           }
           options = { bulkRule: cachedRule };
