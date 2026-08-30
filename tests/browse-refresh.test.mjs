@@ -128,6 +128,10 @@ test("只隐藏理论价不低于购物车或稍后再买版本的卡片", () =>
     functionSource("accountReminderData"),
     /evaluateCartVisibility[\s\S]*?shouldHideCartedCard[\s\S]*?cartPrices\.map/,
   );
+  assert.match(
+    functionSource("accountReminderData"),
+    /activeGroups\.has\(identity\.lang\) \|\| laterGroups\.has\(identity\.lang\)[\s\S]*?hideCarted = true/,
+  );
 });
 
 test("浏览优惠区重绘时迁移已有购买状态而不是先删除", () => {
@@ -146,12 +150,34 @@ test("账号提醒同时覆盖购物车卡片并复用当页语言元数据", ()
   const reminderSource = functionSource("renderAccountReminderForCard");
   const refreshSource = functionSource("refreshAllAccountReminders");
   const cartLayoutSource = functionSource("renderCartDealLayout");
-  assert.match(dataSource, /dealInsightById\.get\(id\)\?\.product \|\| metadataProductFromCache\(id\)/);
+  assert.match(
+    dataSource,
+    /dealInsightById\.get\(id\)\?\.product \|\|\s*metadataProductFromCache\(id, context\?\.dealCache\)/,
+  );
   assert.match(reminderSource, /\.dltracker-cart-host \.dltracker-cart-layout/);
   assert.doesNotMatch(refreshSource, /filter\(\(\{ cartItem \}\) => !cartItem\)/);
   assert.match(cartLayoutSource, /preservedReminders = previousLayout\?\.querySelector/);
   assert.match(cartLayoutSource, /if \(preservedReminders\) card\.prepend\(preservedReminders\)/);
   assert.match(source, /\.dltracker-cart-layout\.is-account-purchased \{\s*filter: grayscale\(0\.38\);/);
+});
+
+test("浏览卡并行补全史低且账号提醒复用整页缓存快照", () => {
+  const enhanceSource = functionSource("enhanceGenericBrowseCards");
+  const preloadSource = functionSource("preloadBrowseBulkRules");
+  const refreshSource = functionSource("refreshAllAccountReminders");
+  const contextSource = functionSource("createAccountReminderContext");
+  const dataSource = functionSource("accountReminderData");
+  assert.match(enhanceSource, /preloadBrowseBulkRules\(\[\.\.\.metadata\.values\(\)\]\)/);
+  assert.match(enhanceSource, /mapWithConcurrency\(\s*preparedCards,\s*BROWSE_RENDER_CONCURRENCY/);
+  assert.ok(
+    enhanceSource.indexOf("renderBrowseCardAnalysis(analysisHost, { rjCode: id }, null)") <
+      enhanceSource.indexOf("await preloadBrowseBulkRules"),
+  );
+  assert.match(preloadSource, /for \(const product of products \|\| \[\]\)[\s\S]*?await ensureBulkRule\(product\)/);
+  assert.match(contextSource, /index: loadAccountIndex\(\)[\s\S]*?languageCache: loadLanguageFamilyCache\(\)[\s\S]*?dealCache: loadDealCache\(\)/);
+  assert.match(refreshSource, /createAccountReminderContext\(\{ cacheOnly: true \}\)/);
+  assert.match(refreshSource, /mapWithConcurrency\(cards, BROWSE_RENDER_CONCURRENCY/);
+  assert.match(dataSource, /productNeedsLanguageFamilyLookup[\s\S]*?!context\?\.cacheOnly/);
 });
 
 test("无优惠作品也会留下已处理标记供观察器识别", () => {
@@ -226,10 +252,10 @@ test("购物车底部推荐卡显示分析但不作为购物车作品", () => {
     /\.__cart_recommend, \.recommend_list/,
   );
   assert.match(collectSource, /cards\.push\(\{ id, node, cartItem, cartRecommendation \}\)/);
-  assert.match(enhanceSource, /async \(\{ id, node, cartItem \}\)/);
-  assert.match(enhanceSource, /const cartHost = cartItem/);
+  assert.match(enhanceSource, /for \(const \{ id, node, cartItem \} of cards\)/);
+  assert.match(enhanceSource, /card\.cartHost = card\.cartItem/);
   assert.match(enhanceSource, /const analysisHost = cartItem \? null : ensureBrowseAnalysisHost\(node\)/);
-  assert.match(enhanceSource, /renderBrowseCardAnalysis\(analysisHost, record, insight\)/);
+  assert.match(enhanceSource, /renderBrowseCardAnalysis\(card\.analysisHost, record, card\.insight\)/);
   assert.match(mutationSource, /\(\{ cartRecommendation \}\) => cartRecommendation/);
   assert.match(mutationSource, /scheduleCartBootstrap\(\)/);
   assert.doesNotMatch(functionSource("cartProductsFromRoot"), /cartRecommendation/);

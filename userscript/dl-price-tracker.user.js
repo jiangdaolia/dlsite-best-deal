@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.49
+// @version      0.6.50
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.49";
+  const APP_VERSION = "0.6.50";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -32,6 +32,7 @@
   const BATCH_INTERVAL_MS = 1000;
   const REQUEST_TIMEOUT_MS = 10000;
   const CART_RENDER_CONCURRENCY = 4;
+  const BROWSE_RENDER_CONCURRENCY = 4;
   const RETRYABLE_FETCH_ATTEMPTS = 1;
   const RETRY_BASE_DELAY_MS = 450;
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -75,6 +76,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.50": [
+      "浏览卡史低并行补全，慢请求不再逐张堵住整个列表",
+      "账号提醒复用整页缓存，不再为陌生浏览卡逐个读取详情页",
+    ],
     "0.6.49": [
       "隐藏购物车/稍后再买改为按同作品语言版理论价比较",
       "当前卡片更便宜或价格未读全时保留，同价或更贵才隐藏",
@@ -2720,9 +2725,13 @@
     };
   }
 
-  function accountEntriesForFamily(familyId, index = loadAccountIndex()) {
+  function accountEntriesForFamily(
+    familyId,
+    index = loadAccountIndex(),
+    languageCache = null,
+  ) {
     const target = String(familyId || "").toUpperCase();
-    const cache = loadLanguageFamilyCache();
+    const cache = languageCache || loadLanguageFamilyCache();
     return Object.values(index.entries || {}).filter((entry) => {
       const resolved = cache.parents[String(entry?.id || "").toUpperCase()] ||
         cache.parents[String(entry?.parentId || "").toUpperCase()] ||
@@ -6486,28 +6495,59 @@
     return visible.join("、");
   }
 
-  function metadataProductFromCache(id) {
-    const entry = loadDealCache().metadata[String(id || "").toUpperCase()];
+  function metadataProductFromCache(id, cache = null) {
+    const entry = (cache || loadDealCache()).metadata[String(id || "").toUpperCase()];
     return entry?.raw
       ? normalizedMetadataProduct(String(id).toUpperCase(), entry.raw)
       : null;
   }
 
-  async function theoreticalPriceForAccountEntry(entry) {
+  async function theoreticalPriceForAccountEntry(entry, context = null) {
     const id = String(entry?.parentId || entry?.id || "").toUpperCase();
-    let insight = dealInsightById.get(id);
-    if (!insight) {
-      const metadata = await ensureProductMetadataBatches([id]);
-      const product = metadata.get(id);
-      if (!product) return null;
-      insight = await buildInsight(
-        product,
-        latestDealContext.coupons,
-        latestDealContext.cartSnapshot.active || [],
-      );
-    }
-    const price = calculateHypotheticalPrice(insight.product, insight.bestReach);
-    return Number.isFinite(price) ? { price, insight } : null;
+    const tasks = context?.theoreticalPriceTasks;
+    if (tasks?.has(id)) return tasks.get(id);
+    const task = (async () => {
+      let insight = dealInsightById.get(id);
+      if (!insight) {
+        let product = metadataProductFromCache(id, context?.dealCache);
+        if (!product && !context?.cacheOnly) {
+          const metadata = await ensureProductMetadataBatches([id]);
+          product = metadata.get(id);
+        }
+        if (!product) return null;
+        let options = {};
+        if (context?.cacheOnly) {
+          const key = String(product.bulkbuyKey || "");
+          const cachedRule = key ? context.dealCache?.bulkRules?.[key] : null;
+          if (key && (!cachedRule ||
+            cachedRule.cacheUntil && cachedRule.cacheUntil <= Date.now())) {
+            return null;
+          }
+          options = { bulkRule: cachedRule };
+        }
+        insight = await buildInsight(
+          product,
+          latestDealContext.coupons,
+          latestDealContext.cartSnapshot.active || [],
+          false,
+          options,
+        );
+      }
+      const price = calculateHypotheticalPrice(insight.product, insight.bestReach);
+      return Number.isFinite(price) ? { price, insight } : null;
+    })();
+    if (tasks) tasks.set(id, task);
+    return task;
+  }
+
+  function createAccountReminderContext({ cacheOnly = false } = {}) {
+    return {
+      index: loadAccountIndex(),
+      languageCache: loadLanguageFamilyCache(),
+      dealCache: loadDealCache(),
+      theoreticalPriceTasks: new Map(),
+      cacheOnly,
+    };
   }
 
   function shouldHideCartedCard(currentPrice, cartedPrices) {
@@ -6518,18 +6558,25 @@
     return currentPrice >= Math.min(...cartedPrices);
   }
 
-  async function accountReminderData(productId, { evaluateCartVisibility = false } = {}) {
+  async function accountReminderData(
+    productId,
+    { evaluateCartVisibility = false, context = null } = {},
+  ) {
     const id = String(productId || "").toUpperCase();
-    const index = loadAccountIndex();
+    const index = context?.index || loadAccountIndex();
     if (!index.loaded) return null;
-    let product = dealInsightById.get(id)?.product || metadataProductFromCache(id);
-    if (!product) product = (await ensureProductMetadataBatches([id])).get(id);
+    let product = dealInsightById.get(id)?.product ||
+      metadataProductFromCache(id, context?.dealCache);
+    if (!product && !context?.cacheOnly) {
+      product = (await ensureProductMetadataBatches([id])).get(id);
+    }
     if (!product) return null;
     const identity = productLanguageIdentity(product, id);
-    const languageCache = loadLanguageFamilyCache();
+    const languageCache = context?.languageCache || loadLanguageFamilyCache();
     let familyId = languageCache.parents[id] ||
       languageCache.parents[identity.parentId] || identity.familyId;
-    if (productNeedsLanguageFamilyLookup(product) && !languageCache.parents[id]) {
+    if (productNeedsLanguageFamilyLookup(product) && !languageCache.parents[id] &&
+      !context?.cacheOnly) {
       try {
         const family = await ensureLanguageFamily(id, { knownProduct: product });
         familyId = family.familyId;
@@ -6537,7 +6584,7 @@
         console.warn(`[${APP_NAME}] card language family failed for ${id}:`, error);
       }
     }
-    const familyEntries = accountEntriesForFamily(familyId, index);
+    const familyEntries = accountEntriesForFamily(familyId, index, languageCache);
     const exactIndexed = index.entries[id];
     const exactKnown = index.active.includes(id) || index.later.includes(id) ||
       index.bought.includes(id);
@@ -6567,27 +6614,32 @@
         currentPrice = await theoreticalPriceForAccountEntry({
           id,
           parentId: identity.parentId,
-        });
+        }, context);
       }
       return currentPrice;
     };
     const getCartPrice = async (entry) => {
       const key = String(entry?.id || entry?.parentId || "").toUpperCase();
       if (!cartPriceById.has(key)) {
-        cartPriceById.set(key, await theoreticalPriceForAccountEntry(entry));
+        cartPriceById.set(key, await theoreticalPriceForAccountEntry(entry, context));
       }
       return cartPriceById.get(key);
     };
     let hideCarted = false;
     if (carted && evaluateCartVisibility) {
-      const [visiblePrice, cartPrices] = await Promise.all([
-        getCurrentPrice(),
-        Promise.all(cartEntries.map((entry) => getCartPrice(entry))),
-      ]);
-      hideCarted = shouldHideCartedCard(
-        visiblePrice?.price,
-        cartPrices.map((item) => item?.price),
-      );
+      if (activeGroups.has(identity.lang) || laterGroups.has(identity.lang)) {
+        // 同一语言的母编号与实际译者 SKU 价格一致，无需重复计算。
+        hideCarted = true;
+      } else {
+        const [visiblePrice, cartPrices] = await Promise.all([
+          getCurrentPrice(),
+          Promise.all(cartEntries.map((entry) => getCartPrice(entry))),
+        ]);
+        hideCarted = shouldHideCartedCard(
+          visiblePrice?.price,
+          cartPrices.map((item) => item?.price),
+        );
+      }
     }
     const lines = [];
     let purchased = false;
@@ -6637,7 +6689,7 @@
       : null;
   }
 
-  async function renderAccountReminderForCard(node, id) {
+  async function renderAccountReminderForCard(node, id, context = null) {
     const browseLayout = node?.querySelector?.(
       ".dltracker-browse-analysis-host .dltracker-browse-analysis",
     );
@@ -6651,6 +6703,7 @@
     accountReminderRenderTokens.set(layout, renderToken);
     const data = await accountReminderData(id, {
       evaluateCartVisibility: isBrowseLayout,
+      context,
     });
     if (!layout.isConnected || accountReminderRenderTokens.get(layout) !== renderToken) return;
     const existing = layout.querySelector(".dltracker-account-reminders");
@@ -6701,8 +6754,10 @@
 
   async function refreshAllAccountReminders() {
     const cards = collectBrowseCards();
-    await mapWithConcurrency(cards, 1, ({ node, id }) =>
-      renderAccountReminderForCard(node, id));
+    const context = createAccountReminderContext({ cacheOnly: true });
+    if (!context.index.loaded) return;
+    await mapWithConcurrency(cards, BROWSE_RENDER_CONCURRENCY, ({ node, id }) =>
+      renderAccountReminderForCard(node, id, context));
   }
 
   function languageDetailUrl(parentId, childId = "") {
@@ -7975,8 +8030,16 @@
     }
   }
 
-  async function buildInsight(product, coupons, cartProducts, partial = false) {
-    const bulkRule = await ensureBulkRule(product);
+  async function buildInsight(
+    product,
+    coupons,
+    cartProducts,
+    partial = false,
+    buildOptions = {},
+  ) {
+    const bulkRule = Object.prototype.hasOwnProperty.call(buildOptions, "bulkRule")
+      ? buildOptions.bulkRule
+      : await ensureBulkRule(product);
     const bulkRules = new Map(latestDealContext.bulkRules || []);
     if (product?.bulkbuyKey && bulkRule) {
       bulkRules.set(String(product.bulkbuyKey), bulkRule);
@@ -8007,6 +8070,16 @@
     return insight;
   }
 
+  async function preloadBrowseBulkRules(products) {
+    const rules = new Map();
+    for (const product of products || []) {
+      const key = String(product?.bulkbuyKey || "");
+      if (!key || rules.has(key)) continue;
+      rules.set(key, await ensureBulkRule(product));
+    }
+    return rules;
+  }
+
   async function enhanceGenericBrowseCards(coupons, cartProducts) {
     const cards = collectBrowseCards();
     if (!cards.length) return;
@@ -8019,12 +8092,13 @@
       id: item.id,
       price: item.price || metadata.get(item.id)?.price || 0,
     }));
-    // 活动页同源请求也保持串行，避免列表上出现并发访问。
-    await mapWithConcurrency(cards, 1, async ({ id, node, cartItem }) => {
+    const cartPage = isCartPage(location.href);
+    const preparedCards = [];
+    for (const { id, node, cartItem } of cards) {
       const priceHost = findBrowsePriceHost(node);
       if (!priceHost) {
         markDealProcessed(node, id);
-        return;
+        continue;
       }
       const priceMatch = (priceHost.textContent || "")
         .replace(/,/g, "")
@@ -8050,7 +8124,6 @@
             (!coupon.maxPrice || product.price > 0),
           )
         : coupons;
-      const cartPage = isCartPage(location.href);
       if (cartPage) {
         priceHost.querySelector(".dltracker-jpy-price")?.remove();
       } else {
@@ -8062,51 +8135,86 @@
         renderBrowseCardAnalysis(analysisHost, { rjCode: id }, null);
       }
       renderBrowseVoiceActors(node, product);
-      const insight = await buildInsight(product, usableCoupons, enrichedCartProducts, partial);
-      const cartHost = cartItem
-        ? node.querySelector(".dltracker-cart-host") ||
-          ensureCartRenderHost(node)
+      preparedCards.push({
+        id,
+        node,
+        cartItem,
+        product,
+        partial,
+        usableCoupons,
+        analysisHost,
+      });
+    }
+    // 先串行读取同源活动页并完成全部卡片的本地分析，再并行补全 DLwatcher 史低。
+    // 这样不会增加 DLsite 的同源并发访问，也不会让一张慢卡片堵住整个列表。
+    const browseBulkRules = await preloadBrowseBulkRules([...metadata.values()]);
+    await Promise.all(preparedCards.map(async (card) => {
+      const bulkbuyKey = String(card.product.bulkbuyKey || "");
+      card.insight = await buildInsight(
+        card.product,
+        card.usableCoupons,
+        enrichedCartProducts,
+        card.partial,
+        bulkbuyKey && browseBulkRules.has(bulkbuyKey)
+          ? { bulkRule: browseBulkRules.get(bulkbuyKey) }
+          : {},
+      );
+      card.cartHost = card.cartItem
+        ? card.node.querySelector(".dltracker-cart-host") ||
+          ensureCartRenderHost(card.node)
         : null;
-      if (cartHost) {
-        const record = browseRecordById.get(String(id).toUpperCase()) || {
-          rjCode: id,
+      if (card.cartHost) {
+        const record = browseRecordById.get(String(card.id).toUpperCase()) || {
+          rjCode: card.id,
         };
-        renderCartDealLayout(cartHost, record, insight);
+        renderCartDealLayout(card.cartHost, record, card.insight);
       }
-
-      let record = browseRecordById.get(String(id).toUpperCase()) || {
-        rjCode: id,
-      };
-      if (/^[RB]J/i.test(id)) {
-        const link = node.querySelector('a[href*="product_id/"]');
-        record = await buildOrUpdateRecord({
-          rjCode: id,
-          title: link?.textContent?.trim() || id,
-          currentPrice: product.price || undefined,
-          forceFetch: false,
-        }) || { rjCode: id };
-        browseRecordById.set(String(id).toUpperCase(), record || { rjCode: id });
-        if (record?.voiceActors?.length) {
-          renderBrowseVoiceActors(node, {
-            ...product,
-            voiceActors: extractVoiceActorNames([
-              product.voiceActors || [],
-              record.voiceActors,
-            ]),
-          });
-        }
-      }
-      if (cartHost) {
-        renderPriceCard(record, cartHost);
-      } else if (analysisHost) {
-        renderBrowseCardAnalysis(analysisHost, record, insight);
-      }
-      markDealProcessed(node, id);
-    });
+    }));
     injectBrowseControls();
     await applyBrowseSortAndFilter();
     void refreshAllAccountReminders().catch((error) => {
       console.warn(`[${APP_NAME}] account reminder refresh failed:`, error);
+    });
+    await mapWithConcurrency(
+      preparedCards,
+      BROWSE_RENDER_CONCURRENCY,
+      async (card) => {
+        let record = browseRecordById.get(String(card.id).toUpperCase()) || {
+          rjCode: card.id,
+        };
+        if (/^[RB]J/i.test(card.id)) {
+          const link = card.node.querySelector('a[href*="product_id/"]');
+          record = await buildOrUpdateRecord({
+            rjCode: card.id,
+            title: link?.textContent?.trim() || card.id,
+            currentPrice: card.product.price || undefined,
+            forceFetch: false,
+          }) || { rjCode: card.id };
+          browseRecordById.set(
+            String(card.id).toUpperCase(),
+            record || { rjCode: card.id },
+          );
+          if (record?.voiceActors?.length) {
+            renderBrowseVoiceActors(card.node, {
+              ...card.product,
+              voiceActors: extractVoiceActorNames([
+                card.product.voiceActors || [],
+                record.voiceActors,
+              ]),
+            });
+          }
+        }
+        if (card.cartHost) {
+          renderPriceCard(record, card.cartHost);
+        } else if (card.analysisHost) {
+          renderBrowseCardAnalysis(card.analysisHost, record, card.insight);
+        }
+        markDealProcessed(card.node, card.id);
+      },
+    );
+    await applyBrowseSortAndFilter();
+    void refreshAllAccountReminders().catch((error) => {
+      console.warn(`[${APP_NAME}] final account reminder refresh failed:`, error);
     });
   }
 
