@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.48
+// @version      0.6.49
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.48";
+  const APP_VERSION = "0.6.49";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -75,6 +75,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.49": [
+      "隐藏购物车/稍后再买改为按同作品语言版理论价比较",
+      "当前卡片更便宜或价格未读全时保留，同价或更贵才隐藏",
+    ],
     "0.6.48": [
       "已购索引不再把历史译者SKU当成独立作品或日语版",
       "公开资料已清空时按同社团同标题找回原作家族，仅保留购买SKU作为已购凭证",
@@ -6506,7 +6510,15 @@
     return Number.isFinite(price) ? { price, insight } : null;
   }
 
-  async function accountReminderData(productId) {
+  function shouldHideCartedCard(currentPrice, cartedPrices) {
+    if (!Number.isFinite(currentPrice) || !cartedPrices?.length ||
+      cartedPrices.some((price) => !Number.isFinite(price))) {
+      return false;
+    }
+    return currentPrice >= Math.min(...cartedPrices);
+  }
+
+  async function accountReminderData(productId, { evaluateCartVisibility = false } = {}) {
     const id = String(productId || "").toUpperCase();
     const index = loadAccountIndex();
     if (!index.loaded) return null;
@@ -6544,6 +6556,39 @@
     const activeGroups = groupedAccountEntries(familyEntries, index.active);
     const laterGroups = groupedAccountEntries(familyEntries, index.later);
     const carted = activeGroups.size > 0 || laterGroups.size > 0;
+    const cartEntries = [...activeGroups.values(), ...laterGroups.values()]
+      .flat().filter((entry, position, values) => values.findIndex((candidate) =>
+        String(candidate?.id || "").toUpperCase() ===
+        String(entry?.id || "").toUpperCase()) === position);
+    let currentPrice = null;
+    const cartPriceById = new Map();
+    const getCurrentPrice = async () => {
+      if (!currentPrice) {
+        currentPrice = await theoreticalPriceForAccountEntry({
+          id,
+          parentId: identity.parentId,
+        });
+      }
+      return currentPrice;
+    };
+    const getCartPrice = async (entry) => {
+      const key = String(entry?.id || entry?.parentId || "").toUpperCase();
+      if (!cartPriceById.has(key)) {
+        cartPriceById.set(key, await theoreticalPriceForAccountEntry(entry));
+      }
+      return cartPriceById.get(key);
+    };
+    let hideCarted = false;
+    if (carted && evaluateCartVisibility) {
+      const [visiblePrice, cartPrices] = await Promise.all([
+        getCurrentPrice(),
+        Promise.all(cartEntries.map((entry) => getCartPrice(entry))),
+      ]);
+      hideCarted = shouldHideCartedCard(
+        visiblePrice?.price,
+        cartPrices.map((item) => item?.price),
+      );
+    }
     const lines = [];
     let purchased = false;
     if (boughtGroups.has(identity.lang)) {
@@ -6571,17 +6616,14 @@
         }
       }
       if (otherCartEntries.length) {
-        const currentPrice = await theoreticalPriceForAccountEntry({
-          id,
-          parentId: identity.parentId,
-        });
+        const visiblePrice = await getCurrentPrice();
         const parts = [];
         for (const item of otherCartEntries.slice(0, 2)) {
-          const otherPrice = await theoreticalPriceForAccountEntry(item.entry);
+          const otherPrice = await getCartPrice(item.entry);
           let compare = "";
-          if (currentPrice && otherPrice) {
-            if (otherPrice.price < currentPrice.price) compare = "，比当前便宜";
-            else if (otherPrice.price > currentPrice.price) compare = "，当前更便宜";
+          if (visiblePrice && otherPrice) {
+            if (otherPrice.price < visiblePrice.price) compare = "，比当前便宜";
+            else if (otherPrice.price > visiblePrice.price) compare = "，当前更便宜";
             else compare = "，与当前同价";
           }
           parts.push(`${languageDisplayName(item.lang)}版在${item.area}${compare}`);
@@ -6591,7 +6633,7 @@
       }
     }
     return lines.length
-      ? { lines, purchased, carted, identity: { ...identity, familyId } }
+      ? { lines, purchased, carted, hideCarted, identity: { ...identity, familyId } }
       : null;
   }
 
@@ -6607,7 +6649,9 @@
     const isBrowseLayout = layout === browseLayout;
     const renderToken = (accountReminderRenderTokens.get(layout) || 0) + 1;
     accountReminderRenderTokens.set(layout, renderToken);
-    const data = await accountReminderData(id);
+    const data = await accountReminderData(id, {
+      evaluateCartVisibility: isBrowseLayout,
+    });
     if (!layout.isConnected || accountReminderRenderTokens.get(layout) !== renderToken) return;
     const existing = layout.querySelector(".dltracker-account-reminders");
     if (!data) {
@@ -6622,13 +6666,14 @@
     }
     if (isBrowseLayout) {
       node.classList.toggle("dltracker-browse-purchased-card", Boolean(data.purchased));
-      node.classList.toggle("dltracker-browse-carted-card", Boolean(data.carted));
+      node.classList.toggle("dltracker-browse-carted-card", Boolean(data.hideCarted));
       syncBrowseCardVisibility(node);
     }
     const signature = JSON.stringify({
       lines: data.lines,
       purchased: data.purchased,
       carted: data.carted,
+      hideCarted: data.hideCarted,
     });
     if (existing?.dataset.reminderSignature === signature &&
       layout.classList.contains("is-account-purchased") === Boolean(data.purchased)) {

@@ -105,7 +105,29 @@ test("浏览控制区可单独隐藏购物车或稍后再买的语言家族", ()
     functionSource("accountReminderData"),
     /const carted = activeGroups\.size > 0 \|\| laterGroups\.size > 0/,
   );
-  assert.match(functionSource("renderAccountReminderForCard"), /dltracker-browse-carted-card/);
+  assert.match(
+    functionSource("renderAccountReminderForCard"),
+    /dltracker-browse-carted-card", Boolean\(data\.hideCarted\)/,
+  );
+});
+
+test("只隐藏理论价不低于购物车或稍后再买版本的卡片", () => {
+  const sandbox = {};
+  vm.runInNewContext(
+    `${functionSource("shouldHideCartedCard")}
+    globalThis.shouldHide = shouldHideCartedCard;`,
+    sandbox,
+  );
+  assert.equal(sandbox.shouldHide(100, [100]), true);
+  assert.equal(sandbox.shouldHide(120, [100]), true);
+  assert.equal(sandbox.shouldHide(80, [100]), false);
+  assert.equal(sandbox.shouldHide(120, [100, 90]), true);
+  assert.equal(sandbox.shouldHide(120, [100, null]), false);
+  assert.equal(sandbox.shouldHide(null, [100]), false);
+  assert.match(
+    functionSource("accountReminderData"),
+    /evaluateCartVisibility[\s\S]*?shouldHideCartedCard[\s\S]*?cartPrices\.map/,
+  );
 });
 
 test("浏览优惠区重绘时迁移已有购买状态而不是先删除", () => {

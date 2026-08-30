@@ -426,7 +426,10 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /\["语言索引", accountIndexProgressText\(index, reading\)\]/);
   assert.match(source, /window\.addEventListener\("pagehide", releaseAccountIndexLock\)/);
   assert.match(source, /event\.key === ACCOUNT_INDEX_STORAGE_KEY[\s\S]*?refreshAccountInformationPanels\(\)/);
-  assert.match(source, /const data = await accountReminderData\(id\);[\s\S]*?existing\.replaceWith\(reminders\)/);
+  assert.match(
+    source,
+    /const data = await accountReminderData\(id, \{[\s\S]*?evaluateCartVisibility: isBrowseLayout,[\s\S]*?existing\.replaceWith\(reminders\)/,
+  );
   assert.match(source, /existing\?\.dataset\.reminderSignature === signature/);
   assert.doesNotMatch(source, /layout\.querySelector\("\.dltracker-account-reminders"\)\?\.remove\(\);\s*layout\.classList\.remove\("is-account-purchased"\);\s*const data = await accountReminderData/);
   assert.match(source, /mode: "cart"[\s\S]*obj_nocheck: "1"[\s\S]*product_id:/);
