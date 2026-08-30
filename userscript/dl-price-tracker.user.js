@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.46
+// @version      0.6.47
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.46";
+  const APP_VERSION = "0.6.47";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -66,7 +66,7 @@
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_SIZE = 40;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
-  const ACCOUNT_INDEX_REQUEST_VERSION = 10;
+  const ACCOUNT_INDEX_REQUEST_VERSION = 11;
   const ACCOUNT_INDEX_LOCK_TTL_MS = 60 * 1000;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
@@ -75,6 +75,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.47": [
+      "兼容RJ01212161这类详情已下架但作品接口仍可识别的多语言单SKU",
+      "语言选项同时包含日语与其他语言时按日语原作归类，不再误补读404详情页",
+    ],
     "0.6.46": [
       "批量作品接口缺失的账号作品改为匿名读取一次公开详情页，尽量补回语言家族",
       "语言索引未取得项目时直接显示作品编号，方便确认已下架或不可访问的作品",
@@ -2402,7 +2406,7 @@
     if (explicit) return explicit;
     const options = String(product?.raw?.options || product?.raw?.option || "")
       .toUpperCase().split(/[# ,]+/);
-    return ["CHI_HANS", "CHI_HANT", "KO_KR", "ENG", "JPN"]
+    return ["JPN", "CHI_HANS", "CHI_HANT", "KO_KR", "ENG"]
       .find((code) => options.includes(code)) || "JPN";
   }
 

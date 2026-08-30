@@ -135,6 +135,23 @@ test("RJ01285872这类非日语原作标记改用详情页日语版本作为家�
   );
 });
 
+test("RJ01212161这类含日语的多语言单SKU不误判成独立翻译", () => {
+  const product = {
+    id: "RJ01212161",
+    raw: { options: "OTM#SND#JPN#ENG#CHI_HANT#CHI_HANS#KO_KR#CHI" },
+    translationInfo: {
+      is_original: true,
+      original_workno: null,
+      parent_workno: null,
+      lang: null,
+    },
+  };
+  const identity = productLanguageIdentity(product);
+  assert.equal(identity.lang, "JPN");
+  assert.equal(identity.familyId, "RJ01212161");
+  assert.equal(productNeedsLanguageFamilyLookup(product), false);
+});
+
 test("语言选择器一次给出父编号、中文语言名和 DLsite 顺序", () => {
   const payload = JSON.stringify([
     { workno: "RJ01076373", lang: "JPN", display_label: "日本語", display_order: 1, price: 1760 },
@@ -276,7 +293,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 40/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 \* 1000/);
-  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 10/);
+  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 11/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_STORAGE_KEY = "dltracker-account-index-lock-v1"/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_TTL_MS = 60 \* 1000/);
   assert.match(source, /fetchSameOriginText\(url, "作品信息接口", \{\s*anonymous: true/);
