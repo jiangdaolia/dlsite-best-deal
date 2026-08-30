@@ -163,6 +163,10 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /loaded: true,[\s\S]*?total: ids\.length,[\s\S]*?refreshAccountInformationPanels\(\);[\s\S]*?for \(let start = 0; start < ids\.length/);
   assert.match(source, /start \+= ACCOUNT_METADATA_BATCH_SIZE[\s\S]*?slice\(start, start \+ ACCOUNT_METADATA_BATCH_SIZE\)/);
   assert.match(source, /ids\.length && next\.indexed === 0[\s\S]*?语言索引未取得任何作品信息/);
+  assert.match(source, /index\.loaded && !index\.complete && processed < index\.total[\s\S]*?return refreshAccountIndex\(\)/);
+  assert.match(source, /语言索引已暂停：[\s\S]*?剩余\$\{remaining\}项/);
+  assert.match(source, /已暂停，剩余\$\{remaining\}项/);
+  assert.match(source, /else if \(!dealSessionStopped\) \{[\s\S]*?failedIds\.push\(id\)/);
   assert.match(source, /\["状态", index\.loaded \? "正在重新读取…" : "正在读取购物车和已购清单…"\]/);
   assert.match(source, /\["状态", `读取失败：\$\{accountIndexRuntimeError\}`\]/);
   assert.match(source, /if \(reading && indexed < total\) return `\$\{indexed\}\/\$\{total\}（读取中）`/);

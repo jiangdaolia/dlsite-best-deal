@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.34
+// @version      0.6.35
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.34";
+  const APP_VERSION = "0.6.35";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -71,6 +71,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.35": [
+      "自动续接被页面刷新或跳转中断的账号语言索引，并显示暂停原因与剩余数量",
+      "浏览优惠区重绘时迁移现有购买状态节点，彻底避免已购买按钮闪烁",
+    ],
     "0.6.34": [
       "浏览列表与稍后再买新增平台折扣失效时间排序，最早失效优先",
       "账号信息按钮在列表节点复用或页面缓存恢复后重新绑定弹窗事件",
@@ -367,6 +371,7 @@
   let dealCouponFetchInFlight = null;
   let importedCouponPageUrl = "";
   let dealSessionStopped = false;
+  let dealSessionStopReason = "";
   let insightBootstrapInFlight = null;
   const dealInsightById = new Map();
   const browseRecordById = new Map();
@@ -2043,6 +2048,7 @@
 
   function stopDealRequests(reason) {
     dealSessionStopped = true;
+    dealSessionStopReason = String(reason || "检测到风控信号");
     console.warn(`[${APP_NAME}] DLsite deal requests stopped for this page: ${reason}`);
   }
 
@@ -2549,7 +2555,7 @@
         for (const id of batchIds) {
           const product = metadata.get(id);
           if (product) entries[id] = accountEntryFromProduct(id, product);
-          else {
+          else if (!dealSessionStopped) {
             entries[id] = accountEntryFromProduct(id, { id });
             failedIds.push(id);
           }
@@ -2571,12 +2577,10 @@
         });
         refreshAccountInformationPanels();
         if (dealSessionStopped) {
-          for (const remainingId of ids.slice(start + batchIds.length)) {
-            if (!entries[remainingId]) {
-              entries[remainingId] = accountEntryFromProduct(remainingId, { id: remainingId });
-              failedIds.push(remainingId);
-            }
-          }
+          const remaining = ids.filter((id) => !entries[id]).length;
+          accountIndexRuntimeError = `语言索引已暂停：${dealSessionStopReason || "本页请求已停止"}${
+            remaining ? `；剩余${remaining}项` : ""
+          }`;
           break;
         }
         if (start + ACCOUNT_METADATA_BATCH_SIZE < ids.length) {
@@ -2592,13 +2596,13 @@
         entries,
         indexed: Object.keys(entries).length - failedIds.length,
         total: ids.length,
-        complete: failedIds.length === 0,
+        complete: Object.keys(entries).length === ids.length && failedIds.length === 0,
         failedIds,
         updatedAt: Date.now(),
         lastManualAt: manualStartedAt,
         accountFingerprint: fingerprint,
       };
-      if (ids.length && next.indexed === 0) {
+      if (ids.length && next.indexed === 0 && !accountIndexRuntimeError) {
         accountIndexRuntimeError = "语言索引未取得任何作品信息，请稍后重新读取";
       }
       saveAccountIndex(next);
@@ -2640,6 +2644,10 @@
     } catch { /* noop */ }
     if (purchaseComplete && !purchaseAlreadyHandled) {
       try { sessionStorage.setItem(purchaseKey, location.href); } catch { /* noop */ }
+      return refreshAccountIndex();
+    }
+    const processed = Object.keys(index.entries || {}).length;
+    if (index.loaded && !index.complete && processed < index.total) {
       return refreshAccountIndex();
     }
     if (!index.loaded) return refreshAccountIndex();
@@ -5593,10 +5601,16 @@
 
   function renderBrowseCardAnalysis(host, record, insight) {
     if (!host) return;
+    const previousLayout = host.querySelector(":scope > .dltracker-browse-analysis");
+    const existingReminders = previousLayout?.querySelector(
+      ":scope > .dltracker-account-reminders",
+    );
+    const purchased = previousLayout?.classList.contains("is-account-purchased");
     const layout = document.createElement("section");
     layout.className = `${UI_CLASSNAME} dltracker-browse-analysis${
       shouldStackBrowseAnalysis() ? " is-stacked" : ""
-    }`;
+    }${purchased ? " is-account-purchased" : ""}`;
+    if (existingReminders) layout.appendChild(existingReminders);
     const id = String(record?.rjCode || insight?.product?.id || "").toUpperCase();
     if (id) layout.dataset.productId = id;
     if (Number.isFinite(record?.lowestPrice)) {
@@ -5722,7 +5736,10 @@
     if (reading && indexed < total) return `${indexed}/${total}（读取中）`;
     if (index?.complete) return `${indexed}/${total}`;
     const failed = Array.isArray(index?.failedIds) ? index.failedIds.length : 0;
-    return `${indexed}/${total}${failed ? `（${failed}项未取得）` : "（未完成）"}`;
+    if (failed) return `${indexed}/${total}（${failed}项未取得）`;
+    const processed = Object.keys(index?.entries || {}).length;
+    const remaining = Math.max(0, total - processed);
+    return `${indexed}/${total}${remaining ? `（已暂停，剩余${remaining}项）` : "（未完成）"}`;
   }
 
   function renderAccountInformationPanel(panel) {

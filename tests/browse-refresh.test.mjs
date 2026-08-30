@@ -95,6 +95,17 @@ test("浏览控制区可以持久隐藏已购买作品并与凑单筛选合并",
   assert.match(source, /\.dltracker-browse-purchased-hidden \{\s*display: none !important;/);
 });
 
+test("浏览优惠区重绘时迁移已有购买状态而不是先删除", () => {
+  const renderSource = functionSource("renderBrowseCardAnalysis");
+  assert.match(renderSource, /existingReminders = previousLayout\?\.querySelector/);
+  assert.match(renderSource, /purchased \? " is-account-purchased" : ""/);
+  assert.match(renderSource, /if \(existingReminders\) layout\.appendChild\(existingReminders\)/);
+  assert.ok(
+    renderSource.indexOf("layout.appendChild(existingReminders)") <
+      renderSource.indexOf("host.replaceChildren(layout)"),
+  );
+});
+
 test("无优惠作品也会留下已处理标记供观察器识别", () => {
   assert.match(functionSource("enhanceGenericBrowseCards"), /markDealProcessed\(node, id\)/);
   assert.match(functionSource("installSpaListeners"), /needsDealProcessing\(node, id\)/);
