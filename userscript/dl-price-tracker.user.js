@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.27
+// @version      0.6.28
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.27";
+  const APP_VERSION = "0.6.28";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -67,6 +67,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.28": [
+      "缩小购物车的语言版本比较入口，使其与 DLsite 原生操作按钮协调",
+      "语言版本加入购物车后自动刷新购物车页，无需手动刷新",
+      "按实际语言商品编号精确执行移出操作，并在确认中明确语言与编号",
+    ],
     "0.6.27": [
       "新增同一作品各语言版本的理论最低价、平台折扣与独立史低比较",
       "新增账号信息索引，在浏览卡提示已购买及购物车中的其他语言版本",
@@ -1130,6 +1135,8 @@
   }
 
   function extractRjCodeFromCartItem(item) {
+    const concrete = concreteCartProductId(item);
+    if (concrete) return concrete;
     const fromData =
       item.getAttribute("data-workno") ||
       item.getAttribute("data-product-id") ||
@@ -2240,6 +2247,41 @@
       product,
     );
     return { id, parentId, familyId, lang };
+  }
+
+  function cartSkuFromSignals(signals = {}) {
+    const valid = (value) => {
+      const normalized = String(value || "").toUpperCase();
+      return isValidProductCode(normalized) ? normalized : "";
+    };
+    const parseHref = (href) => {
+      if (!href) return { translation: "", product: "" };
+      try {
+        const url = new URL(String(href), "https://www.dlsite.com");
+        const translation = valid(url.searchParams.get("translation"));
+        const fromQuery = valid(
+          url.searchParams.get("product_id") || url.searchParams.get("workno"),
+        );
+        const matched = url.pathname.match(/product_id\/([RBV]J\d{6,})/i);
+        return {
+          translation,
+          product: fromQuery || valid(matched?.[1]),
+        };
+      } catch {
+        return { translation: "", product: "" };
+      }
+    };
+    const actionHref = parseHref(signals.actionHref);
+    const detailHref = parseHref(signals.detailHref);
+    return valid(signals.actionProductId) ||
+      valid(signals.actionWorkno) ||
+      actionHref.translation ||
+      actionHref.product ||
+      detailHref.translation ||
+      valid(signals.dataProductId) ||
+      valid(signals.dataWorkno) ||
+      detailHref.product ||
+      "";
   }
 
   function emptyAccountIndex() {
@@ -5987,14 +6029,40 @@
     });
   }
 
+  function concreteCartProductId(item) {
+    if (!item) return "";
+    const nativeAction = item.querySelector(
+      "a.link_delete, button.link_delete, a.link_move_cart, button.link_move_cart, " +
+      "a.link_move_later, button.link_move_later",
+    );
+    const detailLink = [...item.querySelectorAll('a[href*="product_id/"]')]
+      .find((node) => !node.closest("[class^='dltracker-'], [class*=' dltracker-']"));
+    return cartSkuFromSignals({
+      actionProductId: nativeAction?.getAttribute("data-product-id"),
+      actionWorkno: nativeAction?.getAttribute("data-workno"),
+      actionHref: nativeAction?.getAttribute("href"),
+      detailHref: detailLink?.getAttribute("href"),
+      dataProductId: item.getAttribute("data-product-id"),
+      dataWorkno: item.getAttribute("data-workno"),
+    });
+  }
+
   function nativeCartItemForProduct(id) {
     const target = String(id || "").toUpperCase();
-    return getCartItems().find((item) => {
-      const ids = extractFallbackRjCodesFromCartItem(item, extractRjCodeFromCartItem(item));
-      const primary = extractRjCodeFromCartItem(item);
-      return [primary, ...ids].filter(Boolean)
-        .some((value) => String(value).toUpperCase() === target);
-    }) || null;
+    return getCartItems().find((item) => concreteCartProductId(item) === target) || null;
+  }
+
+  async function waitForNativeCartAction(productId, action) {
+    for (let attempt = 0; attempt < 15; attempt += 1) {
+      const item = nativeCartItemForProduct(productId);
+      if (action === "remove") {
+        if (!item || isHiddenOrRemovedCartItem(item)) return;
+      } else if (item && !isHiddenOrRemovedCartItem(item) && isBuyNowCartItem(item)) {
+        return;
+      }
+      await sleep(200);
+    }
+    throw new Error("DLsite 购物车操作未完成，请稍后手动重试");
   }
 
   async function triggerNativeCartAction(productId, action) {
@@ -6005,20 +6073,18 @@
       location.href = `/${currentDlsiteSection()}/cart`;
       return false;
     }
-    const owner = item.closest("li.cart_list_item, li.n_work_list_item") || item;
     nativeAction.click();
-    await sleep(900);
-    const succeeded = action === "move"
-      ? isHiddenOrRemovedCartItem(owner)
-      : !owner.classList.contains("loading");
-    if (!succeeded) throw new Error("DLsite 购物车操作未完成，请稍后手动重试");
-    const snapshot = cartSnapshotFromRoot(document);
-    saveCartSnapshot(snapshot);
+    await waitForNativeCartAction(productId, action);
+    const snapshot = saveCartSnapshot(cartSnapshotFromRoot(document));
+    latestDealContext = {
+      ...latestDealContext,
+      cartSnapshot: snapshot,
+    };
     updateAccountIndexCart(
       snapshot.active.map((item) => item.id),
       snapshot.later.map((item) => item.id),
     );
-    return true;
+    return snapshot;
   }
 
   async function performLanguageCartAction(row, button) {
@@ -6027,36 +6093,23 @@
     button.disabled = true;
     try {
       if (row.activeId) {
-        const confirmed = window.confirm(`确认从购物车永久移出${row.language}版本 ${row.parentId}？`);
+        const confirmed = window.confirm([
+          `确认从购物车永久移出【${row.language}】版本吗？`,
+          `语言母作品：${row.parentId}`,
+          `实际商品：${row.activeId}`,
+        ].join("\n"));
         if (!confirmed) return;
-        if (await triggerNativeCartAction(row.activeId, "remove")) {
-          mutateAccountCartId(row.activeId, null);
-        }
+        await triggerNativeCartAction(row.activeId, "remove");
       } else if (row.laterId) {
-        if (await triggerNativeCartAction(row.laterId, "move")) {
-          mutateAccountCartId(row.laterId, "active");
-        }
+        await triggerNativeCartAction(row.laterId, "move");
       } else {
         await postOfficialCartAdd(selectedId);
         mutateAccountCartId(selectedId, "active");
-        let snapshot;
         if (isCartPage(location.href)) {
-          const current = latestDealContext.cartSnapshot || loadCartSnapshot();
-          const product = metadataProductFromCache(selectedId) || { id: selectedId };
-          snapshot = saveCartSnapshot({
-            ...current,
-            loaded: true,
-            active: [
-              ...(current.active || current.products || [])
-                .filter((item) => String(item.id).toUpperCase() !== selectedId),
-              product,
-            ],
-            later: (current.later || [])
-              .filter((item) => String(item.id).toUpperCase() !== selectedId),
-          });
-        } else {
-          snapshot = await refreshCartSnapshotAfterAdd();
+          location.reload();
+          return;
         }
+        const snapshot = await refreshCartSnapshotAfterAdd();
         if (snapshot?.loaded) {
           latestDealContext = {
             ...latestDealContext,
@@ -6389,7 +6442,7 @@
       const nativeAction = owner.querySelector("a.link_move_later, a.link_move_cart");
       const nativeHost = nativeAction?.parentElement;
       const entry = document.createElement("div");
-      entry.className = "dltracker-language-entry";
+      entry.className = "dltracker-language-entry dltracker-language-entry-cart";
       entry.appendChild(createLanguageComparisonEntry(id));
       if (nativeHost?.parentElement) nativeHost.parentElement.insertBefore(entry, nativeHost);
       else owner.querySelector(".dltracker-cart-host")?.insertAdjacentElement("beforebegin", entry);
@@ -9881,6 +9934,19 @@ dl > .dltracker-browse-analysis-host {
   padding: 4px 8px;
   font-size: 11px;
   line-height: 1.3;
+}
+
+.dltracker-language-entry-cart {
+  width: auto;
+  justify-content: flex-start;
+}
+
+.dltracker-language-entry-cart .dltracker-language-entry-button {
+  width: auto;
+  min-height: 0;
+  padding: 2px 7px;
+  font-size: 10px;
+  line-height: 1.25;
 }
 
 .dltracker-language-entry-detail {

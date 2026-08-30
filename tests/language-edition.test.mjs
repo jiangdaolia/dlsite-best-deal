@@ -21,6 +21,7 @@ function functionSource(name) {
 }
 
 const sandbox = {
+  URL,
   dealPlainText(value) {
     return String(value || "").replace(/<[^>]+>/g, " ").trim();
   },
@@ -47,6 +48,7 @@ vm.runInNewContext(
     normalizedLanguageCode,
     languageDisplayName,
     productLanguageIdentity,
+    cartSkuFromSignals,
     accountEntryFromProduct,
     cartIdsFromMemberStatus,
     languageEditionsFromDocument,
@@ -59,6 +61,7 @@ vm.runInNewContext(
 const {
   languageDisplayName,
   productLanguageIdentity,
+  cartSkuFromSignals,
   accountEntryFromProduct,
   cartIdsFromMemberStatus,
   languageEditionsFromDocument,
@@ -125,6 +128,20 @@ test("未知语言使用官方标签，已知语言统一显示中文", () => {
   assert.equal(languageDisplayName("NEW_LANG", "测试语言"), "测试语言");
 });
 
+test("购物车操作优先识别实际翻译 SKU，不把语言母作品当成同一商品", () => {
+  assert.equal(cartSkuFromSignals({
+    detailHref: "/girls/work/=/product_id/RJ01089295.html/?translation=RJ01094726",
+    dataWorkno: "RJ01089295",
+  }), "RJ01094726");
+  assert.equal(cartSkuFromSignals({
+    actionHref: "/girls/cart/delete?product_id=RJ01111460",
+    detailHref: "/girls/work/=/product_id/RJ01089295.html/?translation=RJ01094726",
+  }), "RJ01111460");
+  assert.equal(cartSkuFromSignals({
+    detailHref: "/girls/work/=/product_id/RJ01089295.html",
+  }), "RJ01089295");
+});
+
 test("当前语言固定第一行，最优惠按理论日元价允许并列", () => {
   const rows = [
     { parentId: "RJ00000001", current: false, theoreticalPrice: 120, displayOrder: 1, stopped: false },
@@ -145,5 +162,9 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /mode: "cart"[\s\S]*obj_nocheck: "1"[\s\S]*product_id:/);
   assert.match(source, /a\.link_delete/);
   assert.match(source, /a\.link_move_cart/);
+  assert.match(source, /concreteCartProductId\(item\) === target/);
+  assert.match(source, /确认从购物车永久移出【\$\{row\.language\}】版本吗/);
+  assert.match(source, /if \(isCartPage\(location\.href\)\) \{\s*location\.reload\(\)/);
+  assert.match(source, /\.dltracker-language-entry-cart \.dltracker-language-entry-button \{[\s\S]*?width: auto;[\s\S]*?min-height: 0;/);
   assert.match(source, /读取购物车和已购清单（请勿频繁读取）/);
 });
