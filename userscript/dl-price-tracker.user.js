@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.33
+// @version      0.6.34
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.33";
+  const APP_VERSION = "0.6.34";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -43,8 +43,10 @@
   const BUY_LATER_SORT_MODE_LOWEST = "lowest";
   const BUY_LATER_SORT_MODE_REACH = "reach";
   const BUY_LATER_SORT_MODE_PRICE = "price";
+  const BUY_LATER_SORT_MODE_PLATFORM_EXPIRY = "platform-expiry";
   const BROWSE_SORT_MODE_STORAGE_KEY = "dltracker-browse-sort-mode";
   const BROWSE_FILTER_STORAGE_KEY = "dltracker-browse-bundle-filter";
+  const BROWSE_HIDE_PURCHASED_STORAGE_KEY = "dltracker-browse-hide-purchased";
   const BROWSE_SORT_MODE_NATIVE = "native";
   const UPDATE_NOTICE_SEEN_VERSION_KEY = "dltracker-update-notice-seen-version";
   const DEAL_PLANNER_STORAGE_KEY = "dltracker-deal-planner-v1";
@@ -69,6 +71,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.34": [
+      "浏览列表与稍后再买新增平台折扣失效时间排序，最早失效优先",
+      "账号信息按钮在列表节点复用或页面缓存恢复后重新绑定弹窗事件",
+      "浏览控制区新增隐藏已购买按钮，并记住用户的显示选择",
+    ],
     "0.6.33": [
       "账号提醒改为异步完成后原子替换，修复浏览页已购买标记闪烁",
       "账号语言索引改为每批 10 部串行读取，并明确区分读取中与未取得项",
@@ -1533,6 +1540,58 @@
     return Number.isFinite(parsed) ? parsed : null;
   }
 
+  function platformDiscountExpiryMillis(product, now = Date.now()) {
+    const raw = product?.raw && typeof product.raw === "object"
+      ? product.raw
+      : product || {};
+    const price = dealNumber(product?.price ?? raw?.price, 0);
+    const officialPrice = dealNumber(
+      product?.officialPrice ?? raw?.official_price ?? raw?.regular_price,
+      price,
+    );
+    const explicitlyDiscounted = raw?.is_discount === true ||
+      raw?.is_discount === 1 ||
+      String(raw?.is_discount || "").toLowerCase() === "true" ||
+      dealNumber(raw?.discount_rate, 0) > 0;
+    if (!(price > 0 && officialPrice > price) && !explicitlyDiscounted) {
+      return Number.POSITIVE_INFINITY;
+    }
+    const value = product?.platformDiscountExpiresAt ??
+      raw?.discount_end_date ?? raw?.discount_end_at ?? raw?.discount_to_date;
+    const short = String(value || "").trim().match(
+      /^(\d{1,2})[\/-](\d{1,2})\s+(\d{1,2}):(\d{2})$/,
+    );
+    let expiresAt;
+    if (short) {
+      const japanNow = new Date(now + 9 * 60 * 60 * 1000);
+      let year = japanNow.getUTCFullYear();
+      expiresAt = Date.UTC(
+        year,
+        Number(short[1]) - 1,
+        Number(short[2]),
+        Number(short[3]) - 9,
+        Number(short[4]),
+        0,
+      );
+      if (expiresAt < now - 180 * 24 * 60 * 60 * 1000) {
+        year += 1;
+        expiresAt = Date.UTC(
+          year,
+          Number(short[1]) - 1,
+          Number(short[2]),
+          Number(short[3]) - 9,
+          Number(short[4]),
+          0,
+        );
+      }
+    } else {
+      expiresAt = dealDateMillis(value);
+    }
+    return Number.isFinite(expiresAt) && expiresAt > now
+      ? expiresAt
+      : Number.POSITIVE_INFINITY;
+  }
+
   function normalizeDealCoupon(raw, index = 0) {
     if (!raw || typeof raw !== "object") return null;
     const discountKind = String(raw.discount_type || "").toLowerCase();
@@ -1890,6 +1949,12 @@
   }
 
   function compareDealSortEntries(a, b, mode) {
+    if (mode === "platform-expiry") {
+      if (a.platformDiscountExpiry !== b.platformDiscountExpiry) {
+        return a.platformDiscountExpiry - b.platformDiscountExpiry;
+      }
+      return a.order - b.order;
+    }
     if (mode === "reach" && a.reachRank !== b.reachRank) {
       return b.reachRank - a.reachRank;
     }
@@ -2134,6 +2199,7 @@
         ? translationInfo
         : {},
       onSale: Boolean(dealNumber(raw?.on_sale, raw?.is_sale ? 1 : 0)),
+      platformDiscountExpiresAt: platformDiscountExpiryMillis(raw),
       raw,
     };
   }
@@ -3573,7 +3639,12 @@
   function getBrowseSortMode() {
     try {
       const value = localStorage.getItem(BROWSE_SORT_MODE_STORAGE_KEY);
-      return [BROWSE_SORT_MODE_NATIVE, BUY_LATER_SORT_MODE_REACH, BUY_LATER_SORT_MODE_PRICE]
+      return [
+        BROWSE_SORT_MODE_NATIVE,
+        BUY_LATER_SORT_MODE_REACH,
+        BUY_LATER_SORT_MODE_PRICE,
+        BUY_LATER_SORT_MODE_PLATFORM_EXPIRY,
+      ]
         .includes(value) ? value : BUY_LATER_SORT_MODE_REACH;
     } catch {
       return BUY_LATER_SORT_MODE_REACH;
@@ -3602,6 +3673,37 @@
     } catch {
       // noop
     }
+  }
+
+  function getBrowseHidePurchased() {
+    try {
+      return localStorage.getItem(BROWSE_HIDE_PURCHASED_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function setBrowseHidePurchased(hidden) {
+    try {
+      localStorage.setItem(BROWSE_HIDE_PURCHASED_STORAGE_KEY, hidden ? "1" : "0");
+    } catch {
+      // noop
+    }
+  }
+
+  function syncBrowseCardVisibility(node) {
+    if (!node) return;
+    const bundleHidden = node.classList.contains("dltracker-browse-filtered-out");
+    const purchasedHidden = getBrowseHidePurchased() &&
+      node.classList.contains("dltracker-browse-purchased-card");
+    node.classList.toggle("dltracker-browse-purchased-hidden", purchasedHidden);
+    node.hidden = bundleHidden || purchasedHidden;
+  }
+
+  function refreshBrowsePurchasedVisibility() {
+    collectBrowseCards()
+      .filter(({ cartItem }) => !cartItem)
+      .forEach(({ node }) => syncBrowseCardVisibility(node));
   }
 
   function browseCardMatchesFilter(insight, filter) {
@@ -3655,8 +3757,9 @@
     const grouped = new Map();
     for (const { id, node } of cards) {
       const insight = dealInsightById.get(String(id).toUpperCase());
-      node.hidden = !browseCardMatchesFilter(insight, filter);
-      node.classList.toggle("dltracker-browse-filtered-out", node.hidden);
+      const bundleHidden = !browseCardMatchesFilter(insight, filter);
+      node.classList.toggle("dltracker-browse-filtered-out", bundleHidden);
+      syncBrowseCardVisibility(node);
       const parent = node.parentElement;
       if (!parent) continue;
       const record = browseRecordById.get(String(id).toUpperCase()) ||
@@ -3671,6 +3774,7 @@
         hypotheticalPrice: reachRank >= 0
           ? calculateHypotheticalPrice(insight?.product, insight?.bestReach)
           : Number.POSITIVE_INFINITY,
+        platformDiscountExpiry: platformDiscountExpiryMillis(insight?.product),
       };
       if (!grouped.has(parent)) grouped.set(parent, []);
       grouped.get(parent).push(entry);
@@ -3806,6 +3910,7 @@
         <option value="${BROWSE_SORT_MODE_NATIVE}">保持 DLsite 当前顺序</option>
         <option value="${BUY_LATER_SORT_MODE_REACH}">最高可达到折扣</option>
         <option value="${BUY_LATER_SORT_MODE_PRICE}">理论低价优先</option>
+        <option value="${BUY_LATER_SORT_MODE_PLATFORM_EXPIRY}">平台折扣失效时间</option>
       `;
       sort.value = getBrowseSortMode();
       sort.addEventListener("change", () => {
@@ -3826,11 +3931,6 @@
       accountButton.type = "button";
       accountButton.className = "dltracker-account-info-button";
       accountButton.textContent = "账号信息";
-      accountButton.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        openAccountInformationDialog();
-      });
       controls.append(sortLabel, filterLabel, accountButton);
     }
     if (anchor.before !== controls &&
@@ -3841,6 +3941,35 @@
     const sort = controls.querySelector(".dltracker-browse-sort");
     if (sort) sort.value = getBrowseSortMode();
     const filter = controls.querySelector(".dltracker-browse-filter");
+    const accountButton = controls.querySelector(".dltracker-account-info-button");
+    if (accountButton) {
+      accountButton.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openAccountInformationDialog();
+      };
+    }
+    let purchasedButton = controls.querySelector(".dltracker-hide-purchased-button");
+    if (!purchasedButton) {
+      purchasedButton = document.createElement("button");
+      purchasedButton.type = "button";
+      purchasedButton.className = "dltracker-hide-purchased-button";
+      controls.appendChild(purchasedButton);
+    }
+    const syncPurchasedButton = () => {
+      const hidden = getBrowseHidePurchased();
+      purchasedButton.textContent = hidden ? "显示已购买" : "隐藏已购买";
+      purchasedButton.setAttribute("aria-pressed", hidden ? "true" : "false");
+      purchasedButton.classList.toggle("is-active", hidden);
+    };
+    purchasedButton.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setBrowseHidePurchased(!getBrowseHidePurchased());
+      syncPurchasedButton();
+      refreshBrowsePurchasedVisibility();
+    };
+    syncPurchasedButton();
     syncBundleFilterSelect(filter, cards, resetMissing);
   }
 
@@ -5845,8 +5974,12 @@
     if (!data) {
       existing?.remove();
       layout.classList.remove("is-account-purchased");
+      node.classList.remove("dltracker-browse-purchased-card");
+      syncBrowseCardVisibility(node);
       return;
     }
+    node.classList.toggle("dltracker-browse-purchased-card", Boolean(data.purchased));
+    syncBrowseCardVisibility(node);
     const signature = JSON.stringify({ lines: data.lines, purchased: data.purchased });
     if (existing?.dataset.reminderSignature === signature &&
       layout.classList.contains("is-account-purchased") === Boolean(data.purchased)) {
@@ -8093,6 +8226,7 @@
       if ([
         BUY_LATER_SORT_MODE_REACH,
         BUY_LATER_SORT_MODE_PRICE,
+        BUY_LATER_SORT_MODE_PLATFORM_EXPIRY,
       ].includes(raw)) return raw;
       // 旧版史低/折扣模式统一迁移到最高可达折扣。
       if (raw === "discount" || raw === BUY_LATER_SORT_MODE_LOWEST) {
@@ -8108,6 +8242,7 @@
     const normalized = [
       BUY_LATER_SORT_MODE_REACH,
       BUY_LATER_SORT_MODE_PRICE,
+      BUY_LATER_SORT_MODE_PLATFORM_EXPIRY,
     ].includes(mode) ? mode : BUY_LATER_SORT_MODE_REACH;
     try {
       localStorage.setItem(BUY_LATER_SORT_MODE_STORAGE_KEY, normalized);
@@ -8190,6 +8325,7 @@
       modeSelect.innerHTML = `
         <option value="${BUY_LATER_SORT_MODE_REACH}">最高可达到折扣</option>
         <option value="${BUY_LATER_SORT_MODE_PRICE}">理论低价优先</option>
+        <option value="${BUY_LATER_SORT_MODE_PLATFORM_EXPIRY}">平台折扣失效时间</option>
       `;
 
       const updateState = () => {
@@ -8468,6 +8604,7 @@
       const hypotheticalPrice = reachRank >= 0
         ? calculateHypotheticalPrice(insight?.product, insight?.bestReach)
         : Number.POSITIVE_INFINITY;
+      const platformDiscountExpiry = platformDiscountExpiryMillis(insight?.product);
       const originalOrder = Number(owner.dataset.dltrackerBuyLaterOrder);
 
       if (!grouped.has(parent)) grouped.set(parent, []);
@@ -8476,6 +8613,7 @@
         isNewLowest,
         reachRank,
         hypotheticalPrice,
+        platformDiscountExpiry,
         order: Number.isFinite(originalOrder)
           ? originalOrder
           : grouped.get(parent).length,
@@ -11125,6 +11263,10 @@ a.dltracker-cart-deal-frame:focus-visible {
 }
 
 .dltracker-buy-later-filtered-out {
+  display: none !important;
+}
+
+.dltracker-browse-purchased-hidden {
   display: none !important;
 }
 

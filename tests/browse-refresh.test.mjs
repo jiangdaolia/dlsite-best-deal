@@ -72,6 +72,29 @@ test("稍后再买复用浏览列表的凑单筛选", () => {
   assert.match(source, /\.dltracker-buy-later-filtered-out \{\s*display: none !important;/);
 });
 
+test("浏览列表与稍后再买提供平台折扣失效时间排序", () => {
+  const browseSource = functionSource("injectBrowseControls");
+  const laterControls = functionSource("injectBuyLaterSortToggle");
+  const browseSort = functionSource("applyBrowseSortAndFilter");
+  const laterSort = functionSource("sortBuyLaterItems");
+  assert.match(browseSource, /平台折扣失效时间/);
+  assert.match(laterControls, /平台折扣失效时间/);
+  assert.match(browseSort, /platformDiscountExpiry: platformDiscountExpiryMillis\(insight\?\.product\)/);
+  assert.match(laterSort, /platformDiscountExpiry = platformDiscountExpiryMillis\(insight\?\.product\)/);
+});
+
+test("浏览控制区可以持久隐藏已购买作品并与凑单筛选合并", () => {
+  const controlsSource = functionSource("injectBrowseControls");
+  const visibilitySource = functionSource("syncBrowseCardVisibility");
+  const reminderSource = functionSource("renderAccountReminderForCard");
+  assert.match(controlsSource, /隐藏已购买/);
+  assert.match(controlsSource, /显示已购买/);
+  assert.match(controlsSource, /setBrowseHidePurchased\(!getBrowseHidePurchased\(\)\)/);
+  assert.match(visibilitySource, /bundleHidden \|\| purchasedHidden/);
+  assert.match(reminderSource, /dltracker-browse-purchased-card/);
+  assert.match(source, /\.dltracker-browse-purchased-hidden \{\s*display: none !important;/);
+});
+
 test("无优惠作品也会留下已处理标记供观察器识别", () => {
   assert.match(functionSource("enhanceGenericBrowseCards"), /markDealProcessed\(node, id\)/);
   assert.match(functionSource("installSpaListeners"), /needsDealProcessing\(node, id\)/);
@@ -94,6 +117,10 @@ test("从详情页返回列表时恢复已选筛选和排序", () => {
   assert.match(
     listenerSource,
     /window\.addEventListener\("pageshow", restoreBrowseStateOnPageShow\)/,
+  );
+  assert.match(
+    functionSource("injectBrowseControls"),
+    /accountButton\.onclick = \(event\) => \{[\s\S]*?openAccountInformationDialog\(\)/,
   );
 });
 

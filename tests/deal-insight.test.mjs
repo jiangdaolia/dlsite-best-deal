@@ -37,6 +37,7 @@ vm.runInNewContext(
     extractVoiceActorNames,
     mergeBrowseVoiceActorNames,
     compareDealSortEntries,
+    platformDiscountExpiryMillis,
     activeCartFingerprint,
     cartSnapshotFingerprint,
     cartAreaFromMarkerText,
@@ -63,6 +64,7 @@ const {
   extractVoiceActorNames,
   mergeBrowseVoiceActorNames,
   compareDealSortEntries,
+  platformDiscountExpiryMillis,
   activeCartFingerprint,
   cartSnapshotFingerprint,
   cartAreaFromMarkerText,
@@ -269,6 +271,36 @@ test("低价优先使用本次可到后的假设价格", () => {
     calculateHypotheticalPrice({ officialPrice: 1000 }, { totalRate: 80 }),
     200,
   );
+});
+
+test("平台折扣失效时间按日本时间解析并把最早失效排在前面", () => {
+  const reference = Date.parse("2026-08-30T00:00:00Z");
+  const early = platformDiscountExpiryMillis({
+    price: 700,
+    officialPrice: 1000,
+    raw: { is_discount: true, discount_end_date: "09/14 13:59" },
+  }, reference);
+  const later = platformDiscountExpiryMillis({
+    price: 800,
+    officialPrice: 1000,
+    raw: { is_discount: true, discount_end_date: "09/20 13:59" },
+  }, reference);
+  assert.equal(early, Date.parse("2026-09-14T04:59:00Z"));
+  const entries = [
+    { id: "none", platformDiscountExpiry: Infinity, order: 0 },
+    { id: "later", platformDiscountExpiry: later, order: 1 },
+    { id: "early", platformDiscountExpiry: early, order: 2 },
+  ];
+  assert.deepEqual(
+    entries.toSorted((a, b) => compareDealSortEntries(a, b, "platform-expiry"))
+      .map((entry) => entry.id),
+    ["early", "later", "none"],
+  );
+  assert.equal(platformDiscountExpiryMillis({
+    price: 1000,
+    officialPrice: 1000,
+    raw: { discount_end_date: "09/14 13:59" },
+  }, reference), Infinity);
 });
 
 test("单部无门槛券可标单买即最优，三件活动不可", () => {
