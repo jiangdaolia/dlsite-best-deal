@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.30
+// @version      0.6.31
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.30";
+  const APP_VERSION = "0.6.31";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -68,6 +68,9 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.31": [
+      "把桌面语言比较入口收回原生操作容器，修复标题竖排和原生按钮被挤走",
+    ],
     "0.6.30": [
       "桌面语言比较按钮与原生稍后再买或放回按钮左边缘对齐，保持真正正上方",
     ],
@@ -6511,7 +6514,7 @@
         const contentLeft = parentRect.left +
           dealNumber(parseFloat(parentStyle.borderLeftWidth)) +
           dealNumber(parseFloat(parentStyle.paddingLeft));
-        entry.style.paddingInlineStart = `${Math.max(0, rect.left - contentLeft)}px`;
+        entry.style.marginInlineStart = `${Math.max(0, rect.left - contentLeft)}px`;
       }
       return true;
     };
@@ -6554,10 +6557,8 @@
         mobileText ? "is-mobile-text" : "is-desktop-button"
       }`;
       entry.appendChild(createLanguageComparisonEntry(id));
-      if (mobileText && nativeHost && nativeAction) {
+      if (nativeHost && nativeAction) {
         nativeHost.insertBefore(entry, nativeAction);
-      } else if (nativeHost?.parentElement) {
-        nativeHost.parentElement.insertBefore(entry, nativeHost);
       } else {
         owner.querySelector(".dltracker-cart-host")?.insertAdjacentElement("beforebegin", entry);
       }
@@ -10069,10 +10070,6 @@ dl > .dltracker-browse-analysis-host {
   line-height: 1.25;
   overflow: hidden;
   white-space: nowrap;
-}
-
-.dltracker-language-entry-cart.is-desktop-button {
-  width: 100%;
 }
 
 .dltracker-language-entry-cart.is-mobile-text {
