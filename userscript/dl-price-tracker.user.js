@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.31
+// @version      0.6.32
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.31";
+  const APP_VERSION = "0.6.32";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -68,6 +68,9 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.32": [
+      "账号清单读取后立即更新面板，并明确显示读取中或读取失败状态",
+    ],
     "0.6.31": [
       "把桌面语言比较入口收回原生操作容器，修复标题竖排和原生按钮被挤走",
     ],
@@ -372,6 +375,7 @@
   let lastCartSnapshotFingerprint = "";
   let accountIndexRefreshInFlight = null;
   let accountIndexRuntimeFingerprint = "";
+  let accountIndexRuntimeError = "";
   let openLanguageDialogState = null;
 
   function nowIso() {
@@ -2415,6 +2419,7 @@
       ));
       throw new Error(`请等待 ${seconds} 秒后再读取`);
     }
+    accountIndexRuntimeError = "";
     const manualStartedAt = manual ? Date.now() : dealNumber(previous.lastManualAt);
     if (manual) saveAccountIndex({ ...previous, lastManualAt: manualStartedAt });
     accountIndexRefreshInFlight = (async () => {
@@ -2450,6 +2455,22 @@
       const ids = [...new Set([...cartIds.active, ...cartIds.later, ...bought])];
       const entries = {};
       const failedIds = [];
+      saveAccountIndex({
+        ...emptyAccountIndex(),
+        loaded: true,
+        active: cartIds.active,
+        later: cartIds.later,
+        bought: [...new Set(bought)],
+        entries,
+        indexed: 0,
+        total: ids.length,
+        complete: ids.length === 0,
+        failedIds,
+        updatedAt: Date.now(),
+        lastManualAt: manualStartedAt,
+        accountFingerprint: fingerprint,
+      });
+      refreshAccountInformationPanels();
       for (let start = 0; start < ids.length; start += MAX_PRODUCT_METADATA_BATCH) {
         const batchIds = ids.slice(start, start + MAX_PRODUCT_METADATA_BATCH);
         const metadata = await ensureProductMetadata(batchIds);
@@ -2507,10 +2528,14 @@
       };
       saveAccountIndex(next);
       return next;
-    })().finally(() => {
+    })().catch((error) => {
+      accountIndexRuntimeError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }).finally(() => {
       accountIndexRefreshInFlight = null;
       refreshAccountInformationPanels();
     });
+    refreshAccountInformationPanels();
     return accountIndexRefreshInFlight;
   }
 
@@ -5556,18 +5581,33 @@
   function renderAccountInformationPanel(panel) {
     if (!panel) return;
     const index = loadAccountIndex();
+    const reading = Boolean(accountIndexRefreshInFlight);
     panel.className = "dltracker-account-info-panel";
     const summary = document.createElement("div");
     summary.className = "dltracker-account-info-summary";
-    const values = index.loaded
-      ? [
-          ["立即购买", index.active.length],
-          ["稍后再买", index.later.length],
-          ["已购买", index.bought.length],
-          ["索引", `${index.indexed}/${index.total}${index.complete ? "" : "（不完整）"}`],
-          ["上次读取", accountIndexTimeText(index.updatedAt)],
-        ]
-      : [["状态", isDlsiteMemberLoggedIn() ? "尚未读取" : "未登录"]];
+    const loadedValues = [
+      ["立即购买", index.active.length],
+      ["稍后再买", index.later.length],
+      ["已购买", index.bought.length],
+      ["索引", `${index.indexed}/${index.total}${index.complete ? "" : "（不完整）"}`],
+      ["上次读取", accountIndexTimeText(index.updatedAt)],
+    ];
+    let values;
+    if (!isDlsiteMemberLoggedIn()) {
+      values = [["状态", "未登录"]];
+    } else if (reading) {
+      values = [
+        ["状态", index.loaded ? "正在重新读取…" : "正在读取购物车和已购清单…"],
+        ...(index.loaded ? loadedValues : []),
+      ];
+    } else if (accountIndexRuntimeError) {
+      values = [
+        ["状态", `读取失败：${accountIndexRuntimeError}`],
+        ...(index.loaded ? loadedValues : []),
+      ];
+    } else {
+      values = index.loaded ? loadedValues : [["状态", "尚未读取"]];
+    }
     for (const [label, value] of values) {
       const row = document.createElement("span");
       const strong = document.createElement("strong");
@@ -5578,12 +5618,12 @@
     const action = document.createElement("button");
     action.type = "button";
     action.className = "dltracker-account-refresh";
-    action.textContent = accountIndexRefreshInFlight
+    action.textContent = reading
       ? `读取中 ${index.indexed}/${index.total || "?"}`
       : "读取购物车和已购清单（请勿频繁读取）";
     const cooldown = Date.now() - dealNumber(index.lastManualAt) < ACCOUNT_REFRESH_COOLDOWN_MS;
-    action.disabled = Boolean(accountIndexRefreshInFlight) || cooldown || !isDlsiteMemberLoggedIn();
-    if (cooldown && !accountIndexRefreshInFlight) {
+    action.disabled = reading || cooldown || !isDlsiteMemberLoggedIn();
+    if (cooldown && !reading) {
       const remaining = ACCOUNT_REFRESH_COOLDOWN_MS -
         (Date.now() - dealNumber(index.lastManualAt));
       setTimeout(() => {

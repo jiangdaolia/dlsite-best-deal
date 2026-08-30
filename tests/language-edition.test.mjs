@@ -159,6 +159,9 @@ test("当前语言固定第一行，最优惠按理论日元价允许并列", ()
 test("语言比较使用七列表、账号冷却与官方单件购物车请求", () => {
   assert.match(source, /"语言", "作品", "人民币\/日元", "现在\/平台\/史低", "备注", "看详情", "购物车"/);
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
+  assert.match(source, /loaded: true,[\s\S]*?total: ids\.length,[\s\S]*?refreshAccountInformationPanels\(\);[\s\S]*?for \(let start = 0; start < ids\.length/);
+  assert.match(source, /\["状态", index\.loaded \? "正在重新读取…" : "正在读取购物车和已购清单…"\]/);
+  assert.match(source, /\["状态", `读取失败：\$\{accountIndexRuntimeError\}`\]/);
   assert.match(source, /mode: "cart"[\s\S]*obj_nocheck: "1"[\s\S]*product_id:/);
   assert.match(source, /a\.link_delete/);
   assert.match(source, /a\.link_move_cart/);
