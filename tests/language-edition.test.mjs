@@ -161,17 +161,21 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 40/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 \* 1000/);
-  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 4/);
+  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 5/);
   assert.match(source, /fetchSameOriginText\(url, "作品信息接口", \{\s*anonymous: true/);
   assert.match(source, /credentials: anonymous \? "omit" : "include"/);
   assert.match(source, /anonymous \? \{ referrerPolicy: "no-referrer" \} : \{\}/);
   assert.match(
     functionSource("enhanceDealInsights"),
-    /await enhanceGenericBrowseCards[\s\S]*?void ensureInitialAccountIndex\(\)[\s\S]*?refreshAllAccountReminders/,
+    /\.finally\(\(\) => \{[\s\S]*?scheduleInitialAccountIndex\(\)/,
   );
   assert.doesNotMatch(
     functionSource("enhanceDealInsights"),
     /\(async \(\) => \{\s*invalidateCouponCacheAfterPurchase\(\);\s*try \{\s*await ensureInitialAccountIndex/,
+  );
+  assert.match(
+    functionSource("scheduleInitialAccountIndex"),
+    /setTimeout[\s\S]*?void ensureInitialAccountIndex\(\)[\s\S]*?refreshAllAccountReminders/,
   );
   assert.match(source, /loaded: true,[\s\S]*?total: ids\.length,[\s\S]*?refreshAccountInformationPanels\(\);[\s\S]*?for \(let start = 0; start < ids\.length/);
   assert.match(source, /start \+= ACCOUNT_METADATA_BATCH_SIZE[\s\S]*?slice\(start, start \+ ACCOUNT_METADATA_BATCH_SIZE\)/);

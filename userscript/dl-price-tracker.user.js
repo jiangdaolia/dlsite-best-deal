@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.40
+// @version      0.6.41
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.40";
+  const APP_VERSION = "0.6.41";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -65,7 +65,7 @@
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_SIZE = 40;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
-  const ACCOUNT_INDEX_REQUEST_VERSION = 4;
+  const ACCOUNT_INDEX_REQUEST_VERSION = 5;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
@@ -73,6 +73,9 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.41": [
+      "账号索引改为在当页优惠分析结束时必定调度，中途异常也不会留0/88未完成",
+    ],
     "0.6.40": [
       "账号索引的任何网络、HTTP或解析失败都持久显示具体步骤和原因",
       "没有失败原因的中断状态改为未完成，不再误标已暂停",
@@ -395,6 +398,7 @@
   let dealSessionStopReason = "";
   let accountIndexSessionStopped = false;
   let accountIndexSessionStopReason = "";
+  let accountIndexBackgroundScheduled = false;
   let insightBootstrapInFlight = null;
   const dealInsightById = new Map();
   const browseRecordById = new Map();
@@ -2748,6 +2752,22 @@
     }
     if (!index.loaded) return refreshAccountIndex();
     return index;
+  }
+
+  function scheduleInitialAccountIndex() {
+    if (accountIndexBackgroundScheduled) return;
+    accountIndexBackgroundScheduled = true;
+    setTimeout(() => {
+      accountIndexBackgroundScheduled = false;
+      void ensureInitialAccountIndex()
+        .then(async () => {
+          await refreshAllAccountReminders();
+          await refreshOpenLanguageDialog();
+        })
+        .catch((error) => {
+          console.warn(`[${APP_NAME}] initial account index failed:`, error);
+        });
+    }, 0);
   }
 
   function updateAccountIndexCart(activeIds, laterIds) {
@@ -7672,18 +7692,10 @@
       if (isCartPage(location.href)) await sortBuyLaterItems();
       refreshOpenReachDialog();
       await refreshOpenLanguageDialog();
-      // 账号索引可能需要多批串行请求和安全间隔；
-      // 先完成当页价格与优惠渲染，再在后台更新账号提醒。
-      void ensureInitialAccountIndex()
-        .then(async () => {
-          await refreshAllAccountReminders();
-          await refreshOpenLanguageDialog();
-        })
-        .catch((error) => {
-          console.warn(`[${APP_NAME}] initial account index failed:`, error);
-        });
     })().finally(() => {
       insightBootstrapInFlight = null;
+      // 即使当页优惠分析中途失败，账号索引仍会独立调度。
+      scheduleInitialAccountIndex();
     });
     return insightBootstrapInFlight;
   }
