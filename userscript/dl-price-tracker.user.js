@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.38
+// @version      0.6.39
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.38";
+  const APP_VERSION = "0.6.39";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -65,7 +65,7 @@
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_SIZE = 40;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
-  const ACCOUNT_INDEX_REQUEST_VERSION = 2;
+  const ACCOUNT_INDEX_REQUEST_VERSION = 3;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
@@ -73,6 +73,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.39": [
+      "账号索引使用独立请求会话，不再被优惠券或当页分析的停止状态误伤",
+      "语言索引暂停进度直接显示具体接口、HTTP状态或验证页原因",
+    ],
     "0.6.38": [
       "公开作品信息批量请求不再携带登录Cookie，旧的0/88暂停状态会自动匿名重试一次",
       "账号索引与账号提醒改为页面优惠渲染完成后的后台任务，不再阻塞购物车和浏览页",
@@ -385,6 +389,8 @@
   let importedCouponPageUrl = "";
   let dealSessionStopped = false;
   let dealSessionStopReason = "";
+  let accountIndexSessionStopped = false;
+  let accountIndexSessionStopReason = "";
   let insightBootstrapInFlight = null;
   const dealInsightById = new Map();
   const browseRecordById = new Map();
@@ -2065,6 +2071,20 @@
     console.warn(`[${APP_NAME}] DLsite deal requests stopped for this page: ${reason}`);
   }
 
+  function requestSessionStopped(session = "deal") {
+    return session === "account" ? accountIndexSessionStopped : dealSessionStopped;
+  }
+
+  function stopRequestSession(session, reason) {
+    if (session !== "account") {
+      stopDealRequests(reason);
+      return;
+    }
+    accountIndexSessionStopped = true;
+    accountIndexSessionStopReason = String(reason || "检测到风控信号");
+    console.warn(`[${APP_NAME}] account index requests stopped: ${reason}`);
+  }
+
   function showDealToast(message, isError = false, durationMs = 5000) {
     document.querySelector(".dltracker-deal-toast")?.remove();
     if (dealToastTimer) clearTimeout(dealToastTimer);
@@ -2080,8 +2100,14 @@
     }, durationMs);
   }
 
-  async function fetchSameOriginText(url, label, { anonymous = false } = {}) {
-    if (dealSessionStopped) throw new Error("本页请求已因风控信号停止");
+  async function fetchSameOriginText(
+    url,
+    label,
+    { anonymous = false, requestSession = "deal" } = {},
+  ) {
+    if (requestSessionStopped(requestSession)) {
+      throw new Error(`${label}请求已因风控信号停止`);
+    }
     const response = await fetch(url, {
       credentials: anonymous ? "omit" : "include",
       ...(anonymous ? { referrerPolicy: "no-referrer" } : {}),
@@ -2089,13 +2115,13 @@
     });
     const text = await response.text();
     if (response.status === 403 || response.status === 429) {
-      stopDealRequests(`${label} HTTP ${response.status}`);
+      stopRequestSession(requestSession, `${label} HTTP ${response.status}`);
       throw new Error(`${label}返回 HTTP ${response.status}`);
     }
     if (!response.ok) throw new Error(`${label}返回 HTTP ${response.status}`);
     if (/captcha|reCAPTCHA|認証|验证|アクセスが集中/i.test(text) &&
       /^\s*</.test(text)) {
-      stopDealRequests(`${label}返回验证页`);
+      stopRequestSession(requestSession, `${label}返回验证页`);
       throw new Error(`${label}返回了验证页`);
     }
     return text;
@@ -2224,7 +2250,7 @@
     };
   }
 
-  async function ensureProductMetadata(ids) {
+  async function ensureProductMetadata(ids, { requestSession = "deal" } = {}) {
     const cache = loadDealCache();
     const unique = [...new Set((Array.isArray(ids) ? ids : [])
       .map((id) => String(id).toUpperCase())
@@ -2239,7 +2265,7 @@
         missing.push(id);
       }
     }
-    if (!missing.length || dealSessionStopped) return result;
+    if (!missing.length || requestSessionStopped(requestSession)) return result;
     // 无限滚动会在同一 URL 下追加作品；每次只读未缓存的下一批。
     const batch = missing.slice(0, MAX_PRODUCT_METADATA_BATCH);
 
@@ -2248,12 +2274,15 @@
     try {
       const text = await fetchSameOriginText(url, "作品信息接口", {
         anonymous: true,
+        requestSession,
       });
       let payload;
       try {
         payload = JSON.parse(text);
       } catch {
-        if (/^\s*</.test(text)) stopDealRequests("作品信息接口返回网页");
+        if (/^\s*</.test(text)) {
+          stopRequestSession(requestSession, "作品信息接口返回网页");
+        }
         throw new Error("作品信息接口没有返回 JSON");
       }
       const records = productRecordsFromPayload(payload);
@@ -2270,7 +2299,7 @@
     return result;
   }
 
-  async function ensureProductMetadataBatches(ids) {
+  async function ensureProductMetadataBatches(ids, options = {}) {
     const unique = [...new Set((Array.isArray(ids) ? ids : [])
       .map((id) => String(id).toUpperCase())
       .filter((id) => /^[RBV]J\d{6,}$/i.test(id)))];
@@ -2278,9 +2307,10 @@
     for (let start = 0; start < unique.length; start += MAX_PRODUCT_METADATA_BATCH) {
       const batch = await ensureProductMetadata(
         unique.slice(start, start + MAX_PRODUCT_METADATA_BATCH),
+        options,
       );
       for (const [id, product] of batch.entries()) result.set(id, product);
-      if (dealSessionStopped) break;
+      if (requestSessionStopped(options.requestSession)) break;
     }
     return result;
   }
@@ -2466,7 +2496,9 @@
   }
 
   async function fetchSameOriginJson(url, label, options = {}) {
-    if (dealSessionStopped) throw new Error("本页请求已因风控信号停止");
+    if (accountIndexSessionStopped) {
+      throw new Error("账号索引请求已因风控信号停止");
+    }
     const response = await fetch(url, {
       credentials: "include",
       headers: {
@@ -2478,18 +2510,18 @@
     });
     const text = await response.text();
     if (response.status === 403 || response.status === 429) {
-      stopDealRequests(`${label} HTTP ${response.status}`);
+      stopRequestSession("account", `${label} HTTP ${response.status}`);
       throw new Error(`${label}返回 HTTP ${response.status}`);
     }
     if (!response.ok) throw new Error(`${label}返回 HTTP ${response.status}`);
     if (/captcha|reCAPTCHA|認証|验证|アクセスが集中/i.test(text) && /^\s*</.test(text)) {
-      stopDealRequests(`${label}返回验证页`);
+      stopRequestSession("account", `${label}返回验证页`);
       throw new Error(`${label}返回了验证页`);
     }
     try {
       return JSON.parse(text);
     } catch {
-      if (/^\s*</.test(text)) stopDealRequests(`${label}返回网页`);
+      if (/^\s*</.test(text)) stopRequestSession("account", `${label}返回网页`);
       throw new Error(`${label}没有返回 JSON`);
     }
   }
@@ -2515,12 +2547,9 @@
       ));
       throw new Error(`请等待 ${seconds} 秒后再读取`);
     }
-    if (manual) {
-      // 仅明确的用户操作能在冷却后开始新请求会话；
-      // 自动启动不会绕过已持久化的风控暂停。
-      dealSessionStopped = false;
-      dealSessionStopReason = "";
-    }
+    // 只重置账号索引自己的会话，不改变优惠券或当页分析的熔断状态。
+    accountIndexSessionStopped = false;
+    accountIndexSessionStopReason = "";
     accountIndexRuntimeError = "";
     const manualStartedAt = manual ? Date.now() : dealNumber(previous.lastManualAt);
     if (manual || dealNumber(previous.requestVersion) < ACCOUNT_INDEX_REQUEST_VERSION) {
@@ -2583,11 +2612,13 @@
       refreshAccountInformationPanels();
       for (let start = 0; start < ids.length; start += ACCOUNT_METADATA_BATCH_SIZE) {
         const batchIds = ids.slice(start, start + ACCOUNT_METADATA_BATCH_SIZE);
-        const metadata = await ensureProductMetadata(batchIds);
+        const metadata = await ensureProductMetadata(batchIds, {
+          requestSession: "account",
+        });
         for (const id of batchIds) {
           const product = metadata.get(id);
           if (product) entries[id] = accountEntryFromProduct(id, product);
-          else if (!dealSessionStopped) {
+          else if (!accountIndexSessionStopped) {
             entries[id] = accountEntryFromProduct(id, { id });
             failedIds.push(id);
           }
@@ -2609,9 +2640,9 @@
           requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
         });
         refreshAccountInformationPanels();
-        if (dealSessionStopped) {
+        if (accountIndexSessionStopped) {
           const remaining = ids.filter((id) => !entries[id]).length;
-          accountIndexRuntimeError = `语言索引已暂停：${dealSessionStopReason || "本页请求已停止"}${
+          accountIndexRuntimeError = `语言索引已暂停：${accountIndexSessionStopReason || "账号索引请求已停止"}${
             remaining ? `；剩余${remaining}项` : ""
           }`;
           break;
@@ -2634,7 +2665,7 @@
         updatedAt: Date.now(),
         lastManualAt: manualStartedAt,
         accountFingerprint: fingerprint,
-        pausedReason: dealSessionStopped ? dealSessionStopReason : "",
+        pausedReason: accountIndexSessionStopped ? accountIndexSessionStopReason : "",
         requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
       };
       if (ids.length && next.indexed === 0 && !accountIndexRuntimeError) {
@@ -2644,6 +2675,15 @@
       return next;
     })().catch((error) => {
       accountIndexRuntimeError = error instanceof Error ? error.message : String(error);
+      if (accountIndexSessionStopped) {
+        const current = loadAccountIndex();
+        saveAccountIndex({
+          ...current,
+          pausedReason: accountIndexSessionStopReason || accountIndexRuntimeError,
+          requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
+          updatedAt: Date.now(),
+        });
+      }
       throw error;
     }).finally(() => {
       accountIndexRefreshInFlight = null;
@@ -5822,7 +5862,10 @@
     if (failed) return `${indexed}/${total}（${failed}项未取得）`;
     const processed = Object.keys(index?.entries || {}).length;
     const remaining = Math.max(0, total - processed);
-    return `${indexed}/${total}${remaining ? `（已暂停，剩余${remaining}项）` : "（未完成）"}`;
+    const reason = dealPlainText(index?.pausedReason);
+    return `${indexed}/${total}${remaining
+      ? `（已暂停${reason ? `：${reason}` : ""}；剩余${remaining}项）`
+      : "（未完成）"}`;
   }
 
   function renderAccountInformationPanel(panel) {
