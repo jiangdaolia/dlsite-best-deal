@@ -145,6 +145,26 @@ test("浏览优惠区重绘时迁移已有购买状态而不是先删除", () =>
   );
 });
 
+test("浏览优惠区完成后不退回读取中且相同结果不重复替换", () => {
+  const renderSource = functionSource("renderBrowseCardAnalysis");
+  const enhanceSource = functionSource("enhanceGenericBrowseCards");
+  assert.match(
+    renderSource,
+    /!insight && previousLayout\?\.dataset\.analysisComplete === "true"/,
+  );
+  assert.match(renderSource, /previousLayout\?\.dataset\.analysisSignature === signature/);
+  assert.match(renderSource, /layout\.dataset\.analysisComplete = insight \? "true" : "false"/);
+  assert.match(enhanceSource, /finally \{\s*markDealProcessed\(card\.node, card\.id\)/);
+  assert.match(
+    enhanceSource,
+    /local browse analysis failed[\s\S]*?markDealProcessed\(card\.node, card\.id\)/,
+  );
+  assert.match(
+    enhanceSource,
+    /collectBrowseCards\(\)\.filter\(\(\{ id, node \}\) =>[\s\S]*?cartPage \|\|[\s\S]*?needsDealProcessing\(node, id\)/,
+  );
+});
+
 test("账号提醒同时覆盖购物车卡片并复用当页语言元数据", () => {
   const dataSource = functionSource("accountReminderData");
   const reminderSource = functionSource("renderAccountReminderForCard");
@@ -168,7 +188,10 @@ test("浏览卡并行补全史低且账号提醒复用整页缓存快照", () =>
   const contextSource = functionSource("createAccountReminderContext");
   const dataSource = functionSource("accountReminderData");
   assert.match(enhanceSource, /preloadBrowseBulkRules\(\[\.\.\.metadata\.values\(\)\]\)/);
-  assert.match(enhanceSource, /mapWithConcurrency\(\s*preparedCards,\s*BROWSE_RENDER_CONCURRENCY/);
+  assert.match(
+    enhanceSource,
+    /mapWithConcurrency\(\s*preparedCards\.filter\(\(card\) => !card\.failed\),\s*BROWSE_RENDER_CONCURRENCY/,
+  );
   assert.ok(
     enhanceSource.indexOf("renderBrowseCardAnalysis(analysisHost, { rjCode: id }, null)") <
       enhanceSource.indexOf("await preloadBrowseBulkRules"),
@@ -280,7 +303,8 @@ test("普通作品卡在标签后使用三框和简洁优惠行", () => {
   assert.match(renderSource, /平台活动：/);
   assert.match(renderSource, /dltracker-browse-analysis-offer-group/);
   assert.match(renderSource, /dltracker-browse-analysis-offer-item/);
-  assert.match(renderSource, /shouldStackBrowseAnalysis\(\) \? " is-stacked" : ""/);
+  assert.match(renderSource, /const stacked = shouldStackBrowseAnalysis\(\)/);
+  assert.match(renderSource, /stacked \? " is-stacked" : ""/);
   assert.match(stackSource, /isTouchPath\(location\.href\)/);
   assert.match(stackSource, /\(hover: none\) and \(pointer: coarse\)/);
   assert.match(stackSource, /maxTouchPoints/);

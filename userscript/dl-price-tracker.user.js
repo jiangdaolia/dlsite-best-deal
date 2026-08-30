@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.51
+// @version      0.6.52
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.51";
+  const APP_VERSION = "0.6.52";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -77,6 +77,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.52": [
+      "浏览卡完成计算后不再退回读取中，相同结果不重复重绘",
+      "单张史低读取失败会结束该卡任务，不再触发整页循环刷新",
+    ],
     "0.6.51": [
       "同一平台活动页24小时内最多读取一次",
       "活动到期后立即停用，但不会因到期在当天重复请求",
@@ -6218,17 +6222,51 @@
     return frame;
   }
 
+  function browseAnalysisSignature(record, insight, stacked) {
+    return JSON.stringify({
+      stacked,
+      record: record ? {
+        rjCode: record.rjCode,
+        lowestPrice: record.lowestPrice,
+        regularPrice: record.regularPrice,
+        discountRate: record.discountRate,
+        dlwatcherUrl: record.dlwatcherUrl,
+      } : null,
+      insight: insight ? {
+        product: {
+          id: insight.product?.id,
+          price: insight.product?.price,
+          officialPrice: insight.product?.officialPrice,
+          cnyPrice: insight.product?.cnyPrice,
+          bulkbuyKey: insight.product?.bulkbuyKey,
+        },
+        bestReach: insight.bestReach,
+        couponOptions: insight.couponOptions,
+        bulkRule: insight.bulkRule,
+        cart: activeCartFingerprint(insight.cartProducts || []),
+        partial: insight.partial,
+      } : null,
+    });
+  }
+
   function renderBrowseCardAnalysis(host, record, insight) {
     if (!host) return;
     const previousLayout = host.querySelector(":scope > .dltracker-browse-analysis");
+    // 异步重跑时保留已完成结果，不让卡片退回“读取中”后再闪回来。
+    if (!insight && previousLayout?.dataset.analysisComplete === "true") return;
+    const stacked = shouldStackBrowseAnalysis();
+    const signature = browseAnalysisSignature(record, insight, stacked);
+    if (previousLayout?.dataset.analysisSignature === signature) return;
     const existingReminders = previousLayout?.querySelector(
       ":scope > .dltracker-account-reminders",
     );
     const purchased = previousLayout?.classList.contains("is-account-purchased");
     const layout = document.createElement("section");
     layout.className = `${UI_CLASSNAME} dltracker-browse-analysis${
-      shouldStackBrowseAnalysis() ? " is-stacked" : ""
+      stacked ? " is-stacked" : ""
     }${purchased ? " is-account-purchased" : ""}`;
+    layout.dataset.analysisSignature = signature;
+    layout.dataset.analysisComplete = insight ? "true" : "false";
     if (existingReminders) layout.appendChild(existingReminders);
     const id = String(record?.rjCode || insight?.product?.id || "").toUpperCase();
     if (id) layout.dataset.productId = id;
@@ -8105,7 +8143,11 @@
   }
 
   async function enhanceGenericBrowseCards(coupons, cartProducts) {
-    const cards = collectBrowseCards();
+    const cartPage = isCartPage(location.href);
+    const cards = collectBrowseCards().filter(({ id, node }) =>
+      cartPage ||
+      needsDealProcessing(node, id) ||
+      !node.querySelector(".dltracker-browse-analysis"));
     if (!cards.length) return;
     // 价格、声优和活动信息可能需要数秒才处理完，先把排序/筛选入口放到主列表。
     injectBrowseControls(false);
@@ -8116,7 +8158,6 @@
       id: item.id,
       price: item.price || metadata.get(item.id)?.price || 0,
     }));
-    const cartPage = isCartPage(location.href);
     const preparedCards = [];
     for (const { id, node, cartItem } of cards) {
       const priceHost = findBrowsePriceHost(node);
@@ -8173,25 +8214,31 @@
     // 这样不会增加 DLsite 的同源并发访问，也不会让一张慢卡片堵住整个列表。
     const browseBulkRules = await preloadBrowseBulkRules([...metadata.values()]);
     await Promise.all(preparedCards.map(async (card) => {
-      const bulkbuyKey = String(card.product.bulkbuyKey || "");
-      card.insight = await buildInsight(
-        card.product,
-        card.usableCoupons,
-        enrichedCartProducts,
-        card.partial,
-        bulkbuyKey && browseBulkRules.has(bulkbuyKey)
-          ? { bulkRule: browseBulkRules.get(bulkbuyKey) }
-          : {},
-      );
-      card.cartHost = card.cartItem
-        ? card.node.querySelector(".dltracker-cart-host") ||
-          ensureCartRenderHost(card.node)
-        : null;
-      if (card.cartHost) {
-        const record = browseRecordById.get(String(card.id).toUpperCase()) || {
-          rjCode: card.id,
-        };
-        renderCartDealLayout(card.cartHost, record, card.insight);
+      try {
+        const bulkbuyKey = String(card.product.bulkbuyKey || "");
+        card.insight = await buildInsight(
+          card.product,
+          card.usableCoupons,
+          enrichedCartProducts,
+          card.partial,
+          bulkbuyKey && browseBulkRules.has(bulkbuyKey)
+            ? { bulkRule: browseBulkRules.get(bulkbuyKey) }
+            : {},
+        );
+        card.cartHost = card.cartItem
+          ? card.node.querySelector(".dltracker-cart-host") ||
+            ensureCartRenderHost(card.node)
+          : null;
+        if (card.cartHost) {
+          const record = browseRecordById.get(String(card.id).toUpperCase()) || {
+            rjCode: card.id,
+          };
+          renderCartDealLayout(card.cartHost, record, card.insight);
+        }
+      } catch (error) {
+        card.failed = true;
+        markDealProcessed(card.node, card.id);
+        console.warn(`[${APP_NAME}] local browse analysis failed for ${card.id}:`, error);
       }
     }));
     injectBrowseControls();
@@ -8200,40 +8247,52 @@
       console.warn(`[${APP_NAME}] account reminder refresh failed:`, error);
     });
     await mapWithConcurrency(
-      preparedCards,
+      preparedCards.filter((card) => !card.failed),
       BROWSE_RENDER_CONCURRENCY,
       async (card) => {
-        let record = browseRecordById.get(String(card.id).toUpperCase()) || {
-          rjCode: card.id,
-        };
-        if (/^[RB]J/i.test(card.id)) {
-          const link = card.node.querySelector('a[href*="product_id/"]');
-          record = await buildOrUpdateRecord({
+        try {
+          let record = browseRecordById.get(String(card.id).toUpperCase()) || {
             rjCode: card.id,
-            title: link?.textContent?.trim() || card.id,
-            currentPrice: card.product.price || undefined,
-            forceFetch: false,
-          }) || { rjCode: card.id };
-          browseRecordById.set(
-            String(card.id).toUpperCase(),
-            record || { rjCode: card.id },
-          );
-          if (record?.voiceActors?.length) {
-            renderBrowseVoiceActors(card.node, {
-              ...card.product,
-              voiceActors: extractVoiceActorNames([
-                card.product.voiceActors || [],
-                record.voiceActors,
-              ]),
-            });
+          };
+          if (/^[RB]J/i.test(card.id)) {
+            const link = card.node.querySelector('a[href*="product_id/"]');
+            record = await buildOrUpdateRecord({
+              rjCode: card.id,
+              title: link?.textContent?.trim() || card.id,
+              currentPrice: card.product.price || undefined,
+              forceFetch: false,
+            }) || { rjCode: card.id };
+            browseRecordById.set(
+              String(card.id).toUpperCase(),
+              record || { rjCode: card.id },
+            );
+            if (record?.voiceActors?.length) {
+              renderBrowseVoiceActors(card.node, {
+                ...card.product,
+                voiceActors: extractVoiceActorNames([
+                  card.product.voiceActors || [],
+                  record.voiceActors,
+                ]),
+              });
+            }
           }
+          if (card.cartHost) {
+            renderPriceCard(record, card.cartHost);
+          } else if (card.analysisHost) {
+            renderBrowseCardAnalysis(card.analysisHost, record, card.insight);
+          }
+        } catch (error) {
+          console.warn(`[${APP_NAME}] history browse analysis failed for ${card.id}:`, error);
+          if (card.analysisHost) {
+            renderBrowseCardAnalysis(
+              card.analysisHost,
+              browseRecordById.get(String(card.id).toUpperCase()) || { rjCode: card.id },
+              card.insight,
+            );
+          }
+        } finally {
+          markDealProcessed(card.node, card.id);
         }
-        if (card.cartHost) {
-          renderPriceCard(record, card.cartHost);
-        } else if (card.analysisHost) {
-          renderBrowseCardAnalysis(card.analysisHost, record, card.insight);
-        }
-        markDealProcessed(card.node, card.id);
       },
     );
     await applyBrowseSortAndFilter();
