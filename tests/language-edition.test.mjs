@@ -159,7 +159,8 @@ test("当前语言固定第一行，最优惠按理论日元价允许并列", ()
 test("语言比较使用七列表、账号冷却与官方单件购物车请求", () => {
   assert.match(source, /"语言", "作品", "人民币\/日元", "现在\/平台\/史低", "备注", "看详情", "购物车"/);
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
-  assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 100/);
+  assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 40/);
+  assert.match(source, /ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 \* 1000/);
   assert.match(source, /loaded: true,[\s\S]*?total: ids\.length,[\s\S]*?refreshAccountInformationPanels\(\);[\s\S]*?for \(let start = 0; start < ids\.length/);
   assert.match(source, /start \+= ACCOUNT_METADATA_BATCH_SIZE[\s\S]*?slice\(start, start \+ ACCOUNT_METADATA_BATCH_SIZE\)/);
   assert.match(source, /ids\.length && next\.indexed === 0[\s\S]*?语言索引未取得任何作品信息/);

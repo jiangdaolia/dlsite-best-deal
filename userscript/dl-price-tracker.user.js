@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.36
+// @version      0.6.37
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.36";
+  const APP_VERSION = "0.6.37";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -63,8 +63,8 @@
   const LANGUAGE_DIALOG_RESTORE_STORAGE_KEY = "dltracker-language-dialog-restore-v1";
   const ACCOUNT_REFRESH_COOLDOWN_MS = 60 * 1000;
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
-  const ACCOUNT_METADATA_BATCH_SIZE = 100;
-  const ACCOUNT_METADATA_BATCH_PAUSE_MS = 1000;
+  const ACCOUNT_METADATA_BATCH_SIZE = 40;
+  const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
@@ -72,6 +72,9 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.37": [
+      "账号语言索引改为每批40部且批间等待10秒，避免88部单请求被DLsite拒绝",
+    ],
     "0.6.36": [
       "账号语言索引恢复每批最多100部，减少请求次数并持久显示安全暂停原因",
       "浏览隐藏开关改用页面级点击代理，并新增隐藏购物车与稍后再买作品",
