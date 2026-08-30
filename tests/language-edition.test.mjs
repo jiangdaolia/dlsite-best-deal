@@ -161,7 +161,9 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 40/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 \* 1000/);
-  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 5/);
+  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 6/);
+  assert.match(source, /ACCOUNT_INDEX_LOCK_STORAGE_KEY = "dltracker-account-index-lock-v1"/);
+  assert.match(source, /ACCOUNT_INDEX_LOCK_TTL_MS = 60 \* 1000/);
   assert.match(source, /fetchSameOriginText\(url, "作品信息接口", \{\s*anonymous: true/);
   assert.match(source, /credentials: anonymous \? "omit" : "include"/);
   assert.match(source, /anonymous \? \{ referrerPolicy: "no-referrer" \} : \{\}/);
@@ -183,7 +185,6 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /requestStrategyChanged = dealNumber\(index\.requestVersion\)[\s\S]*?\(!index\.pausedReason \|\| requestStrategyChanged\)[\s\S]*?return refreshAccountIndex\(\)/);
   assert.match(source, /语言索引已暂停：[\s\S]*?剩余\$\{remaining\}项/);
   assert.match(source, /已暂停：\$\{reason\}；剩余\$\{remaining\}项/);
-  assert.match(source, /未完成；剩余\$\{remaining\}项/);
   assert.match(source, /pausedReason: accountIndexSessionStopped \? accountIndexSessionStopReason : ""/);
   assert.match(source, /读取暂停：\$\{index\.pausedReason\}/);
   assert.match(source, /else if \(!accountIndexSessionStopped\) \{[\s\S]*?failedIds\.push\(id\)/);
@@ -196,11 +197,27 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
     functionSource("refreshAccountIndex"),
     /pausedReason: accountIndexSessionStopReason \|\| accountIndexRuntimeError/,
   );
+  assert.match(
+    functionSource("refreshAccountIndex"),
+    /if \(!acquireAccountIndexLock\(\)\)[\s\S]*?另一个 DLsite 页面正在读取账号索引/,
+  );
+  assert.match(
+    functionSource("refreshAccountIndex"),
+    /stage: "读取账号购物车信息"[\s\S]*?stage: "读取已购清单"[\s\S]*?stage: `读取作品信息/,
+  );
+  assert.match(
+    functionSource("refreshAccountIndex"),
+    /\.finally\(\(\) => \{\s*releaseAccountIndexLock\(\)/,
+  );
   assert.match(source, /`\$\{label\}请求失败：\$\{error instanceof Error/);
   assert.match(source, /\["状态", index\.loaded \? "正在重新读取…" : "正在读取购物车和已购清单…"\]/);
   assert.match(source, /`读取失败：\$\{accountIndexRuntimeError\}`/);
-  assert.match(source, /if \(reading && indexed < total\) return `\$\{indexed\}\/\$\{total\}（读取中）`/);
+  assert.match(source, /Boolean\(index\?\.indexing\) && accountIndexLockIsActive\(\)/);
+  assert.match(source, /读取中\$\{stage \? `：\$\{stage\}` : ""\}/);
+  assert.match(source, /未完成\$\{stage \? `：中断于\$\{stage\}` : ""\}/);
   assert.match(source, /\["语言索引", accountIndexProgressText\(index, reading\)\]/);
+  assert.match(source, /window\.addEventListener\("pagehide", releaseAccountIndexLock\)/);
+  assert.match(source, /event\.key === ACCOUNT_INDEX_STORAGE_KEY[\s\S]*?refreshAccountInformationPanels\(\)/);
   assert.match(source, /const data = await accountReminderData\(id\);[\s\S]*?existing\.replaceWith\(reminders\)/);
   assert.match(source, /existing\?\.dataset\.reminderSignature === signature/);
   assert.doesNotMatch(source, /layout\.querySelector\("\.dltracker-account-reminders"\)\?\.remove\(\);\s*layout\.classList\.remove\("is-account-purchased"\);\s*const data = await accountReminderData/);

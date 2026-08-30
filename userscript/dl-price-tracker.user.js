@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.41
+// @version      0.6.42
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.41";
+  const APP_VERSION = "0.6.42";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -59,13 +59,15 @@
   const DEAL_CACHE_STORAGE_KEY = "dltracker-deal-insight-cache-v3";
   const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v5";
   const ACCOUNT_INDEX_STORAGE_KEY = "dltracker-account-index-v1";
+  const ACCOUNT_INDEX_LOCK_STORAGE_KEY = "dltracker-account-index-lock-v1";
   const LANGUAGE_FAMILY_CACHE_STORAGE_KEY = "dltracker-language-family-cache-v1";
   const LANGUAGE_DIALOG_RESTORE_STORAGE_KEY = "dltracker-language-dialog-restore-v1";
   const ACCOUNT_REFRESH_COOLDOWN_MS = 60 * 1000;
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_SIZE = 40;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
-  const ACCOUNT_INDEX_REQUEST_VERSION = 5;
+  const ACCOUNT_INDEX_REQUEST_VERSION = 6;
+  const ACCOUNT_INDEX_LOCK_TTL_MS = 60 * 1000;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
@@ -73,6 +75,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.42": [
+      "账号索引新增跨标签页租约，同一时间只有一个DLsite页面能写入进度",
+      "语言索引显示当前读取阶段，页面离开时释放租约供新页面续接",
+    ],
     "0.6.41": [
       "账号索引改为在当页优惠分析结束时必定调度，中途异常也不会留0/88未完成",
     ],
@@ -399,6 +405,7 @@
   let accountIndexSessionStopped = false;
   let accountIndexSessionStopReason = "";
   let accountIndexBackgroundScheduled = false;
+  const accountIndexTabId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   let insightBootstrapInFlight = null;
   const dealInsightById = new Map();
   const browseRecordById = new Map();
@@ -2456,6 +2463,8 @@
       lastManualAt: 0,
       accountFingerprint: "",
       pausedReason: "",
+      indexing: false,
+      stage: "",
       requestVersion: 0,
     };
   }
@@ -2487,6 +2496,61 @@
       console.warn(`[${APP_NAME}] account index write failed:`, error);
     }
     return index;
+  }
+
+  function loadAccountIndexLock() {
+    try {
+      const parsed = JSON.parse(
+        localStorage.getItem(ACCOUNT_INDEX_LOCK_STORAGE_KEY) || "null",
+      );
+      if (!parsed || typeof parsed !== "object") return null;
+      const owner = String(parsed.owner || "");
+      const expiresAt = dealNumber(parsed.expiresAt, 0);
+      return owner && expiresAt ? { owner, expiresAt } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function accountIndexLockIsActive(lock = loadAccountIndexLock()) {
+    return Boolean(lock?.owner && dealNumber(lock.expiresAt, 0) > Date.now());
+  }
+
+  function acquireAccountIndexLock() {
+    const current = loadAccountIndexLock();
+    if (accountIndexLockIsActive(current) && current.owner !== accountIndexTabId) {
+      return false;
+    }
+    try {
+      localStorage.setItem(ACCOUNT_INDEX_LOCK_STORAGE_KEY, JSON.stringify({
+        owner: accountIndexTabId,
+        expiresAt: Date.now() + ACCOUNT_INDEX_LOCK_TTL_MS,
+      }));
+    } catch {
+      return false;
+    }
+    return loadAccountIndexLock()?.owner === accountIndexTabId;
+  }
+
+  function renewAccountIndexLock() {
+    if (loadAccountIndexLock()?.owner !== accountIndexTabId) return false;
+    try {
+      localStorage.setItem(ACCOUNT_INDEX_LOCK_STORAGE_KEY, JSON.stringify({
+        owner: accountIndexTabId,
+        expiresAt: Date.now() + ACCOUNT_INDEX_LOCK_TTL_MS,
+      }));
+      return loadAccountIndexLock()?.owner === accountIndexTabId;
+    } catch {
+      return false;
+    }
+  }
+
+  function releaseAccountIndexLock() {
+    try {
+      if (loadAccountIndexLock()?.owner === accountIndexTabId) {
+        localStorage.removeItem(ACCOUNT_INDEX_LOCK_STORAGE_KEY);
+      }
+    } catch { /* noop */ }
   }
 
   function clearAccountIndex() {
@@ -2571,25 +2635,34 @@
       ));
       throw new Error(`请等待 ${seconds} 秒后再读取`);
     }
+    if (!acquireAccountIndexLock()) {
+      if (manual) throw new Error("另一个 DLsite 页面正在读取账号索引");
+      refreshAccountInformationPanels();
+      return loadAccountIndex();
+    }
     // 只重置账号索引自己的会话，不改变优惠券或当页分析的熔断状态。
     accountIndexSessionStopped = false;
     accountIndexSessionStopReason = "";
     accountIndexRuntimeError = "";
     const manualStartedAt = manual ? Date.now() : dealNumber(previous.lastManualAt);
-    if (manual || dealNumber(previous.requestVersion) < ACCOUNT_INDEX_REQUEST_VERSION) {
-      saveAccountIndex({
-        ...previous,
-        lastManualAt: manualStartedAt,
-        requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
-      });
-    }
+    saveAccountIndex({
+      ...previous,
+      lastManualAt: manualStartedAt,
+      pausedReason: "",
+      indexing: true,
+      stage: "读取账号购物车信息",
+      requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
+      updatedAt: Date.now(),
+    });
     accountIndexRefreshInFlight = (async () => {
       if (!isDlsiteMemberLoggedIn()) return clearAccountIndex();
       const section = currentDlsiteSection();
+      if (!renewAccountIndexLock()) return loadAccountIndex();
       const status = await fetchSameOriginJson(
         `/${section}${DLSITE_MEMBER_STATUS_PATH}`,
         "账号购物车信息",
       );
+      if (!renewAccountIndexLock()) return loadAccountIndex();
       const token = dlsiteBoughtToken();
       const rawFingerprint = String(
         token || status?.customer_id || status?.login_id || "",
@@ -2604,9 +2677,17 @@
         clearAccountIndex();
       }
       accountIndexRuntimeFingerprint = fingerprint;
+      saveAccountIndex({
+        ...loadAccountIndex(),
+        indexing: true,
+        stage: "读取已购清单",
+        updatedAt: Date.now(),
+      });
+      refreshAccountInformationPanels();
       const boughtUrl = new URL(`/${section}${DLSITE_BOUGHT_PRODUCTS_PATH}`, location.origin);
       if (token) boughtUrl.searchParams.set("_", token);
       const boughtPayload = await fetchSameOriginJson(boughtUrl, "已购清单");
+      if (!renewAccountIndexLock()) return loadAccountIndex();
       const cartIds = cartIdsFromMemberStatus(status);
       const bought = (Array.isArray(boughtPayload?.boughts)
         ? boughtPayload.boughts
@@ -2631,14 +2712,25 @@
         lastManualAt: manualStartedAt,
         accountFingerprint: fingerprint,
         pausedReason: "",
+        indexing: ids.length > 0,
+        stage: ids.length ? `准备读取作品信息 0/${ids.length}` : "",
         requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
       });
       refreshAccountInformationPanels();
       for (let start = 0; start < ids.length; start += ACCOUNT_METADATA_BATCH_SIZE) {
         const batchIds = ids.slice(start, start + ACCOUNT_METADATA_BATCH_SIZE);
+        if (!renewAccountIndexLock()) return loadAccountIndex();
+        saveAccountIndex({
+          ...loadAccountIndex(),
+          indexing: true,
+          stage: `读取作品信息 ${start + 1}-${start + batchIds.length}/${ids.length}`,
+          updatedAt: Date.now(),
+        });
+        refreshAccountInformationPanels();
         const metadata = await ensureProductMetadata(batchIds, {
           requestSession: "account",
         });
+        if (!renewAccountIndexLock()) return loadAccountIndex();
         for (const id of batchIds) {
           const product = metadata.get(id);
           if (product) entries[id] = accountEntryFromProduct(id, product);
@@ -2661,6 +2753,11 @@
           updatedAt: Date.now(),
           lastManualAt: manualStartedAt,
           accountFingerprint: fingerprint,
+          pausedReason: "",
+          indexing: true,
+          stage: start + ACCOUNT_METADATA_BATCH_SIZE < ids.length
+            ? `等待下一批 ${Object.keys(entries).length}/${ids.length}`
+            : "整理索引",
           requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
         });
         refreshAccountInformationPanels();
@@ -2673,6 +2770,7 @@
         }
         if (start + ACCOUNT_METADATA_BATCH_SIZE < ids.length) {
           await sleep(ACCOUNT_METADATA_BATCH_PAUSE_MS);
+          if (!renewAccountIndexLock()) return loadAccountIndex();
         }
       }
       const next = {
@@ -2690,6 +2788,8 @@
         lastManualAt: manualStartedAt,
         accountFingerprint: fingerprint,
         pausedReason: accountIndexSessionStopped ? accountIndexSessionStopReason : "",
+        indexing: false,
+        stage: "",
         requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
       };
       if (ids.length && next.indexed === 0 && !accountIndexRuntimeError) {
@@ -2699,15 +2799,20 @@
       return next;
     })().catch((error) => {
       accountIndexRuntimeError = error instanceof Error ? error.message : String(error);
-      const current = loadAccountIndex();
-      saveAccountIndex({
-        ...current,
-        pausedReason: accountIndexSessionStopReason || accountIndexRuntimeError,
-        requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
-        updatedAt: Date.now(),
-      });
+      if (loadAccountIndexLock()?.owner === accountIndexTabId) {
+        const current = loadAccountIndex();
+        saveAccountIndex({
+          ...current,
+          pausedReason: accountIndexSessionStopReason || accountIndexRuntimeError,
+          indexing: false,
+          stage: "",
+          requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
+          updatedAt: Date.now(),
+        });
+      }
       throw error;
     }).finally(() => {
+      releaseAccountIndexLock();
       accountIndexRefreshInFlight = null;
       refreshAccountInformationPanels();
     });
@@ -5894,7 +5999,13 @@
   function accountIndexProgressText(index, reading) {
     const indexed = dealNumber(index?.indexed, 0);
     const total = dealNumber(index?.total, 0);
-    if (reading && indexed < total) return `${indexed}/${total}（读取中）`;
+    const sharedReading = reading || (
+      Boolean(index?.indexing) && accountIndexLockIsActive()
+    );
+    const stage = dealPlainText(index?.stage);
+    if (sharedReading && (!index?.complete || indexed < total)) {
+      return `${indexed}/${total}（读取中${stage ? `：${stage}` : ""}）`;
+    }
     if (index?.complete) return `${indexed}/${total}`;
     const failed = Array.isArray(index?.failedIds) ? index.failedIds.length : 0;
     if (failed) return `${indexed}/${total}（${failed}项未取得）`;
@@ -5904,14 +6015,16 @@
     return `${indexed}/${total}${remaining
       ? reason
         ? `（已暂停：${reason}；剩余${remaining}项）`
-        : `（未完成；剩余${remaining}项）`
-      : "（未完成）"}`;
+        : `（未完成${stage ? `：中断于${stage}` : ""}；剩余${remaining}项）`
+      : `（未完成${stage ? `：中断于${stage}` : ""}）`}`;
   }
 
   function renderAccountInformationPanel(panel) {
     if (!panel) return;
     const index = loadAccountIndex();
-    const reading = Boolean(accountIndexRefreshInFlight);
+    const reading = Boolean(accountIndexRefreshInFlight) || (
+      Boolean(index.indexing) && accountIndexLockIsActive()
+    );
     panel.className = "dltracker-account-info-panel";
     const summary = document.createElement("div");
     summary.className = "dltracker-account-info-summary";
@@ -12067,6 +12180,28 @@ a.dltracker-cart-deal-frame:focus-visible {
 
     window.addEventListener("popstate", () => onUrlChange());
     window.addEventListener("pageshow", restoreBrowseStateOnPageShow);
+    window.addEventListener("pagehide", releaseAccountIndexLock);
+    window.addEventListener("storage", (event) => {
+      if (event.key === ACCOUNT_INDEX_STORAGE_KEY) {
+        const index = loadAccountIndex();
+        refreshAccountInformationPanels();
+        if (!index.indexing) {
+          void refreshAllAccountReminders()
+            .then(() => refreshOpenLanguageDialog())
+            .catch((error) => {
+              console.warn(`[${APP_NAME}] cross-tab account refresh failed:`, error);
+            });
+        }
+        return;
+      }
+      if (event.key === ACCOUNT_INDEX_LOCK_STORAGE_KEY && !event.newValue) {
+        const index = loadAccountIndex();
+        if (index.loaded && !index.complete && !index.pausedReason) {
+          scheduleInitialAccountIndex();
+        }
+        refreshAccountInformationPanels();
+      }
+    });
     setInterval(() => onUrlChange(), 500);
 
     let domDebounceTimer = null;
