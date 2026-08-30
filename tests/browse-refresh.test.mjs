@@ -73,6 +73,29 @@ test("优惠券和平台活动筛选覆盖全部优惠券及分类入口", () =>
   assert.match(functionSource("injectBuyLaterSortToggle"), /优惠券和平台活动/);
 });
 
+test("具体优惠券和平台活动按优惠力度降序且同力度稳定", () => {
+  const sandbox = {};
+  vm.runInNewContext(
+    `${functionSource("sortBrowseOfferFilterOptions")}
+    globalThis.sortOptions = sortBrowseOfferFilterOptions;`,
+    sandbox,
+  );
+  const sorted = sandbox.sortOptions([
+    { value: "coupon:30", rate: 30, order: 0 },
+    { value: "activity:60", rate: 60, order: 1 },
+    { value: "coupon:50-a", rate: 50, order: 2 },
+    { value: "coupon:50-b", rate: 50, order: 3 },
+  ]);
+  assert.deepEqual(
+    Array.from(sorted, (option) => option.value),
+    ["activity:60", "coupon:50-a", "coupon:50-b", "coupon:30"],
+  );
+  assert.match(
+    functionSource("browseBundleFilterOptions"),
+    /options\.push\(\.\.\.sortBrowseOfferFilterOptions\(offerOptions\)/,
+  );
+});
+
 test("浏览排序控件已在原生排序区后方时不重复插入自身", () => {
   const sandbox = {};
   vm.runInNewContext(

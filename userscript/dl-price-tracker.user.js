@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.53
+// @version      0.6.54
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.53";
+  const APP_VERSION = "0.6.54";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -77,6 +77,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.54": [
+      "具体优惠券和平台活动按显示的优惠力度从高到低排列",
+      "同力度优惠保持稳定顺序，四个总筛选入口仍固定在顶部",
+    ],
     "0.6.53": [
       "浏览筛选改为优惠券和平台活动，支持分别查看全部券或全部活动",
       "每一种有效优惠券都可单独筛选，不再只显示凑件券",
@@ -4445,6 +4449,12 @@
     }
   }
 
+  function sortBrowseOfferFilterOptions(options) {
+    return [...(options || [])].sort((a, b) =>
+      (b.rate || 0) - (a.rate || 0) ||
+      (a.order || 0) - (b.order || 0));
+  }
+
   function browseBundleFilterOptions(cards) {
     const active = latestDealContext.cartSnapshot.active || [];
     const activeSubtotal = active.reduce((sum, item) =>
@@ -4456,6 +4466,7 @@
       { value: "activity:any", label: "所有平台活动" },
     ];
     const seen = new Set(options.map((option) => option.value));
+    const offerOptions = [];
     const cacheRules = loadDealCache().bulkRules || {};
     for (const [key, rule] of Object.entries(cacheRules)) {
       if (!rule || dealNumber(rule.minCount, 1) <= 1 ||
@@ -4464,9 +4475,11 @@
       if (seen.has(value)) continue;
       seen.add(value);
       const count = active.filter((item) => item.bulkbuyKey === key).length;
-      options.push({
+      offerOptions.push({
         value,
         label: `平台活动｜${rule.minCount}件${compactOff(rule.discountRate)}｜${count >= rule.minCount ? "已满" : "已有"}${count}/${rule.minCount}`,
+        rate: dealNumber(rule.discountRate),
+        order: offerOptions.length,
       });
     }
     for (const coupon of latestDealContext.coupons) {
@@ -4486,14 +4499,20 @@
         progress.push(`${activeSubtotal >= coupon.minSpend ? "已满" : "已有"}${Math.round(activeSubtotal).toLocaleString("ja-JP")}/${Math.round(coupon.minSpend).toLocaleString("ja-JP")}円`);
       }
       if (!progress.length) progress.push("无门槛");
-      options.push({
+      offerOptions.push({
         value,
         label: `优惠券｜${compactCouponListLabel({
           ...coupon,
           equivalentRate: rate,
         })}｜${progress.join("＋")}`,
+        rate,
+        order: offerOptions.length,
       });
     }
+    options.push(...sortBrowseOfferFilterOptions(offerOptions).map(({ value, label }) => ({
+      value,
+      label,
+    })));
     return options;
   }
 
