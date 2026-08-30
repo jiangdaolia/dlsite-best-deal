@@ -49,6 +49,9 @@ vm.runInNewContext(
     languageDisplayName,
     productLanguageIdentity,
     productNeedsLanguageFamilyLookup,
+    historicalPurchasedSkuLanguage,
+    productLooksLikeHistoricalPurchasedSku,
+    matchingMakerWorkIds,
     languageFamilyIdFromEditions,
     cartSkuFromSignals,
     accountEntryFromProduct,
@@ -65,6 +68,9 @@ const {
   languageDisplayName,
   productLanguageIdentity,
   productNeedsLanguageFamilyLookup,
+  historicalPurchasedSkuLanguage,
+  productLooksLikeHistoricalPurchasedSku,
+  matchingMakerWorkIds,
   languageFamilyIdFromEditions,
   cartSkuFromSignals,
   accountEntryFromProduct,
@@ -127,18 +133,28 @@ test("RJ01285872这类非日语原作标记改用详情页日语版本作为家�
     JSON.parse(JSON.stringify(accountEntryFromProduct(product.id, product, family))),
     {
       id: "RJ01285872",
+      skuId: "RJ01285872",
       parentId: "RJ01285872",
       familyId: "RJ421140",
       lang: "CHI_HANS",
       language: "简体中文",
+      identitySource: "metadata",
     },
   );
 });
 
-test("RJ01212161这类含日语的多语言单SKU不误判成独立翻译", () => {
+test("RJ01212161这类历史购买SKU保留中文身份而不默认日语", () => {
   const product = {
     id: "RJ01212161",
-    raw: { options: "OTM#SND#JPN#ENG#CHI_HANT#CHI_HANS#KO_KR#CHI" },
+    title: "【癒されえっち】隣のスパダリな年下クン",
+    price: 0,
+    officialPrice: 0,
+    onSale: false,
+    makerId: "RG01004470",
+    raw: {
+      options: "OTM#SND#JPN#ENG#CHI_HANT#CHI_HANS#KO_KR#CHI",
+      regist_date: null,
+    },
     translationInfo: {
       is_original: true,
       original_workno: null,
@@ -148,8 +164,57 @@ test("RJ01212161这类含日语的多语言单SKU不误判成独立翻译", () =
   };
   const identity = productLanguageIdentity(product);
   assert.equal(identity.lang, "JPN");
-  assert.equal(identity.familyId, "RJ01212161");
+  assert.equal(historicalPurchasedSkuLanguage(product), "CHI");
+  assert.equal(productLooksLikeHistoricalPurchasedSku(product), true);
   assert.equal(productNeedsLanguageFamilyLookup(product), false);
+  const family = {
+    familyId: "RJ01200697",
+    editions: [
+      { parentId: "RJ01200697", lang: "JPN", language: "日语" },
+      { parentId: "RJ01213700", lang: "CHI_HANS", language: "简体中文" },
+    ],
+  };
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(accountEntryFromProduct(product.id, product, family, {
+      familyId: "RJ01200697",
+      parentId: "RJ01200697",
+      lang: "CHI",
+      language: "中文",
+    }))),
+    {
+      id: "RJ01212161",
+      skuId: "RJ01212161",
+      parentId: "RJ01200697",
+      familyId: "RJ01200697",
+      lang: "CHI",
+      language: "中文",
+      identitySource: "historical-purchase",
+    },
+  );
+});
+
+test("历史购买SKU可从同社团作品列表按完整标题找回原作", () => {
+  const candidates = [
+    {
+      getAttribute: () => "RJ01200697",
+      querySelector: () => ({
+        getAttribute: () => "【癒されえっち】隣のスパダリな年下クン",
+        textContent: "",
+      }),
+    },
+    {
+      getAttribute: () => "RJ09999999",
+      querySelector: () => ({ getAttribute: () => "别的作品", textContent: "" }),
+    },
+  ];
+  const doc = { querySelectorAll: () => candidates };
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(matchingMakerWorkIds(doc, {
+      id: "RJ01212161",
+      title: "【癒されえっち】 隣のスパダリな年下クン",
+    }))),
+    ["RJ01200697"],
+  );
 });
 
 test("语言选择器一次给出父编号、中文语言名和 DLsite 顺序", () => {
@@ -293,7 +358,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 40/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 \* 1000/);
-  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 11/);
+  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 12/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_STORAGE_KEY = "dltracker-account-index-lock-v1"/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_TTL_MS = 60 \* 1000/);
   assert.match(source, /fetchSameOriginText\(url, "作品信息接口", \{\s*anonymous: true/);
@@ -346,6 +411,9 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /saveAccountIndex\(index, \{\s*throwOnFailure: true/);
   assert.match(source, /const bought = boughtIdsFromPayload\(boughtPayload\)/);
   assert.match(source, /productNeedsLanguageFamilyLookup\(product\)[\s\S]*?ensureLanguageFamily\(id, \{[\s\S]*?requestSession: "account"/);
+  assert.match(source, /productLooksLikeHistoricalPurchasedSku\(product\)[\s\S]*?resolveHistoricalPurchasedSku\(id, product\)/);
+  assert.match(source, /归并历史已购SKU/);
+  assert.match(source, /cache\.parents\[String\(id \|\| ""\)\.toUpperCase\(\)\] = family\.familyId/);
   assert.match(source, /fetchSameOriginText\(url, "语言版本详情", \{\s*anonymous: true,/);
   assert.match(source, /stage: `补读作品详情 \$\{id\}`[\s\S]*?ensureLanguageFamily\(id, \{[\s\S]*?knownProduct: fallbackProduct/);
   assert.match(source, /failedIds\.slice\(0, 3\)[\s\S]*?\$\{failed\}项未取得/);

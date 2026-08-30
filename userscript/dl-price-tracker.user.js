@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.47
+// @version      0.6.48
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.47";
+  const APP_VERSION = "0.6.48";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -66,7 +66,7 @@
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_SIZE = 40;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
-  const ACCOUNT_INDEX_REQUEST_VERSION = 11;
+  const ACCOUNT_INDEX_REQUEST_VERSION = 12;
   const ACCOUNT_INDEX_LOCK_TTL_MS = 60 * 1000;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
@@ -75,6 +75,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.48": [
+      "已购索引不再把历史译者SKU当成独立作品或日语版",
+      "公开资料已清空时按同社团同标题找回原作家族，仅保留购买SKU作为已购凭证",
+    ],
     "0.6.47": [
       "兼容RJ01212161这类详情已下架但作品接口仍可识别的多语言单SKU",
       "语言选项同时包含日语与其他语言时按日语原作归类，不再误补读404详情页",
@@ -2431,6 +2435,67 @@
     return { id, parentId, familyId, lang };
   }
 
+  function normalizedWorkTitleKey(value) {
+    return dealPlainText(value).normalize("NFKC")
+      .replace(/[\s\u3000]+/g, "")
+      .replace(/[~〜～]/g, "~")
+      .toLowerCase();
+  }
+
+  function productOptionLanguageCodes(product) {
+    const options = String(product?.raw?.options || product?.raw?.option || "")
+      .toUpperCase().split(/[# ,]+/).filter(Boolean);
+    return [...new Set(options.filter((value) =>
+      Object.prototype.hasOwnProperty.call(LANGUAGE_LABELS, value)))];
+  }
+
+  function historicalPurchasedSkuLanguage(product) {
+    const info = product?.translationInfo || product?.raw?.translation_info || {};
+    const explicit = String(info?.lang || "").trim().toUpperCase();
+    if (explicit) return explicit;
+    const languages = productOptionLanguageCodes(product);
+    // DLsite的历史中文购买SKU可能只留下通用CHI标记，同时罗列
+    // 作品支持的全部语言。优先保留“中文”，不猜简体或繁体。
+    if (languages.includes("CHI")) return "CHI";
+    const translated = languages.filter((value) => value !== "JPN");
+    return translated.length === 1 ? translated[0] : "";
+  }
+
+  function productLooksLikeHistoricalPurchasedSku(product) {
+    const info = product?.translationInfo || product?.raw?.translation_info || {};
+    const raw = product?.raw || {};
+    const title = normalizedWorkTitleKey(product?.title);
+    return Boolean(
+      info?.is_original &&
+      !info?.original_workno &&
+      !info?.parent_workno &&
+      !product?.onSale &&
+      dealNumber(product?.price) <= 0 &&
+      dealNumber(product?.officialPrice) <= 0 &&
+      !raw?.regist_date &&
+      product?.makerId &&
+      title && title !== normalizedWorkTitleKey(product?.id) &&
+      historicalPurchasedSkuLanguage(product)
+    );
+  }
+
+  function matchingMakerWorkIds(doc, product) {
+    const targetTitle = normalizedWorkTitleKey(product?.title);
+    const excluded = String(product?.id || "").toUpperCase();
+    if (!targetTitle) return [];
+    const result = [];
+    for (const node of doc?.querySelectorAll?.("[data-list_item_product_id]") || []) {
+      const id = String(node.getAttribute("data-list_item_product_id") || "").toUpperCase();
+      if (!isValidProductCode(id) || id === excluded) continue;
+      const titleNode = node.querySelector?.(
+        ".work_name a[title], .work_name a, a[href*='/work/'][title]",
+      );
+      const title = titleNode?.getAttribute?.("title") || titleNode?.textContent || "";
+      if (normalizedWorkTitleKey(title) === targetTitle) result.push(id);
+    }
+    return [...new Set(result)];
+  }
+
   function productNeedsLanguageFamilyLookup(product) {
     const info = product?.translationInfo || product?.raw?.translation_info || {};
     if (!info?.is_original || info?.original_workno || info?.parent_workno) return false;
@@ -2627,17 +2692,27 @@
     return emptyAccountIndex();
   }
 
-  function accountEntryFromProduct(id, product, family = null) {
+  function accountEntryFromProduct(id, product, family = null, resolved = null) {
     const identity = productLanguageIdentity(product, id);
     const edition = (family?.editions || []).find((item) =>
       [identity.id, identity.parentId].includes(String(item?.parentId || "").toUpperCase()));
-    const lang = normalizedLanguageCode(edition?.lang || identity.lang, product);
+    const lang = normalizedLanguageCode(
+      resolved?.lang || edition?.lang || identity.lang,
+      product,
+    );
     return {
       id: String(id || "").toUpperCase(),
-      parentId: identity.parentId,
-      familyId: String(family?.familyId || identity.familyId).toUpperCase(),
+      skuId: String(id || "").toUpperCase(),
+      parentId: String(resolved?.parentId || identity.parentId).toUpperCase(),
+      familyId: String(
+        resolved?.familyId || family?.familyId || identity.familyId,
+      ).toUpperCase(),
       lang,
-      language: languageDisplayName(lang, edition?.language),
+      language: languageDisplayName(
+        lang,
+        resolved?.language || edition?.language,
+      ),
+      identitySource: resolved ? "historical-purchase" : "metadata",
     };
   }
 
@@ -2828,7 +2903,34 @@
           const product = metadata.get(id);
           if (product) {
             let family = null;
-            if (productNeedsLanguageFamilyLookup(product)) {
+            let resolved = null;
+            if (productLooksLikeHistoricalPurchasedSku(product)) {
+              persistAccountIndex({
+                ...loadAccountIndex(),
+                indexing: true,
+                stage: `归并历史已购SKU ${id}`,
+                updatedAt: Date.now(),
+              });
+              refreshAccountInformationPanels();
+              try {
+                resolved = await resolveHistoricalPurchasedSku(id, product);
+                family = resolved?.family || null;
+              } catch (error) {
+                console.warn(`[${APP_NAME}] historical purchased SKU failed for ${id}:`, error);
+              }
+              if (!resolved) {
+                const lang = historicalPurchasedSkuLanguage(product) || "CHI";
+                resolved = {
+                  familyId: id,
+                  parentId: id,
+                  lang,
+                  language: languageDisplayName(lang),
+                  unresolved: true,
+                };
+                if (!accountIndexSessionStopped) failedIds.push(id);
+              }
+              if (!renewAccountIndexLock()) return loadAccountIndex();
+            } else if (productNeedsLanguageFamilyLookup(product)) {
               persistAccountIndex({
                 ...loadAccountIndex(),
                 indexing: true,
@@ -2847,7 +2949,7 @@
               }
               if (!renewAccountIndexLock()) return loadAccountIndex();
             }
-            entries[id] = accountEntryFromProduct(id, product, family);
+            entries[id] = accountEntryFromProduct(id, product, family, resolved);
             if (accountIndexSessionStopped) break;
           } else if (!accountIndexSessionStopped) {
             persistAccountIndex({
@@ -3136,6 +3238,56 @@
     editions.forEach((edition) => { cache.parents[edition.parentId] = familyId; });
     saveLanguageFamilyCache(cache);
     return family;
+  }
+
+  async function resolveHistoricalPurchasedSku(id, product) {
+    if (!productLooksLikeHistoricalPurchasedSku(product)) return null;
+    const site = /^[a-z][a-z0-9-]*$/i.test(product?.siteId || "")
+      ? product.siteId
+      : currentDlsiteSection();
+    const makerId = String(product?.makerId || "");
+    const url = new URL(
+      `/${site}/circle/profile/=/maker_id/${encodeURIComponent(makerId)}.html`,
+      location.origin,
+    );
+    const html = await fetchSameOriginText(url, "历史已购作品归并", {
+      anonymous: true,
+      requestSession: "account",
+    });
+    if (!/^\s*</.test(html)) throw new Error("同社团作品列表没有返回网页");
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const candidateIds = matchingMakerWorkIds(doc, product);
+    if (!candidateIds.length) return null;
+    const metadata = await ensureProductMetadataBatches(candidateIds, {
+      requestSession: "account",
+    });
+    const titleKey = normalizedWorkTitleKey(product.title);
+    const candidates = candidateIds.map((candidateId) => metadata.get(candidateId))
+      .filter((candidate) =>
+        candidate &&
+        normalizedWorkTitleKey(candidate.title) === titleKey &&
+        String(candidate.makerId || "") === makerId &&
+        (candidate.onSale || dealNumber(candidate.officialPrice) > 0));
+    if (candidates.length !== 1) return null;
+    const sourceProduct = candidates[0];
+    const family = await ensureLanguageFamily(sourceProduct.id, {
+      requestSession: "account",
+      knownProduct: sourceProduct,
+    });
+    const lang = historicalPurchasedSkuLanguage(product);
+    const exactEdition = family.editions.find((edition) =>
+      normalizedLanguageCode(edition.lang) === lang);
+    const cache = loadLanguageFamilyCache();
+    cache.parents[String(id || "").toUpperCase()] = family.familyId;
+    saveLanguageFamilyCache(cache);
+    return {
+      family,
+      familyId: family.familyId,
+      parentId: exactEdition?.parentId || family.familyId,
+      lang,
+      language: languageDisplayName(lang),
+      sourceId: sourceProduct.id,
+    };
   }
   // </language-account-core>
 
