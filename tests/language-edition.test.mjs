@@ -168,6 +168,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /await restoreLanguageDialogAfterReload\(\{ deferRender: true \}\);\s*await bootstrap\(\)/);
   assert.match(source, /const initialRender = !state\.rows\.length \|\| !body\.firstElementChild;\s*if \(initialRender\) body\.textContent/);
   assert.match(source, /button\.style\.inlineSize = `\$\{rect\.width\}px`;\s*button\.style\.blockSize = `\$\{rect\.height\}px`;/);
+  assert.match(source, /entry\.style\.paddingInlineStart = `\$\{Math\.max\(0, rect\.left - contentLeft\)\}px`;/);
   assert.match(source, /mobileText \? "is-mobile-text" : "is-desktop-button"/);
   assert.match(source, /nativeHost\.insertBefore\(entry, nativeAction\)/);
   assert.match(source, /\.dltracker-language-entry-cart\.is-mobile-text \.dltracker-language-entry-button,[\s\S]*?border: 0;[\s\S]*?background: transparent;/);

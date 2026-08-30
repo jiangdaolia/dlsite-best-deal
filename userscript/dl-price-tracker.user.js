@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.29
+// @version      0.6.30
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.29";
+  const APP_VERSION = "0.6.30";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -68,6 +68,9 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.30": [
+      "桌面语言比较按钮与原生稍后再买或放回按钮左边缘对齐，保持真正正上方",
+    ],
     "0.6.29": [
       "桌面购物车入口实时跟随原生操作按钮宽高，手机入口改为其左侧文字链接",
       "语言比较弹窗异步刷新时保留现有内容，修复弹窗闪烁",
@@ -6501,6 +6504,15 @@
       button.style.maxInlineSize = `${rect.width}px`;
       button.style.minBlockSize = `${rect.height}px`;
       button.style.maxBlockSize = `${rect.height}px`;
+      const parent = entry.parentElement;
+      if (parent) {
+        const parentRect = parent.getBoundingClientRect();
+        const parentStyle = getComputedStyle(parent);
+        const contentLeft = parentRect.left +
+          dealNumber(parseFloat(parentStyle.borderLeftWidth)) +
+          dealNumber(parseFloat(parentStyle.paddingLeft));
+        entry.style.paddingInlineStart = `${Math.max(0, rect.left - contentLeft)}px`;
+      }
       return true;
     };
     requestAnimationFrame(apply);
@@ -6509,6 +6521,7 @@
         if (!apply()) observer.disconnect();
       });
       observer.observe(nativeAction);
+      if (entry.parentElement) observer.observe(entry.parentElement);
     }
   }
 
@@ -10056,6 +10069,10 @@ dl > .dltracker-browse-analysis-host {
   line-height: 1.25;
   overflow: hidden;
   white-space: nowrap;
+}
+
+.dltracker-language-entry-cart.is-desktop-button {
+  width: 100%;
 }
 
 .dltracker-language-entry-cart.is-mobile-text {
