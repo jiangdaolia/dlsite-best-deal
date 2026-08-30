@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.45
+// @version      0.6.46
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.45";
+  const APP_VERSION = "0.6.46";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -66,7 +66,7 @@
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_SIZE = 40;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
-  const ACCOUNT_INDEX_REQUEST_VERSION = 9;
+  const ACCOUNT_INDEX_REQUEST_VERSION = 10;
   const ACCOUNT_INDEX_LOCK_TTL_MS = 60 * 1000;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
@@ -75,6 +75,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.46": [
+      "批量作品接口缺失的账号作品改为匿名读取一次公开详情页，尽量补回语言家族",
+      "语言索引未取得项目时直接显示作品编号，方便确认已下架或不可访问的作品",
+    ],
     "0.6.45": [
       "兼容RJ01285872这类被作品接口标为原作、实际却是非日语版本的独立翻译作品",
       "仅对关系不明确的非日语原作匿名读取公开语言选择器并缓存，恢复跨语言已购提醒",
@@ -2842,8 +2846,29 @@
             entries[id] = accountEntryFromProduct(id, product, family);
             if (accountIndexSessionStopped) break;
           } else if (!accountIndexSessionStopped) {
-            entries[id] = accountEntryFromProduct(id, { id });
-            failedIds.push(id);
+            persistAccountIndex({
+              ...loadAccountIndex(),
+              indexing: true,
+              stage: `补读作品详情 ${id}`,
+              updatedAt: Date.now(),
+            });
+            refreshAccountInformationPanels();
+            try {
+              const fallbackProduct = { id };
+              const family = await ensureLanguageFamily(id, {
+                requestSession: "account",
+                knownProduct: fallbackProduct,
+              });
+              entries[id] = accountEntryFromProduct(id, fallbackProduct, family);
+              const related = family.familyId !== id ||
+                family.editions.some((edition) => edition.parentId !== id);
+              if (!related) failedIds.push(id);
+            } catch (error) {
+              console.warn(`[${APP_NAME}] account product detail failed for ${id}:`, error);
+              entries[id] = accountEntryFromProduct(id, { id });
+              failedIds.push(id);
+            }
+            if (!renewAccountIndexLock()) return loadAccountIndex();
           }
         }
         persistAccountIndex({
@@ -6141,8 +6166,14 @@
       return `${indexed}/${total}（读取中${stage ? `：${stage}` : ""}）`;
     }
     if (index?.complete) return `${indexed}/${total}`;
-    const failed = Array.isArray(index?.failedIds) ? index.failedIds.length : 0;
-    if (failed) return `${indexed}/${total}（${failed}项未取得）`;
+    const failedIds = Array.isArray(index?.failedIds) ? index.failedIds : [];
+    const failed = failedIds.length;
+    if (failed) {
+      const preview = failedIds.slice(0, 3).map(dealPlainText).filter(Boolean).join("、");
+      return `${indexed}/${total}（${failed}项未取得${preview ? `：${preview}` : ""}${
+        failed > 3 ? "等" : ""
+      }）`;
+    }
     const processed = Object.keys(index?.entries || {}).length;
     const remaining = Math.max(0, total - processed);
     const reason = dealPlainText(index?.pausedReason);

@@ -276,7 +276,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 40/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 \* 1000/);
-  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 9/);
+  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 10/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_STORAGE_KEY = "dltracker-account-index-lock-v1"/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_TTL_MS = 60 \* 1000/);
   assert.match(source, /fetchSameOriginText\(url, "作品信息接口", \{\s*anonymous: true/);
@@ -330,6 +330,8 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /const bought = boughtIdsFromPayload\(boughtPayload\)/);
   assert.match(source, /productNeedsLanguageFamilyLookup\(product\)[\s\S]*?ensureLanguageFamily\(id, \{[\s\S]*?requestSession: "account"/);
   assert.match(source, /fetchSameOriginText\(url, "语言版本详情", \{\s*anonymous: true,/);
+  assert.match(source, /stage: `补读作品详情 \$\{id\}`[\s\S]*?ensureLanguageFamily\(id, \{[\s\S]*?knownProduct: fallbackProduct/);
+  assert.match(source, /failedIds\.slice\(0, 3\)[\s\S]*?\$\{failed\}项未取得/);
   assert.match(source, /`\$\{label\}请求失败：\$\{error instanceof Error/);
   assert.match(source, /\["状态", index\.loaded \? "正在重新读取…" : "正在读取购物车和已购清单…"\]/);
   assert.match(source, /`读取失败：\$\{accountIndexRuntimeError\}`/);
