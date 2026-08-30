@@ -529,7 +529,7 @@ test("本次可到弹窗原子更新并忽略自身 DOM 变动", () => {
   assert.doesNotMatch(renderSource, /body\.replaceChildren\(\)/);
   assert.match(
     observerSource,
-    /mutations\.length && mutations\.every\(mutationIsInsideReachDialog\)/,
+    /mutations\.length && mutations\.every\(mutationIsInsideTrackerUi\)/,
   );
 });
 

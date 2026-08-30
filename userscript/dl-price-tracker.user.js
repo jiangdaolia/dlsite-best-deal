@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.32
+// @version      0.6.33
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.32";
+  const APP_VERSION = "0.6.33";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -60,6 +60,7 @@
   const LANGUAGE_DIALOG_RESTORE_STORAGE_KEY = "dltracker-language-dialog-restore-v1";
   const ACCOUNT_REFRESH_COOLDOWN_MS = 60 * 1000;
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
+  const ACCOUNT_METADATA_BATCH_SIZE = 10;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 1000;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
@@ -68,6 +69,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.33": [
+      "账号提醒改为异步完成后原子替换，修复浏览页已购买标记闪烁",
+      "账号语言索引改为每批 10 部串行读取，并明确区分读取中与未取得项",
+    ],
     "0.6.32": [
       "账号清单读取后立即更新面板，并明确显示读取中或读取失败状态",
     ],
@@ -376,6 +381,7 @@
   let accountIndexRefreshInFlight = null;
   let accountIndexRuntimeFingerprint = "";
   let accountIndexRuntimeError = "";
+  const accountReminderRenderTokens = new WeakMap();
   let openLanguageDialogState = null;
 
   function nowIso() {
@@ -2471,8 +2477,8 @@
         accountFingerprint: fingerprint,
       });
       refreshAccountInformationPanels();
-      for (let start = 0; start < ids.length; start += MAX_PRODUCT_METADATA_BATCH) {
-        const batchIds = ids.slice(start, start + MAX_PRODUCT_METADATA_BATCH);
+      for (let start = 0; start < ids.length; start += ACCOUNT_METADATA_BATCH_SIZE) {
+        const batchIds = ids.slice(start, start + ACCOUNT_METADATA_BATCH_SIZE);
         const metadata = await ensureProductMetadata(batchIds);
         for (const id of batchIds) {
           const product = metadata.get(id);
@@ -2507,7 +2513,7 @@
           }
           break;
         }
-        if (start + MAX_PRODUCT_METADATA_BATCH < ids.length) {
+        if (start + ACCOUNT_METADATA_BATCH_SIZE < ids.length) {
           await sleep(ACCOUNT_METADATA_BATCH_PAUSE_MS);
         }
       }
@@ -2526,6 +2532,9 @@
         lastManualAt: manualStartedAt,
         accountFingerprint: fingerprint,
       };
+      if (ids.length && next.indexed === 0) {
+        accountIndexRuntimeError = "语言索引未取得任何作品信息，请稍后重新读取";
+      }
       saveAccountIndex(next);
       return next;
     })().catch((error) => {
@@ -5578,6 +5587,15 @@
     }).format(new Date(time));
   }
 
+  function accountIndexProgressText(index, reading) {
+    const indexed = dealNumber(index?.indexed, 0);
+    const total = dealNumber(index?.total, 0);
+    if (reading && indexed < total) return `${indexed}/${total}（读取中）`;
+    if (index?.complete) return `${indexed}/${total}`;
+    const failed = Array.isArray(index?.failedIds) ? index.failedIds.length : 0;
+    return `${indexed}/${total}${failed ? `（${failed}项未取得）` : "（未完成）"}`;
+  }
+
   function renderAccountInformationPanel(panel) {
     if (!panel) return;
     const index = loadAccountIndex();
@@ -5589,7 +5607,7 @@
       ["立即购买", index.active.length],
       ["稍后再买", index.later.length],
       ["已购买", index.bought.length],
-      ["索引", `${index.indexed}/${index.total}${index.complete ? "" : "（不完整）"}`],
+      ["语言索引", accountIndexProgressText(index, reading)],
       ["上次读取", accountIndexTimeText(index.updatedAt)],
     ];
     let values;
@@ -5819,13 +5837,24 @@
     const host = node?.querySelector?.(".dltracker-browse-analysis-host");
     const layout = host?.querySelector?.(".dltracker-browse-analysis");
     if (!layout) return;
-    layout.querySelector(".dltracker-account-reminders")?.remove();
-    layout.classList.remove("is-account-purchased");
+    const renderToken = (accountReminderRenderTokens.get(layout) || 0) + 1;
+    accountReminderRenderTokens.set(layout, renderToken);
     const data = await accountReminderData(id);
-    if (!data || !layout.isConnected) return;
+    if (!layout.isConnected || accountReminderRenderTokens.get(layout) !== renderToken) return;
+    const existing = layout.querySelector(".dltracker-account-reminders");
+    if (!data) {
+      existing?.remove();
+      layout.classList.remove("is-account-purchased");
+      return;
+    }
+    const signature = JSON.stringify({ lines: data.lines, purchased: data.purchased });
+    if (existing?.dataset.reminderSignature === signature &&
+      layout.classList.contains("is-account-purchased") === Boolean(data.purchased)) {
+      return;
+    }
     const reminders = document.createElement("div");
     reminders.className = "dltracker-account-reminders";
-    if (data.purchased) layout.classList.add("is-account-purchased");
+    reminders.dataset.reminderSignature = signature;
     for (const line of data.lines) {
       const button = document.createElement("button");
       button.type = "button";
@@ -5838,7 +5867,9 @@
       });
       reminders.appendChild(button);
     }
-    layout.prepend(reminders);
+    layout.classList.toggle("is-account-purchased", Boolean(data.purchased));
+    if (existing) existing.replaceWith(reminders);
+    else layout.prepend(reminders);
   }
 
   async function refreshAllAccountReminders() {
@@ -11662,6 +11693,23 @@ a.dltracker-cart-deal-frame:focus-visible {
       node.closest?.(".dltracker-reach-overlay"));
   }
 
+  function mutationIsInsideTrackerUi(mutation) {
+    if (mutationIsInsideReachDialog(mutation)) return true;
+    const trackerSelector = "[class^='dltracker-'], [class*=' dltracker-']";
+    const target = mutation?.target;
+    const element = target instanceof Element
+      ? target
+      : target?.parentElement;
+    if (element?.matches?.(trackerSelector) || element?.closest?.(trackerSelector)) {
+      return true;
+    }
+    if (mutation?.type !== "childList") return false;
+    const changedNodes = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])]
+      .filter((node) => node.nodeType === Node.ELEMENT_NODE);
+    return changedNodes.length > 0 && changedNodes.every((node) =>
+      node.matches?.(trackerSelector) || node.closest?.(trackerSelector));
+  }
+
   function installSpaListeners() {
     const originalPushState = history.pushState.bind(history);
     const originalReplaceState = history.replaceState.bind(history);
@@ -11682,9 +11730,9 @@ a.dltracker-cart-deal-frame:focus-visible {
 
     let domDebounceTimer = null;
     const domObserver = new MutationObserver((mutations) => {
-      // 弹窗是脚本自己渲染的 UI，其内部变动不代表 DLsite 页面数据变了。
-      // 忽略这类变动，避免反复启动整页增强和弹窗重算。
-      if (mutations.length && mutations.every(mutationIsInsideReachDialog)) return;
+      // 助手自身的弹窗、卡片分析和账号提醒变动不代表 DLsite 页面数据变了。
+      // 忽略这些变动，避免反复启动整页增强与异步提醒重算。
+      if (mutations.length && mutations.every(mutationIsInsideTrackerUi)) return;
       if (domDebounceTimer) return;
       domDebounceTimer = setTimeout(() => {
         domDebounceTimer = null;
