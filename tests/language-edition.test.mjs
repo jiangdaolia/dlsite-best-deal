@@ -164,7 +164,12 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /a\.link_move_cart/);
   assert.match(source, /concreteCartProductId\(item\) === target/);
   assert.match(source, /确认从购物车永久移出【\$\{row\.language\}】版本吗/);
-  assert.match(source, /if \(isCartPage\(location\.href\)\) \{\s*location\.reload\(\)/);
-  assert.match(source, /\.dltracker-language-entry-cart \.dltracker-language-entry-button \{[\s\S]*?width: auto;[\s\S]*?min-height: 0;/);
+  assert.match(source, /saveLanguageDialogRestoreState\(openLanguageDialogState\);\s*location\.reload\(\)/);
+  assert.match(source, /await restoreLanguageDialogAfterReload\(\{ deferRender: true \}\);\s*await bootstrap\(\)/);
+  assert.match(source, /const initialRender = !state\.rows\.length \|\| !body\.firstElementChild;\s*if \(initialRender\) body\.textContent/);
+  assert.match(source, /button\.style\.inlineSize = `\$\{rect\.width\}px`;\s*button\.style\.blockSize = `\$\{rect\.height\}px`;/);
+  assert.match(source, /mobileText \? "is-mobile-text" : "is-desktop-button"/);
+  assert.match(source, /nativeHost\.insertBefore\(entry, nativeAction\)/);
+  assert.match(source, /\.dltracker-language-entry-cart\.is-mobile-text \.dltracker-language-entry-button,[\s\S]*?border: 0;[\s\S]*?background: transparent;/);
   assert.match(source, /读取购物车和已购清单（请勿频繁读取）/);
 });

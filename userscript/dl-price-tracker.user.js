@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.28
+// @version      0.6.29
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.28";
+  const APP_VERSION = "0.6.29";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -57,6 +57,7 @@
   const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v5";
   const ACCOUNT_INDEX_STORAGE_KEY = "dltracker-account-index-v1";
   const LANGUAGE_FAMILY_CACHE_STORAGE_KEY = "dltracker-language-family-cache-v1";
+  const LANGUAGE_DIALOG_RESTORE_STORAGE_KEY = "dltracker-language-dialog-restore-v1";
   const ACCOUNT_REFRESH_COOLDOWN_MS = 60 * 1000;
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 1000;
@@ -67,6 +68,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.29": [
+      "桌面购物车入口实时跟随原生操作按钮宽高，手机入口改为其左侧文字链接",
+      "语言比较弹窗异步刷新时保留现有内容，修复弹窗闪烁",
+      "购物车页加购刷新后自动恢复原语言比较弹窗",
+    ],
     "0.6.28": [
       "缩小购物车的语言版本比较入口，使其与 DLsite 原生操作按钮协调",
       "语言版本加入购物车后自动刷新购物车页，无需手动刷新",
@@ -6106,6 +6112,7 @@
         await postOfficialCartAdd(selectedId);
         mutateAccountCartId(selectedId, "active");
         if (isCartPage(location.href)) {
+          saveLanguageDialogRestoreState(openLanguageDialogState);
           location.reload();
           return;
         }
@@ -6220,7 +6227,9 @@
     const body = document.querySelector(".dltracker-language-dialog-body");
     if (!state || !body) return;
     const token = ++state.renderToken;
-    body.textContent = "正在读取语言版本与理论最低价…";
+    const initialRender = !state.rows.length || !body.firstElementChild;
+    if (initialRender) body.textContent = "正在读取语言版本与理论最低价…";
+    body.setAttribute("aria-busy", "true");
     const retryParents = Array.isArray(state.retryParents) && state.retryParents.length
       ? [...state.retryParents]
       : null;
@@ -6334,6 +6343,40 @@
     account.append(accountSummary, accountPanel);
     root.appendChild(account);
     body.replaceChildren(root);
+    body.removeAttribute("aria-busy");
+  }
+
+  function saveLanguageDialogRestoreState(state) {
+    if (!state?.sourceId) return;
+    try {
+      sessionStorage.setItem(LANGUAGE_DIALOG_RESTORE_STORAGE_KEY, JSON.stringify({
+        sourceId: String(state.sourceId).toUpperCase(),
+        selectedByParent: state.selectedByParent && typeof state.selectedByParent === "object"
+          ? state.selectedByParent
+          : {},
+        expiresAt: Date.now() + 2 * 60 * 1000,
+      }));
+    } catch {
+      // sessionStorage 不可用时仍允许正常刷新购物车页。
+    }
+  }
+
+  function takeLanguageDialogRestoreState() {
+    try {
+      const raw = sessionStorage.getItem(LANGUAGE_DIALOG_RESTORE_STORAGE_KEY);
+      sessionStorage.removeItem(LANGUAGE_DIALOG_RESTORE_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (!parsed || dealNumber(parsed.expiresAt) < Date.now() ||
+        !isValidProductCode(parsed.sourceId)) return null;
+      return {
+        sourceId: String(parsed.sourceId).toUpperCase(),
+        selectedByParent: parsed.selectedByParent && typeof parsed.selectedByParent === "object"
+          ? parsed.selectedByParent
+          : {},
+      };
+    } catch {
+      return null;
+    }
   }
 
   function closeLanguageDialog() {
@@ -6349,7 +6392,7 @@
     return renderLanguageComparisonDialog();
   }
 
-  async function openLanguageComparison(productId, trigger = null) {
+  async function openLanguageComparison(productId, trigger = null, options = {}) {
     const id = String(productId || "").toUpperCase();
     if (!isValidProductCode(id)) return;
     const originalText = trigger?.textContent;
@@ -6368,7 +6411,7 @@
       openLanguageDialogState = {
         sourceId: id,
         family,
-        selectedByParent: {},
+        selectedByParent: { ...(options.selectedByParent || {}) },
         rows: [],
         renderToken: 0,
       };
@@ -6401,7 +6444,11 @@
       document.body.appendChild(overlay);
       lockReachDialogScroll();
       dialog.focus({ preventScroll: true });
-      await renderLanguageComparisonDialog();
+      if (options.deferRender) {
+        body.textContent = "正在恢复语言版本优惠比较…";
+      } else {
+        await renderLanguageComparisonDialog();
+      }
     } catch (error) {
       showDealToast(error instanceof Error ? error.message : String(error), true, 7000);
     } finally {
@@ -6410,6 +6457,15 @@
         trigger.textContent = originalText || "比较语言版本";
       }
     }
+  }
+
+  async function restoreLanguageDialogAfterReload({ deferRender = false } = {}) {
+    const pending = takeLanguageDialogRestoreState();
+    if (!pending || !isCartPage(location.href)) return;
+    await openLanguageComparison(pending.sourceId, null, {
+      selectedByParent: pending.selectedByParent,
+      deferRender,
+    });
   }
 
   function createLanguageComparisonEntry(productId) {
@@ -6432,6 +6488,42 @@
     return button;
   }
 
+  function syncLanguageEntryButtonSize(entry, nativeAction) {
+    const button = entry?.querySelector(".dltracker-language-entry-button");
+    if (!button || !nativeAction) return;
+    const apply = () => {
+      if (!button.isConnected || !nativeAction.isConnected) return false;
+      const rect = nativeAction.getBoundingClientRect();
+      if (!(rect.width > 0 && rect.height > 0)) return true;
+      button.style.inlineSize = `${rect.width}px`;
+      button.style.blockSize = `${rect.height}px`;
+      button.style.minInlineSize = `${rect.width}px`;
+      button.style.maxInlineSize = `${rect.width}px`;
+      button.style.minBlockSize = `${rect.height}px`;
+      button.style.maxBlockSize = `${rect.height}px`;
+      return true;
+    };
+    requestAnimationFrame(apply);
+    if (typeof ResizeObserver === "function") {
+      const observer = new ResizeObserver(() => {
+        if (!apply()) observer.disconnect();
+      });
+      observer.observe(nativeAction);
+    }
+  }
+
+  function syncMobileLanguageEntryText(entry, nativeAction) {
+    const button = entry?.querySelector(".dltracker-language-entry-button");
+    if (!button || !nativeAction) return;
+    const style = getComputedStyle(nativeAction);
+    button.style.color = style.color;
+    button.style.fontFamily = style.fontFamily;
+    button.style.fontSize = style.fontSize;
+    button.style.fontWeight = style.fontWeight;
+    button.style.lineHeight = style.lineHeight;
+    button.style.textDecoration = style.textDecoration;
+  }
+
   function injectCartLanguageEntries() {
     for (const item of getCartItems()) {
       if (!isRenderableCartItem(item)) continue;
@@ -6439,13 +6531,27 @@
       if (!id) continue;
       const owner = item.closest("li.cart_list_item, li.n_work_list_item") || item;
       if (owner.querySelector(":scope .dltracker-language-entry")) continue;
-      const nativeAction = owner.querySelector("a.link_move_later, a.link_move_cart");
+      const nativeAction = owner.querySelector(
+        "a.link_move_later, button.link_move_later, a.link_move_cart, button.link_move_cart",
+      );
       const nativeHost = nativeAction?.parentElement;
-      const entry = document.createElement("div");
-      entry.className = "dltracker-language-entry dltracker-language-entry-cart";
+      const mobileText = isTouchPath(location.href) || shouldStackBrowseAnalysis();
+      const entry = document.createElement(mobileText ? "span" : "div");
+      entry.className = `dltracker-language-entry dltracker-language-entry-cart ${
+        mobileText ? "is-mobile-text" : "is-desktop-button"
+      }`;
       entry.appendChild(createLanguageComparisonEntry(id));
-      if (nativeHost?.parentElement) nativeHost.parentElement.insertBefore(entry, nativeHost);
-      else owner.querySelector(".dltracker-cart-host")?.insertAdjacentElement("beforebegin", entry);
+      if (mobileText && nativeHost && nativeAction) {
+        nativeHost.insertBefore(entry, nativeAction);
+      } else if (nativeHost?.parentElement) {
+        nativeHost.parentElement.insertBefore(entry, nativeHost);
+      } else {
+        owner.querySelector(".dltracker-cart-host")?.insertAdjacentElement("beforebegin", entry);
+      }
+      if (nativeAction) {
+        if (mobileText) syncMobileLanguageEntryText(entry, nativeAction);
+        else syncLanguageEntryButtonSize(entry, nativeAction);
+      }
     }
   }
 
@@ -9941,12 +10047,37 @@ dl > .dltracker-browse-analysis-host {
   justify-content: flex-start;
 }
 
-.dltracker-language-entry-cart .dltracker-language-entry-button {
+.dltracker-language-entry-cart.is-desktop-button .dltracker-language-entry-button {
   width: auto;
   min-height: 0;
   padding: 2px 7px;
+  box-sizing: border-box;
   font-size: 10px;
   line-height: 1.25;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.dltracker-language-entry-cart.is-mobile-text {
+  display: inline-flex;
+  width: auto;
+  margin: 0 8px 0 0;
+  padding: 0;
+  vertical-align: baseline;
+}
+
+.dltracker-language-entry-cart.is-mobile-text .dltracker-language-entry-button,
+.dltracker-language-entry-cart.is-mobile-text .dltracker-language-entry-button:hover {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  appearance: none;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
 .dltracker-language-entry-detail {
@@ -11468,7 +11599,13 @@ a.dltracker-cart-deal-frame:focus-visible {
     const element = target instanceof Element
       ? target
       : target?.parentElement;
-    return Boolean(element?.closest?.(".dltracker-reach-overlay"));
+    if (element?.closest?.(".dltracker-reach-overlay")) return true;
+    if (mutation?.type !== "childList") return false;
+    const changedNodes = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])]
+      .filter((node) => node.nodeType === Node.ELEMENT_NODE);
+    return changedNodes.length > 0 && changedNodes.every((node) =>
+      node.matches?.(".dltracker-reach-overlay") ||
+      node.closest?.(".dltracker-reach-overlay"));
   }
 
   function installSpaListeners() {
@@ -11554,6 +11691,7 @@ a.dltracker-cart-deal-frame:focus-visible {
       injectStyle();
       showUpdateNoticeIfNeeded();
       await cleanExpiredCache();
+      await restoreLanguageDialogAfterReload({ deferRender: true });
       await bootstrap();
       installDealEventListeners();
       installSpaListeners();
