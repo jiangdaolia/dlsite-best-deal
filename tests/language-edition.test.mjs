@@ -161,7 +161,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 40/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 \* 1000/);
-  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 3/);
+  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 4/);
   assert.match(source, /fetchSameOriginText\(url, "作品信息接口", \{\s*anonymous: true/);
   assert.match(source, /credentials: anonymous \? "omit" : "include"/);
   assert.match(source, /anonymous \? \{ referrerPolicy: "no-referrer" \} : \{\}/);
@@ -178,7 +178,8 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /ids\.length && next\.indexed === 0[\s\S]*?语言索引未取得任何作品信息/);
   assert.match(source, /requestStrategyChanged = dealNumber\(index\.requestVersion\)[\s\S]*?\(!index\.pausedReason \|\| requestStrategyChanged\)[\s\S]*?return refreshAccountIndex\(\)/);
   assert.match(source, /语言索引已暂停：[\s\S]*?剩余\$\{remaining\}项/);
-  assert.match(source, /已暂停\$\{reason \? `：\$\{reason\}` : ""\}；剩余\$\{remaining\}项/);
+  assert.match(source, /已暂停：\$\{reason\}；剩余\$\{remaining\}项/);
+  assert.match(source, /未完成；剩余\$\{remaining\}项/);
   assert.match(source, /pausedReason: accountIndexSessionStopped \? accountIndexSessionStopReason : ""/);
   assert.match(source, /读取暂停：\$\{index\.pausedReason\}/);
   assert.match(source, /else if \(!accountIndexSessionStopped\) \{[\s\S]*?failedIds\.push\(id\)/);
@@ -187,6 +188,11 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /account index requests stopped/);
   assert.doesNotMatch(functionSource("fetchSameOriginJson"), /dealSessionStopped/);
   assert.doesNotMatch(functionSource("refreshAccountIndex"), /dealSessionStopped/);
+  assert.match(
+    functionSource("refreshAccountIndex"),
+    /pausedReason: accountIndexSessionStopReason \|\| accountIndexRuntimeError/,
+  );
+  assert.match(source, /`\$\{label\}请求失败：\$\{error instanceof Error/);
   assert.match(source, /\["状态", index\.loaded \? "正在重新读取…" : "正在读取购物车和已购清单…"\]/);
   assert.match(source, /`读取失败：\$\{accountIndexRuntimeError\}`/);
   assert.match(source, /if \(reading && indexed < total\) return `\$\{indexed\}\/\$\{total\}（读取中）`/);

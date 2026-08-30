@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.39
+// @version      0.6.40
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.39";
+  const APP_VERSION = "0.6.40";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -65,7 +65,7 @@
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_SIZE = 40;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
-  const ACCOUNT_INDEX_REQUEST_VERSION = 3;
+  const ACCOUNT_INDEX_REQUEST_VERSION = 4;
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
@@ -73,6 +73,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.40": [
+      "账号索引的任何网络、HTTP或解析失败都持久显示具体步骤和原因",
+      "没有失败原因的中断状态改为未完成，不再误标已暂停",
+    ],
     "0.6.39": [
       "账号索引使用独立请求会话，不再被优惠券或当页分析的停止状态误伤",
       "语言索引暂停进度直接显示具体接口、HTTP状态或验证页原因",
@@ -2108,11 +2112,18 @@
     if (requestSessionStopped(requestSession)) {
       throw new Error(`${label}请求已因风控信号停止`);
     }
-    const response = await fetch(url, {
-      credentials: anonymous ? "omit" : "include",
-      ...(anonymous ? { referrerPolicy: "no-referrer" } : {}),
-      headers: { Accept: "application/json, text/html;q=0.9" },
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        credentials: anonymous ? "omit" : "include",
+        ...(anonymous ? { referrerPolicy: "no-referrer" } : {}),
+        headers: { Accept: "application/json, text/html;q=0.9" },
+      });
+    } catch (error) {
+      const reason = `${label}请求失败：${error instanceof Error ? error.message : String(error)}`;
+      if (requestSession === "account") stopRequestSession("account", reason);
+      throw new Error(reason);
+    }
     const text = await response.text();
     if (response.status === 403 || response.status === 429) {
       stopRequestSession(requestSession, `${label} HTTP ${response.status}`);
@@ -2282,6 +2293,8 @@
       } catch {
         if (/^\s*</.test(text)) {
           stopRequestSession(requestSession, "作品信息接口返回网页");
+        } else if (requestSession === "account") {
+          stopRequestSession("account", "作品信息接口没有返回JSON");
         }
         throw new Error("作品信息接口没有返回 JSON");
       }
@@ -2499,15 +2512,22 @@
     if (accountIndexSessionStopped) {
       throw new Error("账号索引请求已因风控信号停止");
     }
-    const response = await fetch(url, {
-      credentials: "include",
-      headers: {
-        Accept: "application/json",
-        "X-Requested-With": "XMLHttpRequest",
-        ...(options.headers || {}),
-      },
-      ...options,
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        credentials: "include",
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+          ...(options.headers || {}),
+        },
+        ...options,
+      });
+    } catch (error) {
+      const reason = `${label}请求失败：${error instanceof Error ? error.message : String(error)}`;
+      stopRequestSession("account", reason);
+      throw new Error(reason);
+    }
     const text = await response.text();
     if (response.status === 403 || response.status === 429) {
       stopRequestSession("account", `${label} HTTP ${response.status}`);
@@ -2675,15 +2695,13 @@
       return next;
     })().catch((error) => {
       accountIndexRuntimeError = error instanceof Error ? error.message : String(error);
-      if (accountIndexSessionStopped) {
-        const current = loadAccountIndex();
-        saveAccountIndex({
-          ...current,
-          pausedReason: accountIndexSessionStopReason || accountIndexRuntimeError,
-          requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
-          updatedAt: Date.now(),
-        });
-      }
+      const current = loadAccountIndex();
+      saveAccountIndex({
+        ...current,
+        pausedReason: accountIndexSessionStopReason || accountIndexRuntimeError,
+        requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
+        updatedAt: Date.now(),
+      });
       throw error;
     }).finally(() => {
       accountIndexRefreshInFlight = null;
@@ -5864,7 +5882,9 @@
     const remaining = Math.max(0, total - processed);
     const reason = dealPlainText(index?.pausedReason);
     return `${indexed}/${total}${remaining
-      ? `（已暂停${reason ? `：${reason}` : ""}；剩余${remaining}项）`
+      ? reason
+        ? `（已暂停：${reason}；剩余${remaining}项）`
+        : `（未完成；剩余${remaining}项）`
       : "（未完成）"}`;
   }
 
