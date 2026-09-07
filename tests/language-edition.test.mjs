@@ -44,6 +44,7 @@ vm.runInNewContext(
   `${matched[1]}
   ${functionSource("sortLanguageComparisonRows")}
   ${functionSource("languageWinnerRows")}
+  ${functionSource("translationChildrenFromMetadata")}
   globalThis.languageEditionCore = {
     normalizedLanguageCode,
     languageDisplayName,
@@ -60,6 +61,7 @@ vm.runInNewContext(
     languageEditionsFromDocument,
     sortLanguageComparisonRows,
     languageWinnerRows,
+    translationChildrenFromMetadata,
   };`,
   sandbox,
 );
@@ -79,6 +81,7 @@ const {
   languageEditionsFromDocument,
   sortLanguageComparisonRows,
   languageWinnerRows,
+  translationChildrenFromMetadata,
 } = sandbox.languageEditionCore;
 
 test("翻译子 SKU 归并到语言母作品与日文原作家族", () => {
@@ -295,6 +298,36 @@ test("当前语言固定第一行，最优惠按理论日元价允许并列", ()
   assert.deepEqual(
     JSON.parse(JSON.stringify(languageWinnerRows(rows).map((row) => row.parentId))),
     ["RJ00000001", "RJ00000003"],
+  );
+});
+
+test("RJ01684785这类残留失效译者SKU时保留已取得的在售译者", () => {
+  const available = {
+    id: "RJ01684786",
+    onSale: true,
+  };
+  const result = translationChildrenFromMetadata(
+    ["RJ01684786", "RJ01684788", "RJ01684790"],
+    new Map([["RJ01684786", available]]),
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(result)),
+    {
+      children: [available],
+      missingChildIds: ["RJ01684788", "RJ01684790"],
+    },
+  );
+  assert.match(
+    functionSource("buildLanguageComparisonRows"),
+    /if \(editionChildIds\.length && !children\.length\)/,
+  );
+  assert.doesNotMatch(
+    functionSource("buildLanguageComparisonRows"),
+    /editionChildIds\.some\(\(id\) => !childMetadata\.has\(id\)\)/,
+  );
+  assert.match(
+    functionSource("languageRowStatusText"),
+    /missingChildIds\.length\}\u4e2a译者信息未取得/,
   );
 });
 

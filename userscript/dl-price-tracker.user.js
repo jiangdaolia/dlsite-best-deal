@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.55
+// @version      0.6.56
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.55";
+  const APP_VERSION = "0.6.56";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -79,6 +79,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.56": [
+      "语言比较会忽略DLsite残留的失效译者SKU，仍有在售译者时继续报价",
+      "部分译者信息未取得时在备注提示，不再让整个语言版本读取失败",
+    ],
     "0.6.55": [
       "优惠筛选改为按钮弹窗，平台活动和优惠券可以各选一种",
       "活动与券按交集筛选，两项都不选时显示全部作品",
@@ -7015,6 +7019,19 @@
     return ids.find((id) => set.has(String(id).toUpperCase())) || "";
   }
 
+  function translationChildrenFromMetadata(childIds, childMetadata) {
+    const expectedIds = [...new Set((childIds || [])
+      .map((id) => String(id).toUpperCase())
+      .filter(isValidProductCode))];
+    const children = expectedIds
+      .map((id) => childMetadata.get(id))
+      .filter(Boolean);
+    return {
+      children,
+      missingChildIds: expectedIds.filter((id) => !childMetadata.has(id)),
+    };
+  }
+
   async function buildLanguageComparisonRows(state, onlyParents = null) {
     const sourceMetadata = await ensureProductMetadataBatches([state.sourceId]);
     const sourceProduct = sourceMetadata.get(state.sourceId) || { id: state.sourceId };
@@ -7043,20 +7060,24 @@
         const editionChildIds = dealTokens(info.child_worknos)
           .map((id) => String(id).toUpperCase())
           .filter(isValidProductCode);
-        if (editionChildIds.some((id) => !childMetadata.has(id))) {
+        const { children, missingChildIds } = translationChildrenFromMetadata(
+          editionChildIds,
+          childMetadata,
+        );
+        if (editionChildIds.length && !children.length) {
           throw new Error("译者信息读取失败");
         }
-        const children = editionChildIds.map((id) => childMetadata.get(id));
         const purchasableChildren = children.filter((child) => child.onSale);
         const purchasableIds = purchasableChildren.length
           ? purchasableChildren.map((child) => child.id)
           : product.onSale ? [edition.parentId] : [];
-        const allIds = [...new Set([edition.parentId, ...children.map((child) => child.id)])];
+        const allIds = [...new Set([edition.parentId, ...editionChildIds])];
         const statusId = firstMatchingId(allIds, cartSets.active) ||
           firstMatchingId(allIds, cartSets.later) ||
           firstMatchingId(allIds, cartSets.bought);
-        const chosen = state.selectedByParent[edition.parentId] ||
-          (allIds.includes(querySelection) ? querySelection : "") ||
+        const rememberedSelection = state.selectedByParent[edition.parentId] || "";
+        const chosen = (purchasableIds.includes(rememberedSelection) ? rememberedSelection : "") ||
+          (purchasableIds.includes(querySelection) ? querySelection : "") ||
           (purchasableIds.includes(statusId) ? statusId : "") ||
           (purchasableIds.length === 1 ? purchasableIds[0] : "");
         if (chosen) state.selectedByParent[edition.parentId] = chosen;
@@ -7082,6 +7103,7 @@
           ...edition,
           product,
           children,
+          missingChildIds,
           purchasableIds,
           allIds,
           selectedId: chosen,
@@ -7158,6 +7180,9 @@
     else if (row.laterId) states.push("已在稍后再买");
     else if (row.stopped) states.push("停售");
     else states.push("可购买");
+    if (row.missingChildIds?.length) {
+      states.push(`${row.missingChildIds.length}个译者信息未取得`);
+    }
     if (row.children?.length > 1) {
       const selected = row.selectedProduct;
       states.push(`当前选择：${selected
