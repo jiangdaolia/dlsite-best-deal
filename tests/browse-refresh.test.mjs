@@ -263,6 +263,21 @@ test("浏览卡并行补全史低且账号提醒复用整页缓存快照", () =>
   assert.match(dataSource, /productNeedsLanguageFamilyLookup[\s\S]*?!context\?\.cacheOnly/);
 });
 
+test("购物车本地优惠先于史低任务完成渲染", () => {
+  const bootstrapSource = functionSource("bootstrap");
+  assert.match(bootstrapSource, /let cartHistoryTask = null/);
+  assert.match(bootstrapSource, /cartHistoryTask = enhanceCartItems\(\)/);
+  assert.ok(
+    bootstrapSource.indexOf("cartHistoryTask = enhanceCartItems()") <
+      bootstrapSource.indexOf("await enhanceDealInsights()"),
+  );
+  assert.ok(
+    bootstrapSource.indexOf("await enhanceDealInsights()") <
+      bootstrapSource.indexOf("if (cartHistoryTask) await cartHistoryTask"),
+  );
+  assert.doesNotMatch(bootstrapSource, /await enhanceCartItems\(\)/);
+});
+
 test("无优惠作品也会留下已处理标记供观察器识别", () => {
   assert.match(functionSource("enhanceGenericBrowseCards"), /markDealProcessed\(node, id\)/);
   assert.match(functionSource("installSpaListeners"), /needsDealProcessing\(node, id\)/);

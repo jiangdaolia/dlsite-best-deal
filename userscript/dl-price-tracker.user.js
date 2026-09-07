@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.58
+// @version      0.6.59
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.58";
+  const APP_VERSION = "0.6.59";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -79,6 +79,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.59": [
+      "购物车刷新时先显示平台价格、优惠券和活动，史低与趋势随后原位补齐",
+      "DLwatcher请求不再阻塞购物车本地优惠信息的首次渲染",
+    ],
     "0.6.58": [
       "购物车作品不再重复提示已在购物车或已在稍后再买",
       "删除或移动作品后立即清理失效的优惠分析和语言比较入口",
@@ -11017,6 +11021,7 @@
       }
       await enhanceWishlistCards();
     }
+    let cartHistoryTask = null;
     if (isCartPage(url)) {
       document.querySelector(".dltracker-cart-diagnostic")?.remove();
       if (ENABLE_CART_DIAGNOSTIC_PANEL) injectCartDiagnosticPanel();
@@ -11025,9 +11030,12 @@
           cartSnapshotFromRoot(document),
         );
       }
-      await enhanceCartItems();
+      // 史低依赖 DLwatcher，可能明显慢于 DLsite 本地优惠数据。两条链并行启动，
+      // 让 enhanceDealInsights 先把平台价格、优惠券和活动渲染出来；史低随后原位补齐。
+      cartHistoryTask = enhanceCartItems();
     }
     await enhanceDealInsights();
+    if (cartHistoryTask) await cartHistoryTask;
   }
 
   function injectStyle() {

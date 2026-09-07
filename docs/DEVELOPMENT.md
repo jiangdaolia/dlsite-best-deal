@@ -25,6 +25,7 @@ tests/
 docs/
   FEATURES.md                    # 当前功能和产品规则
   DEVELOPMENT.md                 # 本文
+  PERFORMANCE.md                 # 刷新性能问题与分阶段优化路线
 ```
 
 本地的 `AGENTS.md`、`PROJECT_MEMORY.md` 和 `notes/` 被 `.gitignore` 排除，只用于开发交接，不应发布。

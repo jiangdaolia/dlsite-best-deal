@@ -64,6 +64,7 @@
 
 - [完整功能与规则](docs/FEATURES.md)
 - [开发、测试与发布](docs/DEVELOPMENT.md)
+- [刷新性能优化路线](docs/PERFORMANCE.md)
 - 本地交接和历史访谈位于被 `.gitignore` 排除的 `PROJECT_MEMORY.md` 与 `notes/`，不会发布到仓库。
 
 ## 快速验证
