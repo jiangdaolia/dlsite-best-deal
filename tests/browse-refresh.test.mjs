@@ -215,6 +215,32 @@ test("账号提醒同时覆盖购物车卡片并复用当页语言元数据", ()
   assert.match(source, /\.dltracker-cart-layout\.is-account-purchased \{\s*filter: grayscale\(0\.38\);/);
 });
 
+test("购物车卡片不重复提示已在购物车或稍后再买", () => {
+  const dataSource = functionSource("accountReminderData");
+  const reminderSource = functionSource("renderAccountReminderForCard");
+  assert.match(
+    dataSource,
+    /\{ evaluateCartVisibility = false, includeCartStatus = true, context = null \}/,
+  );
+  assert.match(dataSource, /if \(includeCartStatus\) \{/);
+  assert.match(reminderSource, /includeCartStatus: isBrowseLayout/);
+});
+
+test("购物车作品删除或移区后清理失效助手界面", () => {
+  const cleanupSource = functionSource("removeStaleCartEnhancements");
+  assert.match(cleanupSource, /\.dltracker-cart-host/);
+  assert.match(cleanupSource, /\.dltracker-language-entry-cart/);
+  assert.match(cleanupSource, /!owner \|\| !isRenderableCartItem\(owner\)/);
+  assert.match(
+    functionSource("enhanceCartItems"),
+    /removeStaleCartEnhancements\(\);\s*injectBuyLaterSortToggle\(\);/,
+  );
+  assert.match(
+    functionSource("maybeBootstrapForCartMutation"),
+    /if \(!isCartPage\(currentUrl\)\) return false;\s*removeStaleCartEnhancements\(\);/,
+  );
+});
+
 test("浏览卡并行补全史低且账号提醒复用整页缓存快照", () => {
   const enhanceSource = functionSource("enhanceGenericBrowseCards");
   const preloadSource = functionSource("preloadBrowseBulkRules");

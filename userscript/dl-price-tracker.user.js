@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.57
+// @version      0.6.58
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.57";
+  const APP_VERSION = "0.6.58";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -79,6 +79,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.58": [
+      "购物车作品不再重复提示已在购物车或已在稍后再买",
+      "删除或移动作品后立即清理失效的优惠分析和语言比较入口",
+    ],
     "0.6.57": [
       "DLsite已购买作品页完全保留原站界面，不再追加优惠分析或操作",
       "从其他页面进入已购买页时会清理助手残留界面，不处理购买记录列表",
@@ -1369,6 +1373,23 @@
       !!ownerItem.querySelector(".__buy_now_target, .__buy_later_target");
     if (!hasCartTarget) return false;
     return true;
+  }
+
+  function removeStaleCartEnhancements() {
+    const selectors = [
+      ".dltracker-cart-host",
+      ".dltracker-language-entry-cart",
+    ].join(",");
+    const ownerSelector = [
+      "li.cart_list_item",
+      "li.n_work_list_item",
+      ".__buy_now_target",
+      ".__buy_later_target",
+    ].join(",");
+    for (const node of document.querySelectorAll(selectors)) {
+      const owner = node.closest(ownerSelector);
+      if (!owner || !isRenderableCartItem(owner)) node.remove();
+    }
   }
 
   function getPlannerState() {
@@ -6793,7 +6814,7 @@
 
   async function accountReminderData(
     productId,
-    { evaluateCartVisibility = false, context = null } = {},
+    { evaluateCartVisibility = false, includeCartStatus = true, context = null } = {},
   ) {
     const id = String(productId || "").toUpperCase();
     const index = context?.index || loadAccountIndex();
@@ -6886,35 +6907,37 @@
         purchased = true;
       }
     }
-    if (activeGroups.has(identity.lang)) {
-      lines.push("已在购物车");
-    } else if (laterGroups.has(identity.lang)) {
-      lines.push("已在稍后再买");
-    } else {
-      const otherCartEntries = [];
-      for (const [lang, values] of activeGroups) {
-        if (lang !== identity.lang) otherCartEntries.push({ lang, entry: values[0], area: "购物车" });
-      }
-      for (const [lang, values] of laterGroups) {
-        if (lang !== identity.lang && !otherCartEntries.some((item) => item.lang === lang)) {
-          otherCartEntries.push({ lang, entry: values[0], area: "稍后再买" });
+    if (includeCartStatus) {
+      if (activeGroups.has(identity.lang)) {
+        lines.push("已在购物车");
+      } else if (laterGroups.has(identity.lang)) {
+        lines.push("已在稍后再买");
+      } else {
+        const otherCartEntries = [];
+        for (const [lang, values] of activeGroups) {
+          if (lang !== identity.lang) otherCartEntries.push({ lang, entry: values[0], area: "购物车" });
         }
-      }
-      if (otherCartEntries.length) {
-        const visiblePrice = await getCurrentPrice();
-        const parts = [];
-        for (const item of otherCartEntries.slice(0, 2)) {
-          const otherPrice = await getCartPrice(item.entry);
-          let compare = "";
-          if (visiblePrice && otherPrice) {
-            if (otherPrice.price < visiblePrice.price) compare = "，比当前便宜";
-            else if (otherPrice.price > visiblePrice.price) compare = "，当前更便宜";
-            else compare = "，与当前同价";
+        for (const [lang, values] of laterGroups) {
+          if (lang !== identity.lang && !otherCartEntries.some((item) => item.lang === lang)) {
+            otherCartEntries.push({ lang, entry: values[0], area: "稍后再买" });
           }
-          parts.push(`${languageDisplayName(item.lang)}版在${item.area}${compare}`);
         }
-        if (otherCartEntries.length > 2) parts.push(`+${otherCartEntries.length - 2}个版本`);
-        lines.push(parts.join("｜"));
+        if (otherCartEntries.length) {
+          const visiblePrice = await getCurrentPrice();
+          const parts = [];
+          for (const item of otherCartEntries.slice(0, 2)) {
+            const otherPrice = await getCartPrice(item.entry);
+            let compare = "";
+            if (visiblePrice && otherPrice) {
+              if (otherPrice.price < visiblePrice.price) compare = "，比当前便宜";
+              else if (otherPrice.price > visiblePrice.price) compare = "，当前更便宜";
+              else compare = "，与当前同价";
+            }
+            parts.push(`${languageDisplayName(item.lang)}版在${item.area}${compare}`);
+          }
+          if (otherCartEntries.length > 2) parts.push(`+${otherCartEntries.length - 2}个版本`);
+          lines.push(parts.join("｜"));
+        }
       }
     }
     return lines.length
@@ -6936,6 +6959,7 @@
     accountReminderRenderTokens.set(layout, renderToken);
     const data = await accountReminderData(id, {
       evaluateCartVisibility: isBrowseLayout,
+      includeCartStatus: isBrowseLayout,
       context,
     });
     if (!layout.isConnected || accountReminderRenderTokens.get(layout) !== renderToken) return;
@@ -10743,6 +10767,7 @@
 
   async function enhanceCartItems() {
     document.querySelector(".dltracker-deal-planner")?.remove();
+    removeStaleCartEnhancements();
     injectBuyLaterSortToggle();
 
     const items = getCartItems();
@@ -10828,6 +10853,7 @@
 
   function maybeBootstrapForCartMutation(currentUrl) {
     if (!isCartPage(currentUrl)) return false;
+    removeStaleCartEnhancements();
     const cartSnapshot = cartSnapshotFromRoot(document);
     const nextFingerprint = cartSnapshotFingerprint(cartSnapshot);
     const hadFingerprint = Boolean(lastCartSnapshotFingerprint);
