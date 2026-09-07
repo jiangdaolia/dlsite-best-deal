@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.56
+// @version      0.6.57
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.56";
+  const APP_VERSION = "0.6.57";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -79,6 +79,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.57": [
+      "DLsite已购买作品页完全保留原站界面，不再追加优惠分析或操作",
+      "从其他页面进入已购买页时会清理助手残留界面，不处理购买记录列表",
+    ],
     "0.6.56": [
       "语言比较会忽略DLsite残留的失效译者SKU，仍有在售译者时继续报价",
       "部分译者信息未取得时在备注提示，不再让整个语言版本读取失败",
@@ -937,6 +941,10 @@
 
   function isCouponPage(url) {
     return /\/mypage\/coupon(?:\/|[?#]|$)/i.test(url);
+  }
+
+  function isPurchasedWorksPage(url) {
+    return /\/mypage\/userbuy(?:\/|[?#]|$)/i.test(String(url || ""));
   }
 
   function isTouchPath(url) {
@@ -4076,7 +4084,8 @@
   }
 
   function collectBrowseCards() {
-    if (/\/mypage\/(?:order|purchase|library|download)/i.test(location.pathname)) return [];
+    if (isPurchasedWorksPage(location.href) ||
+      /\/mypage\/(?:order|purchase|library|download)/i.test(location.pathname)) return [];
     // 手机版作品页会在主列表前插入一组热门排行。有明确的
     // “作品一览”容器时只采集该容器，避免把控件挂到排行区。
     const primaryList = isCartPage(location.href) || isProductPage(location.href)
@@ -10911,8 +10920,50 @@
     });
   }
 
+  function clearTrackerPresentation() {
+    closeLanguageDialog();
+    closeAccountInformationDialog();
+    closeReachDialog();
+    document.getElementById(STYLE_ID)?.remove();
+    document.querySelectorAll([
+      `.${UI_CLASSNAME}`,
+      ".dltracker-browse-controls",
+      ".dltracker-deal-planner",
+      ".dltracker-cart-diagnostic",
+      ".dltracker-deal-toast",
+      ".dltracker-mobile-product-host",
+      ".dltracker-wishlist-host",
+      ".dltracker-cart-host",
+      ".dltracker-language-entry-cart",
+      ".dltracker-account-reminders",
+      ".dltracker-reach-overlay",
+    ].join(",")).forEach((node) => node.remove());
+    for (const node of document.querySelectorAll([
+      `[${DEAL_PROCESSED_ATTRIBUTE}]`,
+      ".dltracker-browse-filtered-out",
+      ".dltracker-browse-purchased-card",
+      ".dltracker-browse-carted-card",
+      ".dltracker-buy-later-filtered-out",
+    ].join(","))) {
+      if (node.classList.contains("dltracker-browse-filtered-out") ||
+        node.classList.contains("dltracker-buy-later-filtered-out")) node.hidden = false;
+      node.removeAttribute(DEAL_PROCESSED_ATTRIBUTE);
+      node.classList.remove(
+        "dltracker-browse-filtered-out",
+        "dltracker-browse-purchased-card",
+        "dltracker-browse-carted-card",
+        "dltracker-buy-later-filtered-out",
+      );
+    }
+  }
+
   async function bootstrap() {
     const url = location.href;
+    if (isPurchasedWorksPage(url)) {
+      clearTrackerPresentation();
+      return;
+    }
+    injectStyle();
     document.querySelector(".dltracker-deal-planner")?.remove();
     if (isProductPage(url) || isCartPage(url)) {
       document.querySelector(".dltracker-browse-controls")?.remove();
@@ -12954,6 +13005,10 @@ a.dltracker-cart-deal-frame:focus-visible {
     const currentUrl = location.href;
     lastUrl = currentUrl;
     resetBrowseOriginalOrder();
+    if (isPurchasedWorksPage(currentUrl)) {
+      clearTrackerPresentation();
+      return;
+    }
     waitForElement(currentUrl)
       .then(async () => {
         await bootstrap();
@@ -13044,6 +13099,7 @@ a.dltracker-cart-deal-frame:focus-visible {
       domDebounceTimer = setTimeout(() => {
         domDebounceTimer = null;
         const currentUrl = location.href;
+        if (isPurchasedWorksPage(currentUrl)) return;
         maybeConfirmPendingCartAdd();
 
         if (browseNativeSortPending) {
@@ -13097,6 +13153,7 @@ a.dltracker-cart-deal-frame:focus-visible {
 
   async function start() {
     try {
+      if (isPurchasedWorksPage(location.href)) return;
       injectStyle();
       showUpdateNoticeIfNeeded();
       await cleanExpiredCache();

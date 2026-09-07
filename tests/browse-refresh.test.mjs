@@ -288,6 +288,49 @@ test("指定条件搜索跳过加载骨架并采集横向表格作品", () => {
   assert.match(functionSource("findBrowseTagAnchor"), /\.search_tag/);
 });
 
+test("DLsite已购买作品页不追加任何助手界面或操作", () => {
+  const sandbox = {};
+  vm.runInNewContext(
+    `${functionSource("isPurchasedWorksPage")}
+    globalThis.isPurchasedWorksPage = isPurchasedWorksPage;`,
+    sandbox,
+  );
+  assert.equal(
+    sandbox.isPurchasedWorksPage(
+      "https://www.dlsite.com/girls/mypage/userbuy/=/type/all/page/1",
+    ),
+    true,
+  );
+  assert.equal(
+    sandbox.isPurchasedWorksPage("https://www.dlsite.com/girls/mypage/coupon/list"),
+    false,
+  );
+  const startSource = source.match(
+    /  async function start\(\) \{[\s\S]*?\n  \}\n\n  void start\(\);/,
+  )?.[0];
+  assert.ok(startSource, "start function not found");
+  assert.ok(
+    startSource.indexOf("if (isPurchasedWorksPage(location.href)) return") <
+      startSource.indexOf("injectStyle()"),
+  );
+  assert.match(
+    functionSource("bootstrap"),
+    /if \(isPurchasedWorksPage\(url\)\) \{\s*clearTrackerPresentation\(\);\s*return;\s*\}\s*injectStyle\(\);/,
+  );
+  assert.match(
+    functionSource("collectBrowseCards"),
+    /if \(isPurchasedWorksPage\(location\.href\)/,
+  );
+  assert.match(
+    functionSource("restoreBrowseStateOnPageShow"),
+    /if \(isPurchasedWorksPage\(currentUrl\)\) \{\s*clearTrackerPresentation\(\);\s*return;/,
+  );
+  assert.match(
+    functionSource("installSpaListeners"),
+    /const currentUrl = location\.href;\s*if \(isPurchasedWorksPage\(currentUrl\)\) return;/,
+  );
+});
+
 test("购物车不用普通浏览页的主列表限域", () => {
   const collectSource = functionSource("collectBrowseCards");
   assert.match(
