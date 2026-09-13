@@ -49,6 +49,8 @@ vm.runInNewContext(
     compactCouponExpiry,
     compactCouponUsage,
     compactCouponListLabel,
+    compactCouponCategory,
+    compactCouponFilterLabel,
     bestReachColorClass,
     campaignEndFromHtml,
     bulkRuleIsActive,
@@ -78,6 +80,8 @@ const {
   compactCouponExpiry,
   compactCouponUsage,
   compactCouponListLabel,
+  compactCouponCategory,
+  compactCouponFilterLabel,
   bestReachColorClass,
   campaignEndFromHtml,
   bulkRuleIsActive,
@@ -459,4 +463,30 @@ test("同类单次券显示张数和最早到期", () => {
   assert.equal(compactCouponCondition(option, true), "满1,200日元（还差400日元）");
   assert.equal(compactCouponUsage(option), "15张，每张1次");
   assert.match(compactCouponExpiry(option), /^最早/);
+});
+
+test("筛选优惠券显示适用类别和真实优惠形式", () => {
+  assert.equal(compactCouponCategory({ conditionType: "" }), "全作品券");
+  assert.equal(compactCouponCategory({ conditionType: "id_all" }), "指定作品券");
+  assert.equal(compactCouponCategory({ conditionType: "common" }), "指定社团券");
+  assert.equal(compactCouponCategory({ conditionType: "site_ids" }), "指定站点券");
+  assert.equal(compactCouponCategory({ conditionType: "custom_genre" }), "指定分类券");
+  assert.equal(compactCouponCategory({ conditionType: "worktype" }), "指定作品类型券");
+  assert.equal(compactCouponCategory({ conditionType: "unrecognized" }), "其他范围券");
+  assert.equal(compactCouponFilterLabel({
+    conditionType: "payment",
+    discountType: "fixed",
+    discount: 400,
+    minSpend: 1200,
+    minCount: 1,
+  }), "支付满减券｜满1,200减400日元");
+  assert.equal(compactCouponFilterLabel({
+    conditionType: "id_all",
+    discountType: "percent",
+    discount: 50,
+    equivalentRate: 50,
+    minSpend: 0,
+    minCount: 3,
+    maxDiscount: 0,
+  }), "指定作品券｜50OFF·3部起用");
 });

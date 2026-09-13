@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.59
+// @version      0.6.60
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.59";
+  const APP_VERSION = "0.6.60";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -79,6 +79,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.60": [
+      "优惠券筛选项新增全作品、指定作品、指定社团、指定站点、指定分类等类别",
+      "固定满减券在筛选中显示真实满减金额，不再只显示折算OFF",
+    ],
     "0.6.59": [
       "购物车刷新时先显示平台价格、优惠券和活动，史低与趋势随后原位补齐",
       "DLwatcher请求不再阻塞购物车本地优惠信息的首次渲染",
@@ -4553,7 +4557,7 @@
       if (!progress.length) progress.push("无门槛");
       offerOptions.push({
         value,
-        label: `优惠券｜${compactCouponListLabel({
+        label: `优惠券｜${compactCouponFilterLabel({
           ...coupon,
           equivalentRate: rate,
         })}｜${progress.join("＋")}`,
@@ -4918,6 +4922,46 @@
         ? `满${Math.round(option.minSpend)}`
         : "";
     return `${compactOff(option.equivalentRate, "券")}${condition ? `·${condition}` : ""}`;
+  }
+
+  function compactCouponCategory(option) {
+    const type = String(option?.conditionType || "").toLowerCase();
+    if (type === "payment") {
+      return option?.discountType === "fixed" && option?.minSpend > 0
+        ? "支付满减券"
+        : "支付类券";
+    }
+    if (["", "all", "all_product", "product_all"].includes(type)) {
+      return "全作品券";
+    }
+    if (type === "id_all") return "指定作品券";
+    if (type === "common") return "指定社团券";
+    if (type === "site_ids") return "指定站点券";
+    if (type === "custom_genre") return "指定分类券";
+    if (type === "worktype") return "指定作品类型券";
+    return "其他范围券";
+  }
+
+  function compactCouponFilterLabel(option) {
+    const category = compactCouponCategory(option);
+    if (option?.discountType === "fixed") {
+      const discount = Math.round(dealNumber(option.discount));
+      const benefit = option.minSpend > 0
+        ? `满${Math.round(option.minSpend).toLocaleString("ja-JP")}减${discount.toLocaleString("ja-JP")}日元`
+        : `减${discount.toLocaleString("ja-JP")}日元`;
+      const count = option.minCount > 1 ? `·${option.minCount}部起用` : "";
+      return `${category}｜${benefit}${count}`;
+    }
+    const benefit = `${Math.round(dealNumber(option.discount, option.equivalentRate))}OFF`;
+    const threshold = option.minCount > 1
+      ? `·${option.minCount}部起用`
+      : option.minSpend > 0
+        ? `·满${Math.round(option.minSpend).toLocaleString("ja-JP")}日元`
+        : "";
+    const cap = option.maxDiscount > 0
+      ? `·最高减${Math.round(option.maxDiscount).toLocaleString("ja-JP")}日元`
+      : "";
+    return `${category}｜${benefit}${threshold}${cap}`;
   }
 
   function bestReachColorClass(bestPrice, lowestPrice) {
