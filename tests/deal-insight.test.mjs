@@ -49,7 +49,7 @@ vm.runInNewContext(
     compactCouponExpiry,
     compactCouponUsage,
     compactCouponListLabel,
-    compactCouponCategory,
+    compactCouponContentName,
     compactCouponFilterLabel,
     bestReachColorClass,
     campaignEndFromHtml,
@@ -80,7 +80,7 @@ const {
   compactCouponExpiry,
   compactCouponUsage,
   compactCouponListLabel,
-  compactCouponCategory,
+  compactCouponContentName,
   compactCouponFilterLabel,
   bestReachColorClass,
   campaignEndFromHtml,
@@ -465,22 +465,26 @@ test("同类单次券显示张数和最早到期", () => {
   assert.match(compactCouponExpiry(option), /^最早/);
 });
 
-test("筛选优惠券显示适用类别和真实优惠形式", () => {
-  assert.equal(compactCouponCategory({ conditionType: "" }), "全作品券");
-  assert.equal(compactCouponCategory({ conditionType: "id_all" }), "指定作品券");
-  assert.equal(compactCouponCategory({ conditionType: "common" }), "指定社团券");
-  assert.equal(compactCouponCategory({ conditionType: "site_ids" }), "指定站点券");
-  assert.equal(compactCouponCategory({ conditionType: "custom_genre" }), "指定分类券");
-  assert.equal(compactCouponCategory({ conditionType: "worktype" }), "指定作品类型券");
-  assert.equal(compactCouponCategory({ conditionType: "unrecognized" }), "其他范围券");
+test("筛选优惠券显示DLsite券名中的内容类别和真实优惠形式", () => {
+  assert.equal(compactCouponContentName({ name: "漫画作品优惠券" }), "漫画作品优惠券");
+  assert.equal(compactCouponContentName({
+    name: "优惠券 1",
+    workTypes: ["RPG", "ADV"],
+  }), "游戏券");
+  assert.equal(compactCouponContentName({
+    name: "优惠券 2",
+    workTypes: ["MNG", "SOU"],
+  }), "漫画/音声券");
   assert.equal(compactCouponFilterLabel({
+    name: "全站满减优惠券",
     conditionType: "payment",
     discountType: "fixed",
     discount: 400,
     minSpend: 1200,
     minCount: 1,
-  }), "支付满减券｜满1,200减400日元");
+  }), "全站满减优惠券｜满1,200减400日元");
   assert.equal(compactCouponFilterLabel({
+    name: "漫画作品优惠券",
     conditionType: "id_all",
     discountType: "percent",
     discount: 50,
@@ -488,5 +492,5 @@ test("筛选优惠券显示适用类别和真实优惠形式", () => {
     minSpend: 0,
     minCount: 3,
     maxDiscount: 0,
-  }), "指定作品券｜50OFF·3部起用");
+  }), "漫画作品优惠券｜50OFF·3部起用");
 });

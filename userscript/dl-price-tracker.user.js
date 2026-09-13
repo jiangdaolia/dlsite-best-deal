@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.60
+// @version      0.6.61
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.60";
+  const APP_VERSION = "0.6.61";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -79,6 +79,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.61": [
+      "优惠券筛选项直接显示DLsite券名，可辨认漫画券、游戏券、音声券等内容类别",
+      "券名缺失时根据结构化作品类型生成内容类别作为回退",
+    ],
     "0.6.60": [
       "优惠券筛选项新增全作品、指定作品、指定社团、指定站点、指定分类等类别",
       "固定满减券在筛选中显示真实满减金额，不再只显示折算OFF",
@@ -4924,33 +4928,38 @@
     return `${compactOff(option.equivalentRate, "券")}${condition ? `·${condition}` : ""}`;
   }
 
-  function compactCouponCategory(option) {
-    const type = String(option?.conditionType || "").toLowerCase();
-    if (type === "payment") {
-      return option?.discountType === "fixed" && option?.minSpend > 0
-        ? "支付满减券"
-        : "支付类券";
+  function compactCouponContentName(option) {
+    const names = [option?.name, ...(Array.isArray(option?.names) ? option.names : [])]
+      .map(dealPlainText)
+      .filter(Boolean);
+    const supplied = names.find((name) =>
+      !/^(?:DLsite\s*)?优惠券\s*\d*$/i.test(name));
+    if (supplied) return supplied;
+
+    const types = new Set((option?.workTypes || [])
+      .map((value) => String(value).toUpperCase()));
+    const categories = [];
+    if (["MNG", "COM", "ICN"].some((type) => types.has(type))) {
+      categories.push("漫画");
     }
-    if (["", "all", "all_product", "product_all"].includes(type)) {
-      return "全作品券";
+    if (["GAM", "RPG", "ADV", "SLN", "ACT", "STG", "PZ", "PZL", "TBL", "QIZ"].some((type) => types.has(type))) {
+      categories.push("游戏");
     }
-    if (type === "id_all") return "指定作品券";
-    if (type === "common") return "指定社团券";
-    if (type === "site_ids") return "指定站点券";
-    if (type === "custom_genre") return "指定分类券";
-    if (type === "worktype") return "指定作品类型券";
-    return "其他范围券";
+    if (types.has("SOU")) categories.push("音声");
+    if (types.has("MUS")) categories.push("音乐");
+    if (types.has("MOV")) categories.push("视频");
+    return categories.length ? `${categories.join("/")}券` : names[0] || "优惠券";
   }
 
   function compactCouponFilterLabel(option) {
-    const category = compactCouponCategory(option);
+    const name = compactCouponContentName(option);
     if (option?.discountType === "fixed") {
       const discount = Math.round(dealNumber(option.discount));
       const benefit = option.minSpend > 0
         ? `满${Math.round(option.minSpend).toLocaleString("ja-JP")}减${discount.toLocaleString("ja-JP")}日元`
         : `减${discount.toLocaleString("ja-JP")}日元`;
       const count = option.minCount > 1 ? `·${option.minCount}部起用` : "";
-      return `${category}｜${benefit}${count}`;
+      return `${name}｜${benefit}${count}`;
     }
     const benefit = `${Math.round(dealNumber(option.discount, option.equivalentRate))}OFF`;
     const threshold = option.minCount > 1
@@ -4961,7 +4970,7 @@
     const cap = option.maxDiscount > 0
       ? `·最高减${Math.round(option.maxDiscount).toLocaleString("ja-JP")}日元`
       : "";
-    return `${category}｜${benefit}${threshold}${cap}`;
+    return `${name}｜${benefit}${threshold}${cap}`;
   }
 
   function bestReachColorClass(bestPrice, lowestPrice) {
