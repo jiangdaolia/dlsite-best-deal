@@ -6,7 +6,7 @@
 
 ## 安装
 
-**[安装 DLsite 优惠助手 + 史低](https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/b89bd9136f721fa9f2321b703dd39a742d6e9a99/userscript/dl-price-tracker.user.js)**
+**[安装 DLsite 优惠助手 + 史低](https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/afb7bb6c33f13891c23d4bf5277f7234c80c6587/userscript/dl-price-tracker.user.js)**
 
 桌面端可使用 Tampermonkey、Violentmonkey 等用户脚本管理器；Via 等支持 `.user.js` 的手机浏览器可直接打开安装链接。脚本包含 `@updateURL` 与 `@downloadURL`，实际更新行为由脚本管理器决定。
 
@@ -36,6 +36,7 @@
 - 同时选择时，只显示两项都适用的作品。
 - 两项都不选时恢复全部作品。
 - 两类选项分别按显示的 OFF 从高到低排列。
+- 优惠券选项会同时标明适用类别；固定满减券显示真实满减金额。
 
 列表还可以独立隐藏已购买作品，以及理论价不低于购物车/稍后再买版本的作品。排序、筛选和隐藏状态会保存在浏览器本地。
 
