@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.61
+// @version      0.6.62
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.61";
+  const APP_VERSION = "0.6.62";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -79,6 +79,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.62": [
+      "修复选择理论低价优先后被后续重绘改回最高可达到折扣的问题",
+      "排序选择会立即保留在当前页面，即使浏览器暂时无法写入本地存储",
+    ],
     "0.6.61": [
       "优惠券筛选项直接显示DLsite券名，可辨认漫画券、游戏券、音声券等内容类别",
       "券名缺失时根据结构化作品类型生成内容类别作为回退",
@@ -501,6 +505,7 @@
   let openReachRenderToken = 0;
   let reachDialogScrollLock = null;
   let browseNativeSortPending = false;
+  let browseSortModeRuntime = null;
   let pendingCartAdd = null;
   let cartRefreshInFlight = null;
   let dealToastTimer = null;
@@ -4302,24 +4307,32 @@
     else findBrowsePriceHost(card)?.insertAdjacentElement("beforebegin", line);
   }
 
+  function normalizeBrowseSortMode(mode) {
+    return [
+      BROWSE_SORT_MODE_NATIVE,
+      BUY_LATER_SORT_MODE_REACH,
+      BUY_LATER_SORT_MODE_PRICE,
+      BUY_LATER_SORT_MODE_PLATFORM_EXPIRY,
+    ].includes(mode) ? mode : BUY_LATER_SORT_MODE_REACH;
+  }
+
   function getBrowseSortMode() {
+    if (browseSortModeRuntime !== null) return browseSortModeRuntime;
     try {
       const value = localStorage.getItem(BROWSE_SORT_MODE_STORAGE_KEY);
-      return [
-        BROWSE_SORT_MODE_NATIVE,
-        BUY_LATER_SORT_MODE_REACH,
-        BUY_LATER_SORT_MODE_PRICE,
-        BUY_LATER_SORT_MODE_PLATFORM_EXPIRY,
-      ]
-        .includes(value) ? value : BUY_LATER_SORT_MODE_REACH;
+      return normalizeBrowseSortMode(value);
     } catch {
       return BUY_LATER_SORT_MODE_REACH;
     }
   }
 
   function setBrowseSortMode(mode) {
+    const normalized = normalizeBrowseSortMode(mode);
+    // 分析任务完成后会再次同步控件。先保留本页用户选择，
+    // 避免 localStorage 写入受限时被默认值覆盖。
+    browseSortModeRuntime = normalized;
     try {
-      localStorage.setItem(BROWSE_SORT_MODE_STORAGE_KEY, mode);
+      localStorage.setItem(BROWSE_SORT_MODE_STORAGE_KEY, normalized);
     } catch {
       // noop
     }

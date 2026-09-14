@@ -98,6 +98,35 @@ test("浏览排序控件已在原生排序区后方时不重复插入自身", ()
   );
 });
 
+test("浏览排序在本地存储写入失败时仍保留当页选择", () => {
+  const sandbox = {
+    localStorage: {
+      getItem: () => null,
+      setItem: () => {
+        throw new Error("storage unavailable");
+      },
+    },
+  };
+  vm.runInNewContext(
+    `const BROWSE_SORT_MODE_NATIVE = "native";
+    const BUY_LATER_SORT_MODE_REACH = "reach";
+    const BUY_LATER_SORT_MODE_PRICE = "price";
+    const BUY_LATER_SORT_MODE_PLATFORM_EXPIRY = "platform-expiry";
+    const BROWSE_SORT_MODE_STORAGE_KEY = "browse-sort";
+    let browseSortModeRuntime = null;
+    ${functionSource("normalizeBrowseSortMode")}
+    ${functionSource("getBrowseSortMode")}
+    ${functionSource("setBrowseSortMode")}
+    globalThis.getMode = getBrowseSortMode;
+    globalThis.setMode = setBrowseSortMode;`,
+    sandbox,
+  );
+
+  assert.equal(sandbox.getMode(), "reach");
+  sandbox.setMode("price");
+  assert.equal(sandbox.getMode(), "price");
+});
+
 test("稍后再买复用浏览列表的活动与优惠券按钮筛选", () => {
   const controlsSource = functionSource("injectBuyLaterSortToggle");
   const filterSource = functionSource("applyBuyLaterBundleFilter");
