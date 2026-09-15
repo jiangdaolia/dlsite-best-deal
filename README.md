@@ -6,7 +6,7 @@
 
 ## 安装
 
-**[安装 DLsite 优惠助手 + 史低](https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/fd305e9d64a923d44f8a52f23d6adf0e95e32a0b/userscript/dl-price-tracker.user.js)**
+**[安装 DLsite 优惠助手 + 史低](https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/d0e7fda1ad5d11d918ca956172dd94da5e635bea/userscript/dl-price-tracker.user.js)**
 
 桌面端可使用 Tampermonkey、Violentmonkey 等用户脚本管理器；Via 等支持 `.user.js` 的手机浏览器可直接打开安装链接。脚本包含 `@updateURL` 与 `@downloadURL`，实际更新行为由脚本管理器决定。
 
