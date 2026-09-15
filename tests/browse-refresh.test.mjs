@@ -251,12 +251,47 @@ test("账号提醒同时覆盖购物车卡片并复用当页语言元数据", ()
 test("购物车卡片不重复提示已在购物车或稍后再买", () => {
   const dataSource = functionSource("accountReminderData");
   const reminderSource = functionSource("renderAccountReminderForCard");
+  const ownedSource = functionSource("isCartPageWorkItem");
   assert.match(
     dataSource,
     /\{ evaluateCartVisibility = false, includeCartStatus = true, context = null \}/,
   );
   assert.match(dataSource, /if \(includeCartStatus\) \{/);
-  assert.match(reminderSource, /includeCartStatus: isBrowseLayout/);
+  assert.match(ownedSource, /node\.closest\?\.\("\.__cart_recommend"\)/);
+  assert.match(ownedSource, /BUY_LATER_AREA_SELECTOR/);
+  assert.match(ownedSource, /BUY_NOW_AREA_SELECTOR/);
+  assert.match(ownedSource, /li\.cart_list_item, li\.n_work_list_item/);
+  assert.match(reminderSource, /const cartOwned = isCartPageWorkItem\(node\)/);
+  assert.match(
+    reminderSource,
+    /layout = cartOwned && cartLayout \? cartLayout : \(browseLayout \|\| cartLayout\)/,
+  );
+  assert.match(reminderSource, /includeCartStatus = isBrowseLayout && !cartOwned/);
+  assert.match(reminderSource, /evaluateCartVisibility: includeCartStatus/);
+  assert.match(reminderSource, /includeCartStatus,/);
+
+  const sandbox = {
+    location: { href: "https://www.dlsite.com/maniax-touch/cart" },
+    BUY_NOW_AREA_SELECTOR: "section.buy_now, .buy_now",
+    BUY_LATER_AREA_SELECTOR: "section.buy_later, section.cart_hold, .buy_later",
+    isCartPage() {
+      return true;
+    },
+    isRenderableCartItem() {
+      return false;
+    },
+  };
+  vm.runInNewContext(`${ownedSource}\nglobalThis.check = isCartPageWorkItem;`, sandbox);
+  const node = (matches = []) => ({
+    closest(selector) {
+      return matches.includes(selector) ? this : null;
+    },
+  });
+  assert.equal(sandbox.check(node(["li.cart_list_item, li.n_work_list_item"])), true);
+  assert.equal(sandbox.check(node(["section.buy_later, section.cart_hold, .buy_later"])), true);
+  assert.equal(sandbox.check(node(["section.buy_now, .buy_now"])), true);
+  assert.equal(sandbox.check(node([".__cart_recommend"])), false);
+  assert.equal(sandbox.check(node([".__cart_recommend, .recommend_list"])), false);
 });
 
 test("购物车作品删除或移区后清理失效助手界面", () => {

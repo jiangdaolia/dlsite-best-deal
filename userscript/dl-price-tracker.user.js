@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.62
+// @version      0.6.63
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.62";
+  const APP_VERSION = "0.6.63";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -79,6 +79,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.63": [
+      "手机端购物车立即购买和稍后再买都不再显示已在购物车或已在稍后再买",
+      "这两区仍保留已购买提醒，购物车底部推荐卡不受影响",
+    ],
     "0.6.62": [
       "修复选择理论低价优先后被后续重绘改回最高可达到折扣的问题",
       "排序选择会立即保留在当前页面，即使浏览器暂时无法写入本地存储",
@@ -4092,6 +4096,17 @@
     return Boolean(node?.closest?.(".__cart_recommend, .recommend_list"));
   }
 
+  function isCartPageWorkItem(node) {
+    if (!node || !isCartPage(location.href)) return false;
+    if (node.closest?.(".__cart_recommend")) return false;
+    if (isRenderableCartItem(node)) return true;
+    if (node.closest?.(".__buy_now_target, .__buy_later_target")) return true;
+    if (node.closest?.("li.cart_list_item, li.n_work_list_item")) return true;
+    if (node.closest?.(BUY_NOW_AREA_SELECTOR)) return true;
+    if (node.closest?.(BUY_LATER_AREA_SELECTOR)) return true;
+    return false;
+  }
+
   function findBrowsePrimaryList() {
     const selectors = [
       "#search_result_img_box",
@@ -7022,14 +7037,21 @@
     const cartLayout = node?.querySelector?.(
       ".dltracker-cart-host .dltracker-cart-layout",
     );
-    const layout = browseLayout || cartLayout;
+    const cartOwned = isCartPageWorkItem(node);
+    const layout = cartOwned && cartLayout ? cartLayout : (browseLayout || cartLayout);
     if (!layout) return;
+    const unusedLayout = layout === cartLayout ? browseLayout : cartLayout;
+    if (unusedLayout && unusedLayout !== layout) {
+      unusedLayout.querySelector(".dltracker-account-reminders")?.remove();
+      unusedLayout.classList.remove("is-account-purchased");
+    }
     const isBrowseLayout = layout === browseLayout;
+    const includeCartStatus = isBrowseLayout && !cartOwned;
     const renderToken = (accountReminderRenderTokens.get(layout) || 0) + 1;
     accountReminderRenderTokens.set(layout, renderToken);
     const data = await accountReminderData(id, {
-      evaluateCartVisibility: isBrowseLayout,
-      includeCartStatus: isBrowseLayout,
+      evaluateCartVisibility: includeCartStatus,
+      includeCartStatus,
       context,
     });
     if (!layout.isConnected || accountReminderRenderTokens.get(layout) !== renderToken) return;
