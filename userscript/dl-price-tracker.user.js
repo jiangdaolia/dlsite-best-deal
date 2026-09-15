@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.66
+// @version      0.6.67
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.66";
+  const APP_VERSION = "0.6.67";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -81,6 +81,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.67": [
+      "所有价格框统一为「标签 人民币/日元 NNOFF」格式，史低与本次徽章补齐人民币金额",
+      "部分优惠未确认会标明具体缺失的数据（优惠券、购物车快照、作品信息或平台活动）",
+      "价格框不再显示无折扣占位，没有折扣时只保留标签和金额",
+    ],
     "0.6.66": [
       "价格框标签统一为两字并去掉人民币前的约字，节省横向空间",
     ],
@@ -518,6 +523,7 @@
     cartSnapshot: { loaded: false, active: [], later: [], updatedAt: 0 },
     bulkRules: new Map(),
     partial: false,
+    partialReasons: [],
   };
   let openReachProductId = "";
   let openReachDialogMode = "price";
@@ -3514,6 +3520,7 @@
       bulkRules,
       bulkRuleAttempts,
       partial: !cartSnapshot.loaded,
+      partialReasons: cartSnapshot.loaded ? [] : ["cart"],
     };
     return latestDealContext;
   }
@@ -3554,7 +3561,7 @@
           product,
           usableCoupons,
           cartProducts,
-          Boolean(previous.partial),
+          Array.isArray(previous.partialReasons) ? previous.partialReasons : [],
           buildOptions,
         );
       } catch (error) {
@@ -5514,6 +5521,60 @@
     return `${prefix}${Math.round(dealNumber(rate))}OFF`;
   }
 
+  const PARTIAL_REASON_ORDER = ["coupon", "cart", "metadata", "activity"];
+  const PARTIAL_REASON_LABELS = {
+    coupon: "优惠券",
+    cart: "购物车快照",
+    metadata: "作品信息",
+    activity: "平台活动",
+  };
+  const PARTIAL_REASON_HINTS = {
+    coupon: "优惠券：列表读取失败，可能有券未参与计算",
+    cart: "购物车快照：满减和件数门槛无法确认",
+    metadata: "作品信息：限定社团/站点/类型的券无法判断",
+    activity: "平台活动：存在多件活动但规则未读到",
+  };
+
+  function insightPartialReasonKeys(insight, extraReasons = []) {
+    const owned = new Set([
+      ...(Array.isArray(insight?.partialReasons) ? insight.partialReasons : []),
+      ...(Array.isArray(extraReasons) ? extraReasons : []),
+    ]);
+    return PARTIAL_REASON_ORDER.filter((key) => owned.has(key));
+  }
+
+  function partialReasonLabels(insight, extraReasons = []) {
+    return insightPartialReasonKeys(insight, extraReasons)
+      .map((key) => PARTIAL_REASON_LABELS[key])
+      .join("、");
+  }
+
+  function partialReasonText(insight, extraReasons = []) {
+    const labels = partialReasonLabels(insight, extraReasons);
+    return labels ? `部分优惠未确认：${labels}` : "部分优惠未确认";
+  }
+
+  function partialReasonTitle(insight, extraReasons = []) {
+    return insightPartialReasonKeys(insight, extraReasons)
+      .map((key) => PARTIAL_REASON_HINTS[key])
+      .join("\n");
+  }
+
+  function applyPartialReasonText(element, insight, extraReasons = []) {
+    element.textContent = partialReasonText(insight, extraReasons);
+    const title = partialReasonTitle(insight, extraReasons);
+    if (title) element.title = title;
+  }
+
+  function contextPartialExtraReasons(snapshot = latestDealContext.cartSnapshot) {
+    return [
+      ...(Array.isArray(latestDealContext.partialReasons)
+        ? latestDealContext.partialReasons
+        : []),
+      ...(snapshot?.loaded ? [] : ["cart"]),
+    ];
+  }
+
   function compactCouponCondition(option, includeProgress = false) {
     const parts = [];
     if (option.minCount > 1) {
@@ -5640,7 +5701,7 @@
   function dealMoney(value, cnyRate = null) {
     const yen = toYen(value);
     return Number.isFinite(cnyRate) && cnyRate > 0
-      ? `${yen}｜${(Math.round(value) * cnyRate).toFixed(2)}元`
+      ? `${(Math.round(value) * cnyRate).toFixed(2)}元/${yen}`
       : yen;
   }
 
@@ -6736,6 +6797,7 @@
       later: summarizeProducts(snapshot.later),
       coupons: couponSignature,
       partial: Boolean(insight?.partial || latestDealContext.partial || !snapshot.loaded),
+      partialReasons: partialReasonLabels(insight, contextPartialExtraReasons(snapshot)),
     });
   }
 
@@ -6792,9 +6854,15 @@
     }
     work.append(workTitle, formula);
     if (partialData) {
+      const partialExtras = contextPartialExtraReasons(snapshot);
+      const labels = partialReasonLabels(insight, partialExtras);
       const partial = document.createElement("div");
       partial.className = "dltracker-reach-warning";
-      partial.textContent = "部分优惠未确认，以下仅为当前已知最低。";
+      partial.textContent = labels
+        ? `部分优惠未确认（${labels}），以下仅为当前已知最低。`
+        : "部分优惠未确认，以下仅为当前已知最低。";
+      const partialTitle = partialReasonTitle(insight, partialExtras);
+      if (partialTitle) partial.title = partialTitle;
       work.appendChild(partial);
     }
     const currentPrice = dealNumber(insight.product.price);
@@ -7166,6 +7234,7 @@
         bulkRule: insight.bulkRule,
         cart: activeCartFingerprint(insight.cartProducts || []),
         partial: insight.partial,
+        partialReasons: insight.partialReasons,
       } : null,
     });
   }
@@ -7286,7 +7355,7 @@
         if (insight.partial) {
           const partial = document.createElement("span");
           partial.className = "dltracker-browse-analysis-offer-group";
-          partial.textContent = "部分优惠未确认";
+          applyPartialReasonText(partial, insight);
           offers.appendChild(partial);
         }
         layout.appendChild(offers);
@@ -7525,7 +7594,7 @@
           product,
           latestDealContext.coupons,
           latestDealContext.cartSnapshot.active || [],
-          false,
+          [],
           options,
         );
       }
@@ -7869,7 +7938,7 @@
           product,
           latestDealContext.coupons,
           latestDealContext.cartSnapshot.active || [],
-          false,
+          [],
         );
         const theoreticalPrice = calculateHypotheticalPrice(product, insight.bestReach);
         const record = /^[RB]J/i.test(edition.parentId)
@@ -8599,7 +8668,7 @@
     if (insight.partial) {
       const partial = document.createElement("span");
       partial.className = "dltracker-deal-partial";
-      partial.textContent = "部分优惠未确认";
+      applyPartialReasonText(partial, insight);
       box.appendChild(partial);
     }
     const languageEntry = host.querySelector(":scope > .dltracker-language-entry");
@@ -8653,7 +8722,7 @@
     if (insight.partial) {
       const partial = document.createElement("div");
       partial.className = "dltracker-deal-partial";
-      partial.textContent = "部分优惠未确认";
+      applyPartialReasonText(partial, insight);
       box.appendChild(partial);
     }
     const languageEntry = host.querySelector(":scope > .dltracker-language-entry");
@@ -8693,7 +8762,7 @@
     const rounded = Math.round(yenValue);
     const yen = toYen(rounded);
     return Number.isFinite(cnyRate) && cnyRate > 0
-      ? `${(rounded * cnyRate).toFixed(2)}元（${yen}）`
+      ? `${(rounded * cnyRate).toFixed(2)}元/${yen}`
       : yen;
   }
 
@@ -8750,10 +8819,10 @@
     amount.className = "dltracker-cart-deal-price";
     amount.textContent = price;
     frame.append(title, amount);
-    if (typeof rate === "number" && Number.isFinite(rate)) {
+    if (typeof rate === "number" && Number.isFinite(rate) && rate > 0) {
       const off = document.createElement("span");
       off.className = "dltracker-cart-deal-off";
-      off.textContent = rate > 0 ? compactOff(rate) : "无折扣";
+      off.textContent = compactOff(rate);
       frame.appendChild(off);
     }
     if (onActivate) {
@@ -8982,7 +9051,7 @@
       if (insight.partial) {
         const partial = document.createElement("div");
         partial.className = "dltracker-deal-partial";
-        partial.textContent = "部分优惠未确认";
+        applyPartialReasonText(partial, insight);
         card.appendChild(partial);
       }
     }
@@ -9004,8 +9073,9 @@
     const text = document.createElement("span");
     text.className = "dltracker-chip-text";
     const label = "本次";
+    const cnyRate = currencyRateFromProducts([insight?.product]);
     text.textContent = Number.isFinite(price)
-      ? `${label} ${toYen(price)}`
+      ? `${label} ${cartFrameLocalizedMoney(price, cnyRate)}`
       : label;
     const off = document.createElement("span");
     off.className = "dltracker-off-badge";
@@ -9041,6 +9111,15 @@
       }
       card.querySelector(".dltracker-best-reach-badge")?.remove();
       card.querySelector(".dltracker-single-buy-badge")?.remove();
+      const chipText = card.querySelector(
+        ".dltracker-history-chip .dltracker-chip-text",
+      );
+      if (chipText && Number.isFinite(safeNumber(cartRecord?.lowestPrice))) {
+        chipText.textContent = historyChipLabel(
+          cartRecord,
+          currencyRateFromProducts([insight?.product]),
+        );
+      }
       if (!insight?.bestReach?.totalRate) continue;
       const lowestPrice = Number(card.dataset.lowestPrice);
       const badge = createBestReachBadge(
@@ -9063,7 +9142,7 @@
     product,
     coupons,
     cartProducts,
-    partial = false,
+    partialReasons = [],
     buildOptions = {},
   ) {
     const bulkRule = Object.prototype.hasOwnProperty.call(buildOptions, "bulkRule")
@@ -9084,6 +9163,13 @@
       cartSubtotal,
     );
     const bestReach = calculateBestReach(product, options, bulkRule);
+    const reasonSet = new Set([
+      ...(Array.isArray(partialReasons) ? partialReasons : []),
+      ...(Array.isArray(latestDealContext.partialReasons)
+        ? latestDealContext.partialReasons
+        : []),
+    ]);
+    if (product?.bulkbuyKey && !bulkRule) reasonSet.add("activity");
     const insight = {
       product,
       couponOptions: options,
@@ -9091,8 +9177,8 @@
       bulkRule,
       bestReach,
       singleBuyOptimal: isSingleBuyOptimal(product, options, bulkRule, bestReach),
-      partial: partial || latestDealContext.partial ||
-        Boolean(product?.bulkbuyKey && !bulkRule),
+      partial: reasonSet.size > 0,
+      partialReasons: PARTIAL_REASON_ORDER.filter((key) => reasonSet.has(key)),
     };
     dealInsightById.set(product.id, insight);
     if (!buildOptions.deferRender) {
@@ -9152,6 +9238,7 @@
         alternateIds: [],
       };
       const partial = !metadata.has(id);
+      const partialReasons = partial ? ["metadata"] : [];
       const usableCoupons = partial
         ? coupons.filter((coupon) =>
             ["payment", "id_all"].includes(coupon.conditionType) &&
@@ -9174,7 +9261,7 @@
         node,
         cartItem,
         product,
-        partial,
+        partialReasons,
         usableCoupons,
         analysisHost,
       });
@@ -9189,7 +9276,7 @@
           card.product,
           card.usableCoupons,
           enrichedCartProducts,
-          card.partial,
+          card.partialReasons,
           bulkbuyKey && browseBulkRules.has(bulkbuyKey)
             ? { bulkRule: browseBulkRules.get(bulkbuyKey) }
             : {},
@@ -9290,7 +9377,12 @@
     const partial = !metadata.has(id) && coupons.some((coupon) =>
       ["custom_genre", "common", "site_ids", "worktype"].includes(coupon.conditionType),
     );
-    const insight = await buildInsight(product, coupons, enrichedCart, partial);
+    const insight = await buildInsight(
+      product,
+      coupons,
+      enrichedCart,
+      partial ? ["metadata"] : [],
+    );
     const priceHost = findProductPriceHost();
     appendJpyPrice(priceHost, product);
     const renderHost = findProductRenderHost();
@@ -9339,6 +9431,10 @@
         cartSnapshot,
         bulkRules,
         partial: dealDataPartial || !rawCartSnapshot.loaded,
+        partialReasons: [
+          ...(dealDataPartial ? ["coupon"] : []),
+          ...(rawCartSnapshot.loaded ? [] : ["cart"]),
+        ],
       };
       const cartProducts = cartSnapshot.loaded ? cartSnapshot.active : [];
       if (isProductPage(location.href)) {
@@ -11151,6 +11247,20 @@
     URL.revokeObjectURL(url);
   }
 
+  function historyChipLabel(record, cnyRate = null) {
+    if (!hasEffectiveDiscount(record)) return "无折扣记录";
+    const compareCurrent = safeNumber(record?.dlwatcherCurrentPrice);
+    const isAtLowest =
+      typeof compareCurrent === "number" &&
+      typeof record?.lowestPrice === "number" &&
+      Math.abs(compareCurrent - record.lowestPrice) < 0.01;
+    const lowestPrice = safeNumber(record?.lowestPrice);
+    const money = Number.isFinite(lowestPrice)
+      ? cartFrameLocalizedMoney(lowestPrice, cnyRate)
+      : toYen(record?.lowestPrice);
+    return `${isAtLowest ? "新史低" : "史低"} ${money}`;
+  }
+
   function renderPriceCard(record, host) {
     if (isCartPage(location.href) && host?.classList?.contains("dltracker-cart-host")) {
       if (record?.rjCode) {
@@ -11161,6 +11271,9 @@
         host.textContent = "史低获取失败";
       }
       return;
+    }
+    if (record?.rjCode) {
+      browseRecordById.set(String(record.rjCode).toUpperCase(), record);
     }
     const existed = host.querySelector(`.${UI_CLASSNAME}`);
     if (existed) existed.remove();
@@ -11220,11 +11333,13 @@
           : "dltracker-chip-normal"
         : "dltracker-chip-current",
     );
-    text.textContent = discounted
-      ? isAtLowest
-        ? `新史低 ${toYen(record.lowestPrice)}`
-        : `史低 ${toYen(record.lowestPrice)}`
-      : `无折扣记录`;
+    const chipInsight = record?.rjCode
+      ? dealInsightById.get(String(record.rjCode).toUpperCase())
+      : null;
+    text.textContent = historyChipLabel(
+      record,
+      currencyRateFromProducts([chipInsight?.product]),
+    );
     chip.appendChild(text);
 
     const isCartContext = isCartPage(location.href);
@@ -11251,9 +11366,7 @@
     }
 
     card.appendChild(chip);
-    const insight = record?.rjCode
-      ? dealInsightById.get(String(record.rjCode).toUpperCase())
-      : null;
+    const insight = chipInsight;
     if (insight?.bestReach?.totalRate > 0) {
       const reachBadge = createBestReachBadge(insight, record.lowestPrice);
       card.appendChild(reachBadge);

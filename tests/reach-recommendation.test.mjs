@@ -168,7 +168,7 @@ test("385日元对16.23元时统一使用当页换算比例", () => {
   }]);
 
   assert.ok(Math.abs(rate - 16.23 / 385) < 1e-12);
-  assert.equal(dealMoney(385, rate), "385円｜16.23元");
+  assert.equal(dealMoney(385, rate), "16.23元/385円");
 });
 
 test("人民币换算优先当前作品，缺失时才回退购物车样本", () => {
