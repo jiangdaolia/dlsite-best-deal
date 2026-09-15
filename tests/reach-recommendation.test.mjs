@@ -225,14 +225,18 @@ test("购物车状态按单买、已满足和需凑单三态判定", () => {
 });
 
 test("购物车结构化人民币价优先于可能含划线原价的DOM文本", () => {
-  const enrichSource = functionSource("enhanceDealInsights");
+  const enrichSource = functionSource("enrichCartSnapshotItem");
   assert.match(
     enrichSource,
-    /cartMetadata\.get\(String\(item\.id\)\.toUpperCase\(\)\)\?\.cnyPrice \|\|\s*item\.cnyPrice/,
+    /metadata\.cnyPrice \|\|\s*item\.cnyPrice/,
   );
   assert.match(
     enrichSource,
-    /officialPrice: cartMetadata\.get\(String\(item\.id\)\.toUpperCase\(\)\)\?\.officialPrice \|\|\s*item\.officialPrice/,
+    /officialPrice: metadata\.officialPrice \|\|\s*item\.officialPrice/,
+  );
+  assert.match(
+    functionSource("enhanceDealInsights"),
+    /enrichCartSnapshotItem\(item, cartMetadata\)/,
   );
 });
 

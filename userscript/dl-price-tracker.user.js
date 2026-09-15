@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.63
+// @version      0.6.64
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.63";
+  const APP_VERSION = "0.6.64";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -79,6 +79,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.64": [
+      "购物车页新增「读取账号信息」悬浮按钮，带进度条并可随时停止",
+      "账号信息改为完全手动读取与差分更新，页面加载不再自动读取账号数据",
+      "每次读取完成后自动用新优惠券和购物车数据重算当前页全部优惠金额",
+    ],
     "0.6.63": [
       "手机端购物车立即购买和稍后再买都不再显示已在购物车或已在稍后再买",
       "这两区仍保留已购买提醒，购物车底部推荐卡不受影响",
@@ -517,6 +522,17 @@
   let accountIndexRefreshInFlight = null;
   let accountIndexRuntimeFingerprint = "";
   let accountIndexRuntimeError = "";
+  let accountReadFlowInFlight = null;
+  let accountReadStopRequested = false;
+  let accountReadFabDismissed = false;
+  let lastAccountIndexStorageStamp = "";
+  const accountReadRuntime = {
+    running: false,
+    phase: "",
+    detail: "",
+    summary: "",
+    error: "",
+  };
   const accountReminderRenderTokens = new WeakMap();
   let openLanguageDialogState = null;
 
@@ -2640,6 +2656,7 @@
       pausedReason: "",
       indexing: false,
       stage: "",
+      phase: "",
       requestVersion: 0,
     };
   }
@@ -2914,6 +2931,7 @@
         pausedReason: "",
         indexing: true,
         stage: "读取账号购物车信息",
+        phase: "cart",
         requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
         updatedAt: Date.now(),
       });
@@ -2943,6 +2961,7 @@
         ...loadAccountIndex(),
         indexing: true,
         stage: "读取已购清单",
+        phase: "bought",
         updatedAt: Date.now(),
       });
       refreshAccountInformationPanels();
@@ -2953,7 +2972,22 @@
       const cartIds = cartIdsFromMemberStatus(status);
       const bought = boughtIdsFromPayload(boughtPayload);
       const ids = [...new Set([...cartIds.active, ...cartIds.later, ...bought])];
+      // 差分更新：仍在清单中的作品保留已有语言条目，只补读新出现的编号；
+      // 上次失败的编号重新进入待读队列，从清单消失的作品随 entries 一起移除。
+      const retained = loadAccountIndex();
+      const retryIds = new Set(
+        (Array.isArray(retained.failedIds) ? retained.failedIds : [])
+          .map((id) => String(id).toUpperCase()),
+      );
+      const listed = new Set(ids);
       const entries = {};
+      for (const [key, entry] of Object.entries(retained.entries || {})) {
+        const id = String(entry?.id || key || "").toUpperCase();
+        if (!listed.has(id) || retryIds.has(id)) continue;
+        entries[id] = entry;
+      }
+      const pendingIds = ids.filter((id) => !entries[id]);
+      const keptCount = Object.keys(entries).length;
       const failedIds = [];
       persistAccountIndex({
         ...emptyAccountIndex(),
@@ -2962,26 +2996,30 @@
         later: cartIds.later,
         bought: [...new Set(bought)],
         entries,
-        indexed: 0,
+        indexed: keptCount,
         total: ids.length,
-        complete: ids.length === 0,
+        complete: pendingIds.length === 0,
         failedIds,
         updatedAt: Date.now(),
         lastManualAt: manualStartedAt,
         accountFingerprint: fingerprint,
         pausedReason: "",
-        indexing: ids.length > 0,
-        stage: ids.length ? `准备读取作品信息 0/${ids.length}` : "",
+        indexing: pendingIds.length > 0,
+        stage: pendingIds.length
+          ? `准备读取作品信息 ${keptCount}/${ids.length}`
+          : "",
+        phase: pendingIds.length ? "metadata" : "",
         requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
       });
       refreshAccountInformationPanels();
-      for (let start = 0; start < ids.length; start += ACCOUNT_METADATA_BATCH_SIZE) {
-        const batchIds = ids.slice(start, start + ACCOUNT_METADATA_BATCH_SIZE);
+      for (let start = 0; start < pendingIds.length; start += ACCOUNT_METADATA_BATCH_SIZE) {
+        const batchIds = pendingIds.slice(start, start + ACCOUNT_METADATA_BATCH_SIZE);
         if (!renewAccountIndexLock()) return loadAccountIndex();
         persistAccountIndex({
           ...loadAccountIndex(),
           indexing: true,
-          stage: `读取作品信息 ${start + 1}-${start + batchIds.length}/${ids.length}`,
+          stage: `读取作品信息 ${keptCount + start + 1}-${keptCount + start + batchIds.length}/${ids.length}`,
+          phase: "metadata",
           updatedAt: Date.now(),
         });
         refreshAccountInformationPanels();
@@ -3083,9 +3121,10 @@
           accountFingerprint: fingerprint,
           pausedReason: "",
           indexing: true,
-          stage: start + ACCOUNT_METADATA_BATCH_SIZE < ids.length
+          stage: start + ACCOUNT_METADATA_BATCH_SIZE < pendingIds.length
             ? `等待下一批 ${Object.keys(entries).length}/${ids.length}`
             : "整理索引",
+          phase: "metadata",
           requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
         });
         refreshAccountInformationPanels();
@@ -3096,7 +3135,7 @@
           }`;
           break;
         }
-        if (start + ACCOUNT_METADATA_BATCH_SIZE < ids.length) {
+        if (start + ACCOUNT_METADATA_BATCH_SIZE < pendingIds.length) {
           await sleep(ACCOUNT_METADATA_BATCH_PAUSE_MS);
           if (!renewAccountIndexLock()) return loadAccountIndex();
         }
@@ -3118,6 +3157,7 @@
         pausedReason: accountIndexSessionStopped ? accountIndexSessionStopReason : "",
         indexing: false,
         stage: "",
+        phase: "",
         requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
       };
       if (ids.length && next.indexed === 0 && !accountIndexRuntimeError) {
@@ -3134,6 +3174,7 @@
           pausedReason: accountIndexSessionStopReason || accountIndexRuntimeError,
           indexing: false,
           stage: "",
+          phase: "",
           requestVersion: ACCOUNT_INDEX_REQUEST_VERSION,
           updatedAt: Date.now(),
         });
@@ -3161,30 +3202,10 @@
     if (index.loaded && index.accountFingerprint &&
       visibleFingerprint !== "account-unresolved" &&
       index.accountFingerprint !== visibleFingerprint) {
-      clearAccountIndex();
-      return refreshAccountIndex();
+      return clearAccountIndex();
     }
-    const purchaseKey = "dltracker-account-purchase-refresh-marker";
-    const purchaseComplete = /(?:order|purchase|payment).*(?:complete|finish|thanks)|thanks.*(?:order|purchase)/i
-      .test(location.pathname);
-    let purchaseAlreadyHandled = false;
-    try {
-      if (!purchaseComplete) sessionStorage.removeItem(purchaseKey);
-      purchaseAlreadyHandled = sessionStorage.getItem(purchaseKey) === location.href;
-    } catch { /* noop */ }
-    if (purchaseComplete && !purchaseAlreadyHandled) {
-      try { sessionStorage.setItem(purchaseKey, location.href); } catch { /* noop */ }
-      return refreshAccountIndex();
-    }
-    const processed = Object.keys(index.entries || {}).length;
-    const requestStrategyChanged = dealNumber(index.requestVersion) <
-      ACCOUNT_INDEX_REQUEST_VERSION;
-    if (requestStrategyChanged) return refreshAccountIndex();
-    if (index.loaded && !index.complete && processed < index.total &&
-      (!index.pausedReason || requestStrategyChanged)) {
-      return refreshAccountIndex();
-    }
-    if (!index.loaded) return refreshAccountIndex();
+    // 账号信息只在用户点击「读取账号信息」时读取。页面加载、购买完成、
+    // 跨标签页租约释放或旧版本断点都不再自动发起账号请求，这里只返回本地状态。
     return index;
   }
 
@@ -3213,6 +3234,430 @@
     refreshAccountInformationPanels();
     refreshOpenLanguageDialog();
     return next;
+  }
+
+  function setAccountReadRuntime(patch) {
+    Object.assign(accountReadRuntime, patch);
+    refreshAccountInformationPanels();
+  }
+
+  function requestAccountReadStop() {
+    accountReadStopRequested = true;
+    stopRequestSession("account", "已手动停止");
+  }
+
+  function createAccountReadStopButton() {
+    const stop = document.createElement("button");
+    stop.type = "button";
+    stop.className = "dltracker-account-stop";
+    stop.textContent = "停止";
+    stop.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      stop.disabled = true;
+      stop.textContent = "正在停止…";
+      requestAccountReadStop();
+    });
+    return stop;
+  }
+
+  function accountReadProgressFraction(index) {
+    const phase = String(index?.phase || "") || accountReadRuntime.phase;
+    const total = Math.max(0, dealNumber(index?.total, 0));
+    const indexed = Math.min(total, Math.max(0, dealNumber(index?.indexed, 0)));
+    switch (phase) {
+      case "coupons":
+        return 0.06;
+      case "cart":
+        return 0.18;
+      case "bought":
+        return 0.32;
+      case "metadata":
+        return total ? Math.min(0.95, 0.35 + 0.6 * (indexed / total)) : 0.6;
+      case "recalc":
+        return 0.97;
+      default:
+        if (index?.indexing || accountReadRuntime.running) {
+          return total ? Math.min(0.95, indexed / total || 0.1) : 0.3;
+        }
+        return index?.loaded ? 1 : 0;
+    }
+  }
+
+  function accountReadStageText(index) {
+    if (accountReadRuntime.phase === "coupons") {
+      return accountReadRuntime.detail || "读取优惠券";
+    }
+    if (accountReadRuntime.phase === "recalc") return "重算优惠金额";
+    return dealPlainText(index?.stage) || accountReadRuntime.detail ||
+      (index?.indexing ? "另一个页面正在读取账号信息…" : "正在读取账号信息…");
+  }
+
+  function createAccountReadProgressBlock(index) {
+    const wrap = document.createElement("div");
+    wrap.className = "dltracker-account-progress-block";
+    const bar = document.createElement("div");
+    bar.className = "dltracker-account-progress";
+    const fill = document.createElement("i");
+    fill.style.width = `${Math.round(accountReadProgressFraction(index) * 100)}%`;
+    bar.appendChild(fill);
+    const row = document.createElement("div");
+    row.className = "dltracker-account-progress-row";
+    const stage = document.createElement("span");
+    stage.className = "dltracker-account-progress-stage";
+    stage.textContent = accountReadStageText(index);
+    row.appendChild(stage);
+    if (accountReadFlowInFlight || accountIndexRefreshInFlight) {
+      row.appendChild(createAccountReadStopButton());
+    }
+    wrap.append(bar, row);
+    return wrap;
+  }
+
+  function accountCouponSummaryText() {
+    const coupons = loadDealCache().coupons || {};
+    if (!coupons.loaded) return "未读取";
+    const count = Array.isArray(coupons.raw) ? coupons.raw.length : 0;
+    const earliest = dealNumber(coupons.earliestExpiry, 0);
+    return `${count} 张${earliest ? `，最早到期 ${accountIndexTimeText(earliest)}` : ""}`;
+  }
+
+  function accountReadResultText(index, couponCount) {
+    const parts = [];
+    if (Number.isFinite(couponCount)) parts.push(`已读取 ${couponCount} 张优惠券`);
+    parts.push(`购物车 ${index.active.length} 部`);
+    if (index.later.length) {
+      parts[parts.length - 1] += `（含稍后再买 ${index.later.length} 部）`;
+    }
+    parts.push(`已购买 ${index.bought.length} 部`);
+    const remaining = Math.max(0, dealNumber(index.total) - dealNumber(index.indexed));
+    if (!index.complete && remaining) {
+      parts.push(`语言索引 ${index.indexed}/${index.total}，可稍后继续`);
+    }
+    return parts.join("，");
+  }
+
+  function enrichCartSnapshotItem(item, cartMetadata) {
+    const metadata = cartMetadata.get(String(item.id).toUpperCase()) || {};
+    return {
+      ...metadata,
+      ...item,
+      id: String(item.id).toUpperCase(),
+      price: item.price || metadata.price || 0,
+      // 购物车 DOM 缺少原价时会以当前价占位；结构化接口的
+      // official_price 才能区分“231/330”这类平台 30OFF。
+      officialPrice: metadata.officialPrice || item.officialPrice || item.price || 0,
+      title: item.title || metadata.title || item.id,
+      // 接口的 currency_price.CNY 与精确 JPY 现价同源，优先级高于
+      // 购物车 DOM 中可能同时包含划线原价的“¥”文本。
+      cnyPrice: metadata.cnyPrice || item.cnyPrice || 0,
+    };
+  }
+
+  // 用刚读取的优惠券、购物车/已购清单与本地缓存重建优惠上下文，
+  // 全程复用作品元数据与活动页缓存，不为重算发起额外请求。
+  async function rebuildDealContextFromAccountData() {
+    const cache = loadDealCache();
+    const coupons = groupDealCoupons(
+      Array.isArray(cache.coupons?.raw) ? cache.coupons.raw : [],
+    );
+    const index = loadAccountIndex();
+    const stored = isCartPage(location.href)
+      ? saveCartSnapshot(cartSnapshotFromRoot(document))
+      : loadCartSnapshot();
+    const indexIds = index.loaded
+      ? {
+          active: index.active.map((id) => String(id).toUpperCase()),
+          later: index.later.map((id) => String(id).toUpperCase()),
+        }
+      : null;
+    const storedById = new Map();
+    for (const item of [...(stored.active || []), ...(stored.later || [])]) {
+      const key = String(item?.id || "").toUpperCase();
+      if (key) storedById.set(key, item);
+    }
+    const metadataIds = [...new Set([
+      ...(indexIds ? [...indexIds.active, ...indexIds.later] : []),
+      ...storedById.keys(),
+    ])];
+    const cartMetadata = metadataIds.length
+      ? await ensureProductMetadataBatches(metadataIds)
+      : new Map();
+    const resolveItems = (ids, fallbackItems) => {
+      const source = ids ||
+        fallbackItems.map((item) => String(item.id).toUpperCase());
+      return source
+        .map((id) => storedById.get(id) || { id })
+        .map((item) => enrichCartSnapshotItem(item, cartMetadata));
+    };
+    const cartSnapshot = {
+      ...stored,
+      loaded: Boolean(stored.loaded || indexIds),
+      active: resolveItems(indexIds?.active, stored.active || []),
+      later: resolveItems(indexIds?.later, stored.later || []),
+      updatedAt: Date.now(),
+    };
+    cartSnapshot.products = cartSnapshot.active;
+    const bulkRules = await bulkRuleMapForProducts(cartSnapshot.active);
+    latestDealContext = {
+      coupons,
+      cartSnapshot,
+      bulkRules,
+      partial: !cartSnapshot.loaded,
+    };
+    return latestDealContext;
+  }
+
+  // 作废按旧券/旧购物车算出的 insight，用新上下文重建当前页全部条目。
+  async function recalculateVisibleDealInsights() {
+    const coupons = latestDealContext.coupons || [];
+    const snapshot = latestDealContext.cartSnapshot || {};
+    const cartProducts = snapshot.loaded ? (snapshot.active || []) : [];
+    for (const [id, previous] of [...dealInsightById.entries()]) {
+      const product = previous?.product;
+      if (!product?.id) continue;
+      const usableCoupons = previous.partial
+        ? coupons.filter((coupon) =>
+            ["payment", "id_all"].includes(coupon.conditionType) &&
+            (!coupon.maxPrice || product.price > 0))
+        : coupons;
+      try {
+        await buildInsight(product, usableCoupons, cartProducts, Boolean(previous.partial));
+      } catch (error) {
+        console.warn(`[${APP_NAME}] insight recalc failed for ${id}:`, error);
+      }
+    }
+  }
+
+  function rerenderAccountDealLayouts() {
+    if (isCartPage(location.href)) {
+      for (const item of getCartItems()) {
+        const host = item.querySelector?.(".dltracker-cart-host");
+        const id = extractRjCodeFromCartItem(item);
+        const insight = id
+          ? dealInsightById.get(String(id).toUpperCase())
+          : null;
+        if (host && insight) {
+          renderCartDealLayout(
+            host,
+            browseRecordById.get(String(id).toUpperCase()) || { rjCode: id },
+            insight,
+          );
+        }
+      }
+    }
+    for (const { node, id, cartItem } of collectBrowseCards()) {
+      if (cartItem) continue;
+      const host = node.querySelector?.(".dltracker-browse-analysis-host");
+      const insight = dealInsightById.get(String(id).toUpperCase());
+      if (host && insight) {
+        renderBrowseCardAnalysis(
+          host,
+          browseRecordById.get(String(id).toUpperCase()) || { rjCode: id },
+          insight,
+        );
+      }
+    }
+    if (isProductPage(location.href)) {
+      const matched = location.pathname.match(/product_id\/([RBV]J\d{6,})/i);
+      const id = matched ? matched[1].toUpperCase() : "";
+      const insight = id ? dealInsightById.get(id) : null;
+      const host = findProductRenderHost();
+      if (host && insight) renderDetailInsight(host, insight);
+    }
+  }
+
+  async function recalculateAccountDealInsights() {
+    await rebuildDealContextFromAccountData();
+    await recalculateVisibleDealInsights();
+    rerenderAccountDealLayouts();
+    if (isCartPage(location.href)) await sortBuyLaterItems();
+    else await applyBrowseSortAndFilter();
+    refreshOpenReachDialog();
+    await refreshOpenLanguageDialog();
+    await refreshAllAccountReminders();
+    const filterCards = browseOfferFilterCardsForPage();
+    if (filterCards.length ||
+      document.querySelector(".dltracker-browse-controls")) {
+      syncBrowseOfferFilterButtons(filterCards);
+    }
+    if (document.querySelector(".dltracker-offer-filter-overlay")) {
+      openBrowseOfferFilterDialog();
+    }
+  }
+
+  async function runAccountReadFlow({ manual = true } = {}) {
+    if (accountReadFlowInFlight) return accountReadFlowInFlight;
+    accountReadFabDismissed = false;
+    accountReadStopRequested = false;
+    setAccountReadRuntime({
+      running: true,
+      phase: "coupons",
+      detail: "读取优惠券",
+      summary: "",
+      error: "",
+    });
+    accountReadFlowInFlight = (async () => {
+      let index = loadAccountIndex();
+      let couponCount = null;
+      let failure = null;
+      // 优惠券沿用 ensureDealCoupons 的缓存策略：缓存有效时不再请求接口。
+      try {
+        const raw = await ensureDealCoupons(false);
+        couponCount = Array.isArray(raw) ? raw.length : null;
+        setAccountReadRuntime({
+          detail: Number.isFinite(couponCount)
+            ? `优惠券 ${couponCount} 张`
+            : "读取优惠券",
+        });
+      } catch (error) {
+        console.warn(`[${APP_NAME}] account read coupon stage failed:`, error);
+        setAccountReadRuntime({ detail: "优惠券读取失败，沿用本地缓存" });
+      }
+      if (!accountReadStopRequested) {
+        setAccountReadRuntime({ phase: "account", detail: "" });
+        try {
+          index = await refreshAccountIndex({ manual });
+        } catch (error) {
+          failure = error;
+        }
+      }
+      // 无论读取完成还是被中断，已取到的优惠券与清单都立即生效并参与重算。
+      setAccountReadRuntime({ phase: "recalc", detail: "重算优惠金额" });
+      try {
+        await recalculateAccountDealInsights();
+      } catch (error) {
+        console.warn(`[${APP_NAME}] post-read recalc failed:`, error);
+      }
+      if (failure) {
+        setAccountReadRuntime({
+          running: false,
+          phase: "",
+          detail: "",
+          error: failure instanceof Error ? failure.message : String(failure),
+        });
+        throw failure;
+      }
+      const paused = dealPlainText(index.pausedReason) ||
+        (accountReadStopRequested ? "已手动停止" : "");
+      const summary = `${paused ? "已停止：" : ""}${accountReadResultText(index, couponCount)}`;
+      setAccountReadRuntime({
+        running: false,
+        phase: "",
+        detail: "",
+        summary,
+      });
+      showDealToast(summary, false, 7000);
+      return index;
+    })().finally(() => {
+      accountReadFlowInFlight = null;
+      refreshAccountInformationPanels();
+    });
+    return accountReadFlowInFlight;
+  }
+
+  function ensureAccountReadFab() {
+    if (!isCartPage(location.href)) {
+      document.querySelector(".dltracker-account-fab")?.remove();
+      return;
+    }
+    if (document.querySelector(".dltracker-account-fab")) return;
+    const fab = document.createElement("div");
+    fab.className = "dltracker-account-fab";
+    (document.body || document.documentElement).appendChild(fab);
+    renderAccountReadFab(fab);
+  }
+
+  function renderAccountReadFab(fab) {
+    if (!fab) return;
+    const index = loadAccountIndex();
+    const loggedIn = isDlsiteMemberLoggedIn();
+    const localReading = Boolean(
+      accountReadFlowInFlight || accountIndexRefreshInFlight,
+    );
+    const reading = localReading ||
+      (Boolean(index.indexing) && accountIndexLockIsActive());
+    const cooldown = !reading &&
+      Date.now() - dealNumber(index.lastManualAt) < ACCOUNT_REFRESH_COOLDOWN_MS;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "dltracker-account-fab-button";
+    button.textContent = "读取账号信息";
+    if (!loggedIn) {
+      button.disabled = true;
+      button.title = "未登录 DLsite，无法读取账号信息";
+    } else if (reading) {
+      const progress = index.total ? ` ${index.indexed}/${index.total}` : "";
+      button.textContent = `读取中${progress}…`;
+      button.disabled = true;
+    } else if (cooldown) {
+      const remaining = Math.max(1, Math.ceil(
+        (ACCOUNT_REFRESH_COOLDOWN_MS - dealNumber(index.lastManualAt)) / 1000,
+      ));
+      button.textContent = `读取账号信息（${remaining}秒）`;
+      button.disabled = true;
+      button.title = "请勿频繁读取";
+      setTimeout(() => {
+        if (fab.isConnected) renderAccountReadFab(fab);
+      }, Math.max(100, remaining * 1000 + 50));
+    } else {
+      button.title = "读取优惠券、购物车和已购清单，并重算当前页优惠金额";
+    }
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      button.disabled = true;
+      try {
+        await runAccountReadFlow({ manual: true });
+      } catch (error) {
+        showDealToast(
+          error instanceof Error ? error.message : String(error),
+          true,
+          6000,
+        );
+      } finally {
+        if (fab.isConnected) renderAccountReadFab(fab);
+      }
+    });
+    const children = [];
+    const hasResult = Boolean(
+      accountReadRuntime.summary || accountReadRuntime.error,
+    );
+    if ((reading || hasResult) && !accountReadFabDismissed) {
+      const panel = document.createElement("div");
+      panel.className = "dltracker-account-fab-panel";
+      if (reading) {
+        panel.appendChild(createAccountReadProgressBlock(index));
+      } else {
+        const result = document.createElement("div");
+        result.className = `dltracker-account-fab-result${
+          accountReadRuntime.error ? " is-error" : ""
+        }`;
+        result.textContent = accountReadRuntime.summary ||
+          `读取失败：${accountReadRuntime.error}`;
+        panel.appendChild(result);
+        const close = document.createElement("button");
+        close.type = "button";
+        close.className = "dltracker-account-fab-close";
+        close.textContent = "×";
+        close.setAttribute("aria-label", "关闭读取结果");
+        close.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          accountReadFabDismissed = true;
+          if (fab.isConnected) renderAccountReadFab(fab);
+        });
+        panel.appendChild(close);
+      }
+      children.push(panel);
+    }
+    children.push(button);
+    fab.replaceChildren(...children);
+  }
+
+  function refreshAccountReadFabs() {
+    document.querySelectorAll(".dltracker-account-fab")
+      .forEach(renderAccountReadFab);
   }
 
   function emptyLanguageFamilyCache() {
@@ -6696,13 +7141,16 @@
   function renderAccountInformationPanel(panel) {
     if (!panel) return;
     const index = loadAccountIndex();
-    const reading = Boolean(accountIndexRefreshInFlight) || (
+    const reading = Boolean(
+      accountReadFlowInFlight || accountIndexRefreshInFlight,
+    ) || (
       Boolean(index.indexing) && accountIndexLockIsActive()
     );
     panel.className = "dltracker-account-info-panel";
     const summary = document.createElement("div");
     summary.className = "dltracker-account-info-summary";
     const loadedValues = [
+      ["优惠券", accountCouponSummaryText()],
       ["立即购买", index.active.length],
       ["稍后再买", index.later.length],
       ["已购买", index.bought.length],
@@ -6737,9 +7185,12 @@
     const action = document.createElement("button");
     action.type = "button";
     action.className = "dltracker-account-refresh";
+    const incomplete = index.loaded && !index.complete;
     action.textContent = reading
       ? `读取中 ${index.indexed}/${index.total || "?"}`
-      : "读取购物车和已购清单（请勿频繁读取）";
+      : incomplete
+        ? "继续读取账号信息（优惠券、购物车、已购清单）"
+        : "读取账号信息（优惠券、购物车、已购清单）";
     const cooldown = Date.now() - dealNumber(index.lastManualAt) < ACCOUNT_REFRESH_COOLDOWN_MS;
     action.disabled = reading || cooldown || !isDlsiteMemberLoggedIn();
     if (cooldown && !reading) {
@@ -6755,21 +7206,28 @@
       action.disabled = true;
       action.textContent = "正在读取…";
       try {
-        await refreshAccountIndex({ manual: true });
-        await refreshAllAccountReminders();
-        await refreshOpenLanguageDialog();
+        await runAccountReadFlow({ manual: true });
       } catch (error) {
         showDealToast(error instanceof Error ? error.message : String(error), true, 6000);
       } finally {
         refreshAccountInformationPanels();
       }
     });
+    if (reading) {
+      panel.replaceChildren(
+        summary,
+        createAccountReadProgressBlock(index),
+        action,
+      );
+      return;
+    }
     panel.replaceChildren(summary, action);
   }
 
   function refreshAccountInformationPanels() {
     document.querySelectorAll(".dltracker-account-info-panel")
       .forEach(renderAccountInformationPanel);
+    refreshAccountReadFabs();
   }
 
   function closeAccountInformationDialog() {
@@ -8665,21 +9123,7 @@
         ...(currentProductMatch ? [currentProductMatch[1]] : []),
       ];
       const cartMetadata = await ensureProductMetadataBatches(metadataIds);
-      const enrich = (item) => ({
-        ...(cartMetadata.get(String(item.id).toUpperCase()) || {}),
-        ...item,
-        id: String(item.id).toUpperCase(),
-        price: item.price || cartMetadata.get(String(item.id).toUpperCase())?.price || 0,
-        // 购物车 DOM 缺少原价时会以当前价占位；结构化接口的
-        // official_price 才能区分“231/330”这类平台 30OFF。
-        officialPrice: cartMetadata.get(String(item.id).toUpperCase())?.officialPrice ||
-          item.officialPrice || item.price || 0,
-        title: item.title || cartMetadata.get(String(item.id).toUpperCase())?.title || item.id,
-        // 接口的 currency_price.CNY 与精确 JPY 现价同源，优先级高于
-        // 购物车 DOM 中可能同时包含划线原价的“¥”文本。
-        cnyPrice: cartMetadata.get(String(item.id).toUpperCase())?.cnyPrice ||
-          item.cnyPrice || 0,
-      });
+      const enrich = (item) => enrichCartSnapshotItem(item, cartMetadata);
       const cartSnapshot = {
         ...rawCartSnapshot,
         active: (rawCartSnapshot.active || rawCartSnapshot.products || []).map(enrich),
@@ -10946,6 +11390,7 @@
   function maybeBootstrapForCartMutation(currentUrl) {
     if (!isCartPage(currentUrl)) return false;
     removeStaleCartEnhancements();
+    ensureAccountReadFab();
     const cartSnapshot = cartSnapshotFromRoot(document);
     const nextFingerprint = cartSnapshotFingerprint(cartSnapshot);
     const hadFingerprint = Boolean(lastCartSnapshotFingerprint);
@@ -11054,6 +11499,7 @@
       ".dltracker-cart-host",
       ".dltracker-language-entry-cart",
       ".dltracker-account-reminders",
+      ".dltracker-account-fab",
       ".dltracker-reach-overlay",
     ].join(",")).forEach((node) => node.remove());
     for (const node of document.querySelectorAll([
@@ -11083,6 +11529,8 @@
     }
     injectStyle();
     document.querySelector(".dltracker-deal-planner")?.remove();
+    ensureAccountReadFab();
+    if (isCartPage(url)) refreshAccountReadFabs();
     if (isProductPage(url) || isCartPage(url)) {
       document.querySelector(".dltracker-browse-controls")?.remove();
       for (const node of document.querySelectorAll(".dltracker-browse-filtered-out")) {
@@ -11893,6 +12341,134 @@ a.dltracker-browse-analysis-frame {
 .dltracker-account-refresh {
   align-self: flex-start;
   padding: 6px 10px;
+}
+
+.dltracker-account-progress-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.dltracker-account-progress {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: #e2e9ed;
+  overflow: hidden;
+}
+
+.dltracker-account-progress > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #3f7a99;
+  transition: width 0.25s ease;
+}
+
+.dltracker-account-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dltracker-account-progress-stage {
+  color: #4a5b64;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.dltracker-account-stop {
+  flex: none;
+  min-height: 26px;
+  padding: 3px 12px;
+  border: 1px solid #c49a9a;
+  border-radius: 6px;
+  background: #fff;
+  color: #8a3d3d;
+  cursor: pointer;
+  font: inherit;
+}
+
+.dltracker-account-stop:hover {
+  background: #f9efef;
+}
+
+.dltracker-account-stop:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
+.dltracker-account-fab {
+  position: fixed;
+  right: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  z-index: 2147482000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: min(320px, calc(100vw - 32px));
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.dltracker-account-fab-button {
+  min-height: 38px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 999px;
+  background: #3f6074;
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+}
+
+.dltracker-account-fab-button:hover:not(:disabled) {
+  background: #355367;
+}
+
+.dltracker-account-fab-button:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.dltracker-account-fab-panel {
+  position: relative;
+  width: min(300px, calc(100vw - 32px));
+  padding: 10px 12px;
+  border: 1px solid #ccd8de;
+  border-radius: 10px;
+  background: #fff;
+  color: #34434c;
+  font-size: 12px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.2);
+  box-sizing: border-box;
+}
+
+.dltracker-account-fab-result {
+  padding-right: 20px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.dltracker-account-fab-result.is-error {
+  color: #8a3d3d;
+}
+
+.dltracker-account-fab-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  border: none;
+  background: none;
+  color: #6a7a83;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px;
 }
 
 .dltracker-language-dialog {
@@ -13194,19 +13770,26 @@ a.dltracker-cart-deal-frame:focus-visible {
         const index = loadAccountIndex();
         refreshAccountInformationPanels();
         if (!index.indexing) {
-          void refreshAllAccountReminders()
-            .then(() => refreshOpenLanguageDialog())
-            .catch((error) => {
-              console.warn(`[${APP_NAME}] cross-tab account refresh failed:`, error);
-            });
+          // 另一标签页完成或中断读取后，本页用新缓存重建优惠上下文并重算金额。
+          const stamp = [
+            index.updatedAt,
+            index.loaded,
+            index.complete,
+            index.active.length,
+            index.later.length,
+            index.bought.length,
+          ].join("|");
+          if (stamp !== lastAccountIndexStorageStamp) {
+            lastAccountIndexStorageStamp = stamp;
+            void recalculateAccountDealInsights()
+              .catch((error) => {
+                console.warn(`[${APP_NAME}] cross-tab account refresh failed:`, error);
+              });
+          }
         }
         return;
       }
       if (event.key === ACCOUNT_INDEX_LOCK_STORAGE_KEY && !event.newValue) {
-        const index = loadAccountIndex();
-        if (index.loaded && !index.complete && !index.pausedReason) {
-          scheduleInitialAccountIndex();
-        }
         refreshAccountInformationPanels();
       }
     });

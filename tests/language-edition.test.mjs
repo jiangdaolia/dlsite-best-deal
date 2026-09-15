@@ -409,11 +409,13 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
     functionSource("scheduleInitialAccountIndex"),
     /setTimeout[\s\S]*?void ensureInitialAccountIndex\(\)[\s\S]*?refreshAllAccountReminders/,
   );
-  assert.match(source, /loaded: true,[\s\S]*?total: ids\.length,[\s\S]*?refreshAccountInformationPanels\(\);[\s\S]*?for \(let start = 0; start < ids\.length/);
-  assert.match(source, /start \+= ACCOUNT_METADATA_BATCH_SIZE[\s\S]*?slice\(start, start \+ ACCOUNT_METADATA_BATCH_SIZE\)/);
+  assert.match(source, /loaded: true,[\s\S]*?total: ids\.length,[\s\S]*?refreshAccountInformationPanels\(\);[\s\S]*?for \(let start = 0; start < pendingIds\.length/);
+  assert.match(source, /start \+= ACCOUNT_METADATA_BATCH_SIZE[\s\S]*?pendingIds\.slice\(start, start \+ ACCOUNT_METADATA_BATCH_SIZE\)/);
   assert.match(source, /ids\.length && next\.indexed === 0[\s\S]*?语言索引未取得任何作品信息/);
-  assert.match(source, /requestStrategyChanged = dealNumber\(index\.requestVersion\)[\s\S]*?\(!index\.pausedReason \|\| requestStrategyChanged\)[\s\S]*?return refreshAccountIndex\(\)/);
-  assert.match(source, /if \(requestStrategyChanged\) return refreshAccountIndex\(\)/);
+  // 账号信息只在用户点击时读取：初始加载与断点状态都不再自动发起账号请求。
+  assert.doesNotMatch(functionSource("ensureInitialAccountIndex"), /refreshAccountIndex/);
+  assert.doesNotMatch(functionSource("ensureInitialAccountIndex"), /fetchSameOrigin/);
+  assert.doesNotMatch(functionSource("scheduleInitialAccountIndex"), /refreshAccountIndex|fetchSameOrigin/);
   assert.match(source, /语言索引已暂停：[\s\S]*?剩余\$\{remaining\}项/);
   assert.match(source, /已暂停：\$\{reason\}；剩余\$\{remaining\}项/);
   assert.match(source, /pausedReason: accountIndexSessionStopped \? accountIndexSessionStopReason : ""/);
@@ -480,5 +482,81 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.doesNotMatch(source, /nativeHost\.parentElement\.insertBefore\(entry, nativeHost\)/);
   assert.doesNotMatch(source, /\.dltracker-language-entry-cart\.is-desktop-button\s*\{\s*width:\s*100%/);
   assert.match(source, /\.dltracker-language-entry-cart\.is-mobile-text \.dltracker-language-entry-button,[\s\S]*?border: 0;[\s\S]*?background: transparent;/);
-  assert.match(source, /读取购物车和已购清单（请勿频繁读取）/);
+  assert.match(source, /读取账号信息（优惠券、购物车、已购清单）/);
+});
+
+test("账号读取完全手动：悬浮按钮、差分更新、可中断续接与读后重算", () => {
+  // 购物车页悬浮按钮只在购物车页注入，未登录禁用。
+  assert.match(
+    functionSource("ensureAccountReadFab"),
+    /isCartPage\(location\.href\)[\s\S]*?dltracker-account-fab/,
+  );
+  assert.match(
+    functionSource("renderAccountReadFab"),
+    /未登录 DLsite/,
+  );
+  assert.match(
+    functionSource("renderAccountReadFab"),
+    /runAccountReadFlow\(\{ manual: true \}\)/,
+  );
+  // 手动读取流水线：优惠券走缓存策略，然后读取账号索引，最后重算金额。
+  assert.match(
+    functionSource("runAccountReadFlow"),
+    /ensureDealCoupons\(false\)[\s\S]*?refreshAccountIndex\(\{ manual \}\)[\s\S]*?recalculateAccountDealInsights\(\)/,
+  );
+  assert.match(
+    functionSource("runAccountReadFlow"),
+    /phase: "coupons"[\s\S]*?phase: "account"[\s\S]*?phase: "recalc"/,
+  );
+  // 中断时仍用已读到的数据重算并保留断点。
+  assert.match(
+    functionSource("runAccountReadFlow"),
+    /accountReadStopRequested[\s\S]*?recalculateAccountDealInsights\(\)/,
+  );
+  assert.match(
+    functionSource("runAccountReadFlow"),
+    /已停止：/,
+  );
+  // 停止按钮触发账号会话熔断，断点由 pausedReason 持久化。
+  assert.match(
+    functionSource("requestAccountReadStop"),
+    /stopRequestSession\("account", "已手动停止"\)/,
+  );
+  assert.match(source, /dltracker-account-stop/);
+  // 差分更新：保留仍在清单中的条目，failedIds 重新进入待读队列。
+  assert.match(
+    functionSource("refreshAccountIndex"),
+    /Object\.entries\(retained\.entries \|\| \{\}\)[\s\S]*?retryIds\.has\(id\)[\s\S]*?pendingIds = ids\.filter/,
+  );
+  assert.match(
+    functionSource("refreshAccountIndex"),
+    /indexed: keptCount[\s\S]*?complete: pendingIds\.length === 0/,
+  );
+  // 读后重算：重建 latestDealContext 并覆盖 dealInsightById 旧条目。
+  assert.match(
+    functionSource("rebuildDealContextFromAccountData"),
+    /groupDealCoupons[\s\S]*?latestDealContext = \{[\s\S]*?coupons,[\s\S]*?cartSnapshot,[\s\S]*?bulkRules,/,
+  );
+  assert.match(
+    functionSource("recalculateVisibleDealInsights"),
+    /dealInsightById\.entries\(\)[\s\S]*?buildInsight\(/,
+  );
+  assert.match(
+    functionSource("recalculateAccountDealInsights"),
+    /rerenderAccountDealLayouts\(\)[\s\S]*?sortBuyLaterItems|applyBrowseSortAndFilter/,
+  );
+  assert.match(
+    functionSource("recalculateAccountDealInsights"),
+    /refreshOpenLanguageDialog\(\)[\s\S]*?refreshAllAccountReminders\(\)/,
+  );
+  // 跨标签页读取完成后本页经 storage 事件重算金额。
+  assert.match(
+    source,
+    /event\.key === ACCOUNT_INDEX_STORAGE_KEY[\s\S]*?lastAccountIndexStorageStamp[\s\S]*?recalculateAccountDealInsights\(\)/,
+  );
+  // 面板显示优惠券摘要与进度条。
+  assert.match(
+    functionSource("renderAccountInformationPanel"),
+    /\["优惠券", accountCouponSummaryText\(\)\][\s\S]*?createAccountReadProgressBlock\(index\)/,
+  );
 });
