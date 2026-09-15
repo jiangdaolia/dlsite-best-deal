@@ -479,7 +479,7 @@ test("普通作品卡在标签后使用三框和简洁优惠行", () => {
   assert.match(functionSource("findBrowseTagAnchor"), /\.work_labels/);
   assert.match(hostSource, /anchor\.insertAdjacentElement\("afterend", host\)/);
   assert.match(hostSource, /parent\.appendChild\(host\)/);
-  assert.match(renderSource, /label: "本次可到"/);
+  assert.match(renderSource, /label: "本次"/);
   assert.match(renderSource, /label: "史低"/);
   assert.match(renderSource, /label: "趋势"/);
   assert.match(renderSource, /cartLocalizedMoney\(reachPrice, cnyRate\)/);

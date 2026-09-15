@@ -168,7 +168,7 @@ test("385日元对16.23元时统一使用当页换算比例", () => {
   }]);
 
   assert.ok(Math.abs(rate - 16.23 / 385) < 1e-12);
-  assert.equal(dealMoney(385, rate), "385円｜约16.23元");
+  assert.equal(dealMoney(385, rate), "385円｜16.23元");
 });
 
 test("人民币换算优先当前作品，缺失时才回退购物车样本", () => {
@@ -540,12 +540,12 @@ test("本次可到弹窗原子更新并忽略自身 DOM 变动", () => {
 test("购物车使用五框、两类表格和双入口弹窗", () => {
   const layoutSource = functionSource("renderCartDealLayout");
   const dialogSource = functionSource("renderReachDialog");
-  assert.match(layoutSource, /"本次可到"/);
-  assert.match(layoutSource, /label: "平台折扣"/);
-  assert.match(layoutSource, /label: "史低折扣"/);
+  assert.match(layoutSource, /"本次"/);
+  assert.match(layoutSource, /label: "平台"/);
+  assert.match(layoutSource, /label: "史低"/);
   assert.ok(
-    layoutSource.indexOf('label: "史低折扣"') <
-      layoutSource.indexOf('label: "平台折扣"'),
+    layoutSource.indexOf('label: "史低"') <
+      layoutSource.indexOf('label: "平台"'),
   );
   assert.match(
     layoutSource,
@@ -610,7 +610,7 @@ test("购物车三个价格框使用人民币斜杠日元紧凑格式", () => {
     globalThis.format = cartFrameLocalizedMoney;`,
     moneySandbox,
   );
-  assert.equal(moneySandbox.format(1078, 45.43 / 1078), "约45.43元/1,078円");
+  assert.equal(moneySandbox.format(1078, 45.43 / 1078), "45.43元/1,078円");
   assert.equal(moneySandbox.format(1078), "1,078円");
 });
 

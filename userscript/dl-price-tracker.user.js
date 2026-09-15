@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.65
+// @version      0.6.66
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.65";
+  const APP_VERSION = "0.6.66";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -81,6 +81,9 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.66": [
+      "价格框标签统一为两字并去掉人民币前的约字，节省横向空间",
+    ],
     "0.6.65": [
       "账号读取后的重算阶段明显提速：活动规则并发读取、缓存解析结果复用、循环内不再逐卡渲染",
       "同源请求新增15秒超时，单个挂死请求不再让重算长时间停在97%",
@@ -5637,7 +5640,7 @@
   function dealMoney(value, cnyRate = null) {
     const yen = toYen(value);
     return Number.isFinite(cnyRate) && cnyRate > 0
-      ? `${yen}｜约${(Math.round(value) * cnyRate).toFixed(2)}元`
+      ? `${yen}｜${(Math.round(value) * cnyRate).toFixed(2)}元`
       : yen;
   }
 
@@ -6375,7 +6378,7 @@
   function recommendationMoneyLines(value, cnyRate = null) {
     const yen = toYen(value);
     return Number.isFinite(cnyRate) && cnyRate > 0
-      ? [`约${(Math.round(value) * cnyRate).toFixed(2)}元/${yen}`]
+      ? [`${(Math.round(value) * cnyRate).toFixed(2)}元/${yen}`]
       : [yen];
   }
 
@@ -7205,7 +7208,7 @@
       className: comparable && reachPrice <= lowestPrice
         ? "dltracker-browse-analysis-best"
         : "",
-      label: "本次可到",
+      label: "本次",
       value: insight && Number.isFinite(reachPrice)
         ? cartLocalizedMoney(reachPrice, cnyRate)
         : "读取中",
@@ -8690,7 +8693,7 @@
     const rounded = Math.round(yenValue);
     const yen = toYen(rounded);
     return Number.isFinite(cnyRate) && cnyRate > 0
-      ? `约${(rounded * cnyRate).toFixed(2)}元（${yen}）`
+      ? `${(rounded * cnyRate).toFixed(2)}元（${yen}）`
       : yen;
   }
 
@@ -8700,7 +8703,7 @@
     const rounded = Math.round(yenValue);
     const yen = toYen(rounded);
     return Number.isFinite(cnyRate) && cnyRate > 0
-      ? `约${(rounded * cnyRate).toFixed(2)}元/${yen}`
+      ? `${(rounded * cnyRate).toFixed(2)}元/${yen}`
       : yen;
   }
 
@@ -8897,7 +8900,7 @@
     if (!insight) {
       grid.appendChild(createCartDealPriceFrame({
         className: "dltracker-cart-reach",
-        label: "本次可到",
+        label: "本次",
         price: "价格读取中",
         rate: null,
       }));
@@ -8910,7 +8913,7 @@
             ? "dltracker-best-reach-gold"
             : "",
         ].filter(Boolean).join(" "),
-        label: insight.partial ? "当前已知可到" : "本次可到",
+        label: "本次",
         price: cartFrameLocalizedMoney(reachPrice, cnyRate),
         rate: insight.bestReach.totalRate,
         onActivate: () => openReachDialog(insight, record.lowestPrice, "price"),
@@ -8932,7 +8935,7 @@
     }
     grid.appendChild(createCartDealPriceFrame({
       className: historyClassNames.join(" "),
-      label: "史低折扣",
+      label: "史低",
       price: !insight
         ? "价格读取中"
         : Number.isFinite(record.lowestPrice)
@@ -8942,7 +8945,7 @@
     }));
     grid.appendChild(createCartDealPriceFrame({
       className: "dltracker-cart-platform",
-      label: "平台折扣",
+      label: "平台",
       price: insight
         ? cartFrameLocalizedMoney(insight.product.price, cnyRate)
         : "价格读取中",
@@ -9000,7 +9003,7 @@
     badge.setAttribute("aria-label", "查看本次可到的计算说明");
     const text = document.createElement("span");
     text.className = "dltracker-chip-text";
-    const label = insight?.partial ? "当前已知可到" : "本次可到";
+    const label = "本次";
     text.textContent = Number.isFinite(price)
       ? `${label} ${toYen(price)}`
       : label;
@@ -11276,9 +11279,9 @@
       const grid = document.createElement("div");
       grid.className = "dltracker-cart-deal-grid";
       [
-        ["本次可到", "dltracker-cart-reach"],
-        ["史低折扣", "dltracker-cart-history"],
-        ["平台折扣", "dltracker-cart-platform"],
+        ["本次", "dltracker-cart-reach"],
+        ["史低", "dltracker-cart-history"],
+        ["平台", "dltracker-cart-platform"],
       ].forEach(([label, className]) => {
         grid.appendChild(createCartDealPriceFrame({
           className,
