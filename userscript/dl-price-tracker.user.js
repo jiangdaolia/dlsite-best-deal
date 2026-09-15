@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.64
+// @version      0.6.65
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.64";
+  const APP_VERSION = "0.6.65";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -31,8 +31,10 @@
   const BATCH_SIZE = 10;
   const BATCH_INTERVAL_MS = 1000;
   const REQUEST_TIMEOUT_MS = 10000;
+  const SAME_ORIGIN_TIMEOUT_MS = 15000;
   const CART_RENDER_CONCURRENCY = 4;
   const BROWSE_RENDER_CONCURRENCY = 4;
+  const BULK_RULE_FETCH_CONCURRENCY = 3;
   const RETRYABLE_FETCH_ATTEMPTS = 1;
   const RETRY_BASE_DELAY_MS = 450;
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -79,6 +81,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.65": [
+      "账号读取后的重算阶段明显提速：活动规则并发读取、缓存解析结果复用、循环内不再逐卡渲染",
+      "同源请求新增15秒超时，单个挂死请求不再让重算长时间停在97%",
+      "重算阶段显示读取活动规则、重建优惠分析等子进度，停止键在该阶段同样生效",
+    ],
     "0.6.64": [
       "购物车页新增「读取账号信息」悬浮按钮，带进度条并可随时停止",
       "账号信息改为完全手动读取与差分更新，页面加载不再自动读取账号数据",
@@ -2161,21 +2168,32 @@
     };
   }
 
+  // 记忆化解析结果：raw 字符串相同直接复用同一对象，raw 变了才重新 JSON.parse。
+  // 复用同一对象还能让并发的 bulkRules/metadata 写入互相可见，避免同页丢失更新。
+  let dealCacheMemo = { raw: null, value: null };
+
   function loadDealCache() {
     try {
-      const parsed = JSON.parse(localStorage.getItem(DEAL_CACHE_STORAGE_KEY) || "null");
-      if (!parsed || typeof parsed !== "object") return emptyDealCache();
-      return {
-        ...emptyDealCache(),
-        ...parsed,
-        coupons: { ...emptyDealCache().coupons, ...(parsed.coupons || {}) },
-        metadata: parsed.metadata && typeof parsed.metadata === "object"
-          ? parsed.metadata
-          : {},
-        bulkRules: parsed.bulkRules && typeof parsed.bulkRules === "object"
-          ? parsed.bulkRules
-          : {},
-      };
+      const raw = localStorage.getItem(DEAL_CACHE_STORAGE_KEY) || "null";
+      if (dealCacheMemo.value && dealCacheMemo.raw === raw) {
+        return dealCacheMemo.value;
+      }
+      const parsed = JSON.parse(raw);
+      const value = !parsed || typeof parsed !== "object"
+        ? emptyDealCache()
+        : {
+            ...emptyDealCache(),
+            ...parsed,
+            coupons: { ...emptyDealCache().coupons, ...(parsed.coupons || {}) },
+            metadata: parsed.metadata && typeof parsed.metadata === "object"
+              ? parsed.metadata
+              : {},
+            bulkRules: parsed.bulkRules && typeof parsed.bulkRules === "object"
+              ? parsed.bulkRules
+              : {},
+          };
+      dealCacheMemo = { raw, value };
+      return value;
     } catch {
       return emptyDealCache();
     }
@@ -2183,7 +2201,9 @@
 
   function saveDealCache(cache) {
     try {
-      localStorage.setItem(DEAL_CACHE_STORAGE_KEY, JSON.stringify(cache));
+      const serialized = JSON.stringify(cache);
+      localStorage.setItem(DEAL_CACHE_STORAGE_KEY, serialized);
+      dealCacheMemo = { raw: serialized, value: cache };
     } catch (error) {
       console.warn(`[${APP_NAME}] deal cache write failed:`, error);
     }
@@ -2245,24 +2265,46 @@
   async function fetchSameOriginText(
     url,
     label,
-    { anonymous = false, requestSession = "deal" } = {},
+    { anonymous = false, requestSession = "deal", timeoutMs = SAME_ORIGIN_TIMEOUT_MS } = {},
   ) {
     if (requestSessionStopped(requestSession)) {
       throw new Error(`${label}请求已因风控信号停止`);
     }
+    const timeout = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+      ? Number(timeoutMs)
+      : SAME_ORIGIN_TIMEOUT_MS;
+    const controller = typeof AbortController === "function"
+      ? new AbortController()
+      : null;
+    let abortTimer = null;
+    // 单一截止点同时覆盖连接与响应体读取：挂死的请求最多等待 timeout 后放弃。
+    const deadline = new Promise((_, reject) => {
+      abortTimer = setTimeout(() => {
+        try { controller?.abort(); } catch { /* noop */ }
+        reject(new Error(`请求超时（${Math.round(timeout / 1000)}秒）`));
+      }, timeout);
+    });
     let response;
+    let text;
     try {
-      response = await fetch(url, {
+      const request = fetch(url, {
         credentials: anonymous ? "omit" : "include",
         ...(anonymous ? { referrerPolicy: "no-referrer" } : {}),
         headers: { Accept: "application/json, text/html;q=0.9" },
+        ...(controller ? { signal: controller.signal } : {}),
       });
+      request.catch(() => {});
+      response = await Promise.race([request, deadline]);
+      const body = response.text();
+      body.catch(() => {});
+      text = await Promise.race([body, deadline]);
     } catch (error) {
       const reason = `${label}请求失败：${error instanceof Error ? error.message : String(error)}`;
       if (requestSession === "account") stopRequestSession("account", reason);
       throw new Error(reason);
+    } finally {
+      clearTimeout(abortTimer);
     }
-    const text = await response.text();
     if (response.status === 403 || response.status === 429) {
       stopRequestSession(requestSession, `${label} HTTP ${response.status}`);
       throw new Error(`${label}返回 HTTP ${response.status}`);
@@ -2461,7 +2503,8 @@
         options,
       );
       for (const [id, product] of batch.entries()) result.set(id, product);
-      if (requestSessionStopped(options.requestSession)) break;
+      if (requestSessionStopped(options.requestSession) ||
+        options.shouldStop?.()) break;
     }
     return result;
   }
@@ -2661,21 +2704,30 @@
     };
   }
 
+  let accountIndexMemo = { raw: null, value: null };
+
   function loadAccountIndex() {
     try {
-      const parsed = JSON.parse(localStorage.getItem(ACCOUNT_INDEX_STORAGE_KEY) || "null");
-      if (!parsed || typeof parsed !== "object") return emptyAccountIndex();
-      return {
-        ...emptyAccountIndex(),
-        ...parsed,
-        active: Array.isArray(parsed.active) ? parsed.active : [],
-        later: Array.isArray(parsed.later) ? parsed.later : [],
-        bought: Array.isArray(parsed.bought) ? parsed.bought : [],
-        entries: parsed.entries && typeof parsed.entries === "object"
-          ? parsed.entries
-          : {},
-        failedIds: Array.isArray(parsed.failedIds) ? parsed.failedIds : [],
-      };
+      const raw = localStorage.getItem(ACCOUNT_INDEX_STORAGE_KEY) || "null";
+      if (accountIndexMemo.value && accountIndexMemo.raw === raw) {
+        return accountIndexMemo.value;
+      }
+      const parsed = JSON.parse(raw);
+      const value = !parsed || typeof parsed !== "object"
+        ? emptyAccountIndex()
+        : {
+            ...emptyAccountIndex(),
+            ...parsed,
+            active: Array.isArray(parsed.active) ? parsed.active : [],
+            later: Array.isArray(parsed.later) ? parsed.later : [],
+            bought: Array.isArray(parsed.bought) ? parsed.bought : [],
+            entries: parsed.entries && typeof parsed.entries === "object"
+              ? parsed.entries
+              : {},
+            failedIds: Array.isArray(parsed.failedIds) ? parsed.failedIds : [],
+          };
+      accountIndexMemo = { raw, value };
+      return value;
     } catch {
       return emptyAccountIndex();
     }
@@ -2697,7 +2749,9 @@
     while (metadata.length) {
       removed += metadata.splice(0, Math.min(20, metadata.length)).length;
       cache.metadata = Object.fromEntries(metadata);
-      localStorage.setItem(DEAL_CACHE_STORAGE_KEY, JSON.stringify(cache));
+      const serializedCache = JSON.stringify(cache);
+      localStorage.setItem(DEAL_CACHE_STORAGE_KEY, serializedCache);
+      dealCacheMemo = { raw: serializedCache, value: cache };
       try {
         localStorage.setItem(ACCOUNT_INDEX_STORAGE_KEY, serializedIndex);
         console.warn(
@@ -2715,11 +2769,15 @@
     const serialized = JSON.stringify(index);
     try {
       localStorage.setItem(ACCOUNT_INDEX_STORAGE_KEY, serialized);
+      accountIndexMemo = { raw: serialized, value: index };
     } catch (error) {
       let writeError = error;
       if (storageQuotaExceeded(error)) {
         try {
-          if (retryAccountIndexWriteAfterMetadataPrune(serialized)) return index;
+          if (retryAccountIndexWriteAfterMetadataPrune(serialized)) {
+            accountIndexMemo = { raw: serialized, value: index };
+            return index;
+          }
         } catch (recoveryError) {
           writeError = recoveryError;
         }
@@ -2838,23 +2896,45 @@
     if (accountIndexSessionStopped) {
       throw new Error("账号索引请求已因风控信号停止");
     }
+    const { timeoutMs = SAME_ORIGIN_TIMEOUT_MS, ...init } = options;
+    const timeout = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+      ? Number(timeoutMs)
+      : SAME_ORIGIN_TIMEOUT_MS;
+    const controller = typeof AbortController === "function"
+      ? new AbortController()
+      : null;
+    let abortTimer = null;
+    const deadline = new Promise((_, reject) => {
+      abortTimer = setTimeout(() => {
+        try { controller?.abort(); } catch { /* noop */ }
+        reject(new Error(`请求超时（${Math.round(timeout / 1000)}秒）`));
+      }, timeout);
+    });
     let response;
+    let text;
     try {
-      response = await fetch(url, {
+      const request = fetch(url, {
         credentials: "include",
         headers: {
           Accept: "application/json",
           "X-Requested-With": "XMLHttpRequest",
-          ...(options.headers || {}),
+          ...(init.headers || {}),
         },
-        ...options,
+        ...(controller ? { signal: controller.signal } : {}),
+        ...init,
       });
+      request.catch(() => {});
+      response = await Promise.race([request, deadline]);
+      const body = response.text();
+      body.catch(() => {});
+      text = await Promise.race([body, deadline]);
     } catch (error) {
       const reason = `${label}请求失败：${error instanceof Error ? error.message : String(error)}`;
       stopRequestSession("account", reason);
       throw new Error(reason);
+    } finally {
+      clearTimeout(abortTimer);
     }
-    const text = await response.text();
     if (response.status === 403 || response.status === 429) {
       stopRequestSession("account", `${label} HTTP ${response.status}`);
       throw new Error(`${label}返回 HTTP ${response.status}`);
@@ -3275,7 +3355,8 @@
       case "metadata":
         return total ? Math.min(0.95, 0.35 + 0.6 * (indexed / total)) : 0.6;
       case "recalc":
-        return 0.97;
+        return 0.95 + 0.04 * Math.max(0, Math.min(1,
+          dealNumber(accountReadRuntime.recalcFraction, 0)));
       default:
         if (index?.indexing || accountReadRuntime.running) {
           return total ? Math.min(0.95, indexed / total || 0.1) : 0.3;
@@ -3288,7 +3369,9 @@
     if (accountReadRuntime.phase === "coupons") {
       return accountReadRuntime.detail || "读取优惠券";
     }
-    if (accountReadRuntime.phase === "recalc") return "重算优惠金额";
+    if (accountReadRuntime.phase === "recalc") {
+      return accountReadRuntime.detail || "重算优惠金额";
+    }
     return dealPlainText(index?.stage) || accountReadRuntime.detail ||
       (index?.indexing ? "另一个页面正在读取账号信息…" : "正在读取账号信息…");
   }
@@ -3381,7 +3464,9 @@
       ...storedById.keys(),
     ])];
     const cartMetadata = metadataIds.length
-      ? await ensureProductMetadataBatches(metadataIds)
+      ? await ensureProductMetadataBatches(metadataIds, {
+          shouldStop: () => accountReadStopRequested,
+        })
       : new Map();
     const resolveItems = (ids, fallbackItems) => {
       const source = ids ||
@@ -3398,22 +3483,56 @@
       updatedAt: Date.now(),
     };
     cartSnapshot.products = cartSnapshot.active;
-    const bulkRules = await bulkRuleMapForProducts(cartSnapshot.active);
+    // 活动规则一次并发查好：除购物车外，还要覆盖页面上已有 insight 的作品，
+    // 否则重算循环会对缓存未命中的 key 再串行补读。
+    const ruleProducts = [...cartSnapshot.active];
+    const seenRuleKeys = new Set(
+      ruleProducts.map((item) => String(item?.bulkbuyKey || "")),
+    );
+    for (const insight of dealInsightById.values()) {
+      const key = String(insight?.product?.bulkbuyKey || "");
+      if (key && !seenRuleKeys.has(key)) {
+        seenRuleKeys.add(key);
+        ruleProducts.push(insight.product);
+      }
+    }
+    const bulkRuleAttempts = new Set();
+    const bulkRules = await bulkRuleMapForProducts(ruleProducts, {
+      attemptedKeys: bulkRuleAttempts,
+      shouldStop: () => accountReadStopRequested,
+      onProgress: (done, total) => setAccountReadRuntime({
+        detail: `读取活动规则 ${done}/${total}`,
+        recalcFraction: total ? 0.4 * (done / total) : 0,
+      }),
+    });
     latestDealContext = {
       coupons,
       cartSnapshot,
       bulkRules,
+      bulkRuleAttempts,
       partial: !cartSnapshot.loaded,
     };
     return latestDealContext;
   }
 
   // 作废按旧券/旧购物车算出的 insight，用新上下文重建当前页全部条目。
+  // 循环内只算不渲染（deferRender），统一由 rerenderAccountDealLayouts 收尾。
   async function recalculateVisibleDealInsights() {
     const coupons = latestDealContext.coupons || [];
     const snapshot = latestDealContext.cartSnapshot || {};
     const cartProducts = snapshot.loaded ? (snapshot.active || []) : [];
-    for (const [id, previous] of [...dealInsightById.entries()]) {
+    const bulkRules = latestDealContext.bulkRules instanceof Map
+      ? latestDealContext.bulkRules
+      : new Map();
+    const attemptedKeys = latestDealContext.bulkRuleAttempts instanceof Set
+      ? latestDealContext.bulkRuleAttempts
+      : null;
+    const entries = [...dealInsightById.entries()];
+    const total = entries.length;
+    let done = 0;
+    for (const [id, previous] of entries) {
+      if (accountReadStopRequested) break;
+      done += 1;
       const product = previous?.product;
       if (!product?.id) continue;
       const usableCoupons = previous.partial
@@ -3421,10 +3540,29 @@
             ["payment", "id_all"].includes(coupon.conditionType) &&
             (!coupon.maxPrice || product.price > 0))
         : coupons;
+      const buildOptions = { deferRender: true };
+      const key = String(product.bulkbuyKey || "");
+      // 已尝试过的 key 显式传入结果（含 null），避免每条 insight 再进 ensureBulkRule。
+      if (key && attemptedKeys?.has(key)) {
+        buildOptions.bulkRule = bulkRules.get(key) || null;
+      }
       try {
-        await buildInsight(product, usableCoupons, cartProducts, Boolean(previous.partial));
+        await buildInsight(
+          product,
+          usableCoupons,
+          cartProducts,
+          Boolean(previous.partial),
+          buildOptions,
+        );
       } catch (error) {
         console.warn(`[${APP_NAME}] insight recalc failed for ${id}:`, error);
+      }
+      if (done % 15 === 0 || done === total) {
+        setAccountReadRuntime({
+          detail: `重建优惠分析 ${done}/${total}`,
+          recalcFraction: 0.4 + 0.4 * (done / Math.max(1, total)),
+        });
+        await sleep(0);
       }
     }
   }
@@ -3468,13 +3606,21 @@
   }
 
   async function recalculateAccountDealInsights() {
+    const recalcStep = (detail, recalcFraction) =>
+      setAccountReadRuntime({ detail, recalcFraction });
+    recalcStep("重建优惠上下文", 0);
     await rebuildDealContextFromAccountData();
-    await recalculateVisibleDealInsights();
+    if (!accountReadStopRequested) await recalculateVisibleDealInsights();
+    // 无论是否被停止，已完成的计算都统一渲染一遍，让用户看到已算出的结果。
+    recalcStep("渲染优惠布局", 0.8);
     rerenderAccountDealLayouts();
+    if (accountReadStopRequested) return;
     if (isCartPage(location.href)) await sortBuyLaterItems();
     else await applyBrowseSortAndFilter();
     refreshOpenReachDialog();
     await refreshOpenLanguageDialog();
+    if (accountReadStopRequested) return;
+    recalcStep("刷新账号提醒", 0.9);
     await refreshAllAccountReminders();
     const filterCards = browseOfferFilterCardsForPage();
     if (filterCards.length ||
@@ -3484,6 +3630,7 @@
     if (document.querySelector(".dltracker-offer-filter-overlay")) {
       openBrowseOfferFilterDialog();
     }
+    recalcStep("", 1);
   }
 
   async function runAccountReadFlow({ manual = true } = {}) {
@@ -3523,7 +3670,11 @@
         }
       }
       // 无论读取完成还是被中断，已取到的优惠券与清单都立即生效并参与重算。
-      setAccountReadRuntime({ phase: "recalc", detail: "重算优惠金额" });
+      setAccountReadRuntime({
+        phase: "recalc",
+        detail: "重算优惠金额",
+        recalcFraction: 0,
+      });
       try {
         await recalculateAccountDealInsights();
       } catch (error) {
@@ -3534,6 +3685,7 @@
           running: false,
           phase: "",
           detail: "",
+          recalcFraction: 0,
           error: failure instanceof Error ? failure.message : String(failure),
         });
         throw failure;
@@ -3545,12 +3697,14 @@
         running: false,
         phase: "",
         detail: "",
+        recalcFraction: 0,
         summary,
       });
       showDealToast(summary, false, 7000);
       return index;
     })().finally(() => {
       accountReadFlowInFlight = null;
+      accountReadStopRequested = false;
       refreshAccountInformationPanels();
     });
     return accountReadFlowInFlight;
@@ -4950,6 +5104,21 @@
     stampBrowseOriginalOrder(cards);
     const mode = getBrowseSortMode();
     const filters = getBrowseOfferFilters();
+    const needPriceRecords = cards.some(({ id }) =>
+      /^[RB]J/i.test(id) && !browseRecordById.get(String(id).toUpperCase()));
+    const priceRecords = new Map();
+    if (needPriceRecords) {
+      try {
+        for (const record of await listPriceRecords()) {
+          if (record?.rjCode) {
+            priceRecords.set(String(record.rjCode).toUpperCase(), record);
+          }
+        }
+      } catch (error) {
+        console.warn(`[${APP_NAME}] price records bulk read failed:`, error);
+      }
+    }
+    if (accountReadStopRequested) return;
     const grouped = new Map();
     for (const { id, node } of cards) {
       const insight = dealInsightById.get(String(id).toUpperCase());
@@ -4959,7 +5128,9 @@
       const parent = node.parentElement;
       if (!parent) continue;
       const record = browseRecordById.get(String(id).toUpperCase()) ||
-        (/^[RB]J/i.test(id) ? await getPriceRecord(String(id).toUpperCase()) : null);
+        (/^[RB]J/i.test(id)
+          ? priceRecords.get(String(id).toUpperCase()) || null
+          : null);
       const order = dealNumber(node.dataset.dltrackerBrowseOrder, 0);
       const reachRank = dealNumber(insight?.bestReach?.totalRate, -1);
       const entry = {
@@ -5470,17 +5641,42 @@
       : yen;
   }
 
-  async function bulkRuleMapForProducts(products) {
+  // 活动页请求按 BULK_RULE_FETCH_CONCURRENCY 并发；attemptedKeys 记录实际
+  // 尝试过的 key（含失败），shouldStop/onProgress 供重算流水线停止与汇报。
+  async function bulkRuleMapForProducts(products, options = {}) {
+    const attemptedKeys = options.attemptedKeys instanceof Set
+      ? options.attemptedKeys
+      : null;
+    const shouldStop = typeof options.shouldStop === "function"
+      ? options.shouldStop
+      : () => false;
+    const onProgress = typeof options.onProgress === "function"
+      ? options.onProgress
+      : null;
     const rules = new Map();
     const seen = new Set();
+    const queue = [];
     for (const product of Array.isArray(products) ? products : []) {
       const key = String(product?.bulkbuyKey || "");
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      const insightRule = dealInsightById.get(String(product.id || "").toUpperCase())?.bulkRule;
-      const rule = insightRule || await ensureBulkRule(product);
-      if (rule) rules.set(key, rule);
+      queue.push({ key, product });
     }
+    let finished = 0;
+    await mapWithConcurrency(
+      queue,
+      BULK_RULE_FETCH_CONCURRENCY,
+      async ({ key, product }) => {
+        if (shouldStop() || requestSessionStopped()) return;
+        attemptedKeys?.add(key);
+        const insightRule = dealInsightById.get(
+          String(product.id || "").toUpperCase())?.bulkRule;
+        const rule = insightRule || await ensureBulkRule(product);
+        if (rule) rules.set(key, rule);
+        finished += 1;
+        onProgress?.(finished, queue.length);
+      },
+    );
     return rules;
   }
 
@@ -7564,7 +7760,9 @@
     const context = createAccountReminderContext({ cacheOnly: true });
     if (!context.index.loaded) return;
     await mapWithConcurrency(cards, BROWSE_RENDER_CONCURRENCY, ({ node, id }) =>
-      renderAccountReminderForCard(node, id, context));
+      accountReadStopRequested
+        ? null
+        : renderAccountReminderForCard(node, id, context));
   }
 
   function languageDetailUrl(parentId, childId = "") {
@@ -8894,7 +9092,9 @@
         Boolean(product?.bulkbuyKey && !bulkRule),
     };
     dealInsightById.set(product.id, insight);
-    refreshHistoryReachBadges(product.id);
+    if (!buildOptions.deferRender) {
+      refreshHistoryReachBadges(product.id);
+    }
     return insight;
   }
 
@@ -10213,13 +10413,27 @@
     }
     const sortMode = getBuyLaterSortMode();
 
+    const priceRecords = new Map();
+    try {
+      for (const record of await listPriceRecords()) {
+        if (record?.rjCode) {
+          priceRecords.set(String(record.rjCode).toUpperCase(), record);
+        }
+      }
+    } catch (error) {
+      console.warn(`[${APP_NAME}] price records bulk read failed:`, error);
+    }
+
+    if (accountReadStopRequested) return;
     const grouped = new Map();
     for (const owner of ownerItems) {
       const parent = owner.parentElement;
       if (!parent) continue;
 
       const rjCode = extractRjCodeFromCartItem(owner);
-      const record = rjCode ? await getPriceRecord(rjCode) : null;
+      const record = rjCode
+        ? priceRecords.get(String(rjCode).toUpperCase()) || null
+        : null;
       const insight = rjCode
         ? dealInsightById.get(String(rjCode).toUpperCase())
         : null;
