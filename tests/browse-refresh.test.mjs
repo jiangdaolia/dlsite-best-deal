@@ -76,7 +76,7 @@ test("具体优惠券和平台活动按优惠力度降序且同力度稳定", ()
   );
   assert.match(
     functionSource("browseOfferFilterChoices"),
-    /compactCouponFilterLabel/,
+    /compactCouponBenefitLabel/,
   );
   assert.match(
     functionSource("browseOfferFilterChoices"),
