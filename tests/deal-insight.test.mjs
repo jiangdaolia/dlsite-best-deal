@@ -51,6 +51,7 @@ vm.runInNewContext(
     compactCouponListLabel,
     compactCouponContentName,
     compactCouponFilterLabel,
+    couponCategoryLabel,
     bestReachColorClass,
     campaignEndFromHtml,
     bulkRuleIsActive,
@@ -82,6 +83,7 @@ const {
   compactCouponListLabel,
   compactCouponContentName,
   compactCouponFilterLabel,
+  couponCategoryLabel,
   bestReachColorClass,
   campaignEndFromHtml,
   bulkRuleIsActive,
@@ -493,4 +495,21 @@ test("筛选优惠券显示DLsite券名中的内容类别和真实优惠形式",
     minCount: 3,
     maxDiscount: 0,
   }), "漫画作品优惠券｜50OFF·3部起用");
+});
+
+test("优惠券类别标签优先取站点限制，未收录分区码原样大写", () => {
+  assert.equal(couponCategoryLabel({
+    siteIds: ["comic"],
+    distributeTargets: ["maniax"],
+  }), "漫画");
+  assert.equal(couponCategoryLabel({
+    distributeTargets: ["girls", "maniax", "girls-pro"],
+  }), "女性向/同人");
+  assert.equal(couponCategoryLabel({
+    distributeTargets: ["appx", "pro", "comic", "bl"],
+  }), "手机游戏/游戏/漫画+1");
+  assert.equal(couponCategoryLabel({
+    distributeTargets: ["new-site-2027"],
+  }), "NEWSITE2027");
+  assert.equal(couponCategoryLabel({}), "");
 });

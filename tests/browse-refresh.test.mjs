@@ -78,6 +78,10 @@ test("具体优惠券和平台活动按优惠力度降序且同力度稳定", ()
     functionSource("browseOfferFilterChoices"),
     /compactCouponFilterLabel/,
   );
+  assert.match(
+    functionSource("browseOfferFilterChoices"),
+    /couponCategoryLabel/,
+  );
 });
 
 test("浏览排序控件已在原生排序区后方时不重复插入自身", () => {

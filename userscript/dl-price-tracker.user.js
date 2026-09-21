@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.67
+// @version      0.6.68
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.67";
+  const APP_VERSION = "0.6.68";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -81,6 +81,9 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.68": [
+      "优惠券筛选项标注券的分区类别（同人、漫画、游戏、手机游戏、AI生成、女性向等），与官网券列表筛选口径一致",
+    ],
     "0.6.67": [
       "所有价格框统一为「标签 人民币/日元 NNOFF」格式，史低与本次徽章补齐人民币金额",
       "部分优惠未确认会标明具体缺失的数据（优惠券、购物车快照、作品信息或平台活动）",
@@ -5213,9 +5216,10 @@
         progress.push(`${activeSubtotal >= coupon.minSpend ? "已满" : "已有"}${Math.round(activeSubtotal).toLocaleString("ja-JP")}/${Math.round(coupon.minSpend).toLocaleString("ja-JP")}円`);
       }
       if (!progress.length) progress.push("无门槛");
+      const category = couponCategoryLabel(coupon);
       offerOptions.push({
         value,
-        label: `优惠券｜${compactCouponFilterLabel({
+        label: `优惠券${category ? `·${category}` : ""}｜${compactCouponFilterLabel({
           ...coupon,
           equivalentRate: rate,
         })}｜${progress.join("＋")}`,
@@ -5657,6 +5661,44 @@
     if (types.has("MUS")) categories.push("音乐");
     if (types.has("MOV")) categories.push("视频");
     return categories.length ? `${categories.join("/")}券` : names[0] || "优惠券";
+  }
+
+  // 与官网券列表筛选项对应的站点分区；未收录的码原样大写显示，
+  // 便于发现 DLsite 新增分区而不至于静默丢失。
+  const COUPON_SITE_CATEGORY_LABELS = {
+    maniax: "同人",
+    home: "全年龄",
+    comic: "漫画",
+    books: "漫画",
+    pro: "游戏",
+    app: "手机游戏",
+    appx: "手机游戏",
+    girls: "女性向",
+    girlspro: "女性向",
+    girlsdrama: "女性向",
+    bl: "女性向",
+    blpro: "女性向",
+    bldrama: "女性向",
+    soft: "软件",
+    eng: "英文",
+    ai: "AI生成",
+  };
+
+  function couponCategoryLabel(coupon) {
+    const siteIds = Array.isArray(coupon?.siteIds) ? coupon.siteIds : [];
+    const distributed = Array.isArray(coupon?.distributeTargets)
+      ? coupon.distributeTargets
+      : [];
+    const labels = [];
+    for (const code of siteIds.length ? siteIds : distributed) {
+      const key = dealNormalizedSite(code);
+      if (!key) continue;
+      const label = COUPON_SITE_CATEGORY_LABELS[key] || key.toUpperCase();
+      if (!labels.includes(label)) labels.push(label);
+    }
+    const shown = labels.slice(0, 3);
+    const rest = labels.length - shown.length;
+    return `${shown.join("/")}${rest > 0 ? `+${rest}` : ""}`;
   }
 
   function compactCouponFilterLabel(option) {
