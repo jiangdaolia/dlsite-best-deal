@@ -426,6 +426,11 @@ test("DLsite已购买作品页不追加任何助手界面或操作", () => {
     startSource.indexOf("if (isPurchasedWorksPage(location.href)) return") <
       startSource.indexOf("injectStyle()"),
   );
+  // 委托点击监听必须先于 bootstrap 安装：初始化挂起或失败时按钮仍要可用。
+  assert.ok(
+    startSource.indexOf("installDealEventListeners()") <
+      startSource.indexOf("await bootstrap()"),
+  );
   assert.match(
     functionSource("bootstrap"),
     /if \(isPurchasedWorksPage\(url\)\) \{\s*clearTrackerPresentation\(\);\s*return;\s*\}\s*injectStyle\(\);/,

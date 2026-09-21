@@ -473,7 +473,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /concreteCartProductId\(item\) === target/);
   assert.match(source, /确认从购物车永久移出【\$\{row\.language\}】版本吗/);
   assert.match(source, /saveLanguageDialogRestoreState\(openLanguageDialogState\);\s*location\.reload\(\)/);
-  assert.match(source, /await restoreLanguageDialogAfterReload\(\{ deferRender: true \}\);\s*await bootstrap\(\)/);
+  assert.match(source, /await restoreLanguageDialogAfterReload\(\{ deferRender: true \}\);[\s\S]*?await bootstrap\(\)/);
   assert.match(source, /const initialRender = !state\.rows\.length \|\| !body\.firstElementChild;\s*if \(initialRender\) body\.textContent/);
   assert.match(source, /button\.style\.inlineSize = `\$\{rect\.width\}px`;\s*button\.style\.blockSize = `\$\{rect\.height\}px`;/);
   assert.match(source, /entry\.style\.marginInlineStart = `\$\{Math\.max\(0, rect\.left - contentLeft\)\}px`;/);

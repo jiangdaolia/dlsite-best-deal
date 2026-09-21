@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.69
+// @version      0.6.70
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.69";
+  const APP_VERSION = "0.6.70";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -81,6 +81,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.70": [
+      "修复筛选、账号等按钮偶发点击无反应：点击监听不再等页面初始化完成才安装",
+      "筛选弹窗读取选项失败时给出提示，不再静默失效",
+    ],
     "0.6.69": [
       "优惠券筛选项改为「券·分区类别｜力度·条件｜进度」紧凑格式，不再重复显示券名",
     ],
@@ -5339,10 +5343,19 @@
   }
 
   function openBrowseOfferFilterDialog() {
+    let cards = [];
+    let resolved = { choices: { activities: [], coupons: [] }, filters: {} };
+    try {
+      cards = browseOfferFilterCardsForPage();
+      resolved = resolveBrowseOfferFilterState(cards, false);
+    } catch (error) {
+      console.error(`[${APP_NAME}] offer filter choices failed:`, error);
+      showDealToast("筛选选项读取失败，请刷新页面重试", true);
+      return;
+    }
+    const { choices, filters } = resolved;
     closeReachDialog();
     closeBrowseOfferFilterDialog();
-    const cards = browseOfferFilterCardsForPage();
-    const { choices, filters } = resolveBrowseOfferFilterState(cards, false);
     const overlay = document.createElement("div");
     overlay.className = "dltracker-reach-overlay dltracker-offer-filter-overlay";
     overlay.addEventListener("click", (event) => {
@@ -14214,9 +14227,11 @@ a.dltracker-cart-deal-frame:focus-visible {
       showUpdateNoticeIfNeeded();
       await cleanExpiredCache();
       await restoreLanguageDialogAfterReload({ deferRender: true });
-      await bootstrap();
+      // 委托点击与 SPA 监听必须在 bootstrap 之前装好：初始化中途挂起或失败时，
+      // 已渲染的筛选/账号/隐藏按钮仍要可用。
       installDealEventListeners();
       installSpaListeners();
+      await bootstrap();
       console.log(`[${APP_NAME}] userscript started (${APP_VERSION})`);
     } catch (error) {
       console.error(`[${APP_NAME}] startup failed:`, error);
