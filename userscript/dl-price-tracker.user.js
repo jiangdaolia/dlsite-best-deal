@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.71
+// @version      0.6.72
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.71";
+  const APP_VERSION = "0.6.72";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -82,6 +82,9 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.72": [
+      "优惠券筛选项改为「力度·条件｜进度」紧凑格式，类别只由多选框表达",
+    ],
     "0.6.71": [
       "筛选弹窗的优惠券旁新增类别多选框，勾选哪几类就只看哪几类的券",
       "首次默认勾选同人和女性向，勾选状态会记住；全不勾等于不选券",
@@ -5255,11 +5258,9 @@
       if (!progress.length) progress.push("无门槛");
       const categories = couponCategoryLabels(coupon);
       if (!categories.length) categories.push("通用");
-      const shown = categories.slice(0, 3);
-      const category = `${shown.join("/")}${categories.length > 3 ? `+${categories.length - 3}` : ""}`;
       offerOptions.push({
         value,
-        label: `券·${category}｜${compactCouponBenefitLabel({
+        label: `${compactCouponBenefitLabel({
           ...coupon,
           equivalentRate: rate,
         })}｜${progress.join("＋")}`,
@@ -5797,13 +5798,6 @@
       if (!labels.includes(label)) labels.push(label);
     }
     return labels;
-  }
-
-  function couponCategoryLabel(coupon) {
-    const labels = couponCategoryLabels(coupon);
-    const shown = labels.slice(0, 3);
-    const rest = labels.length - shown.length;
-    return `${shown.join("/")}${rest > 0 ? `+${rest}` : ""}`;
   }
 
   function compactCouponBenefitLabel(option) {

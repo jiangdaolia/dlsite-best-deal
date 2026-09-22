@@ -50,7 +50,6 @@ vm.runInNewContext(
     compactCouponUsage,
     compactCouponListLabel,
     compactCouponBenefitLabel,
-    couponCategoryLabel,
     couponCategoryLabels,
     bestReachColorClass,
     campaignEndFromHtml,
@@ -82,7 +81,6 @@ const {
   compactCouponUsage,
   compactCouponListLabel,
   compactCouponBenefitLabel,
-  couponCategoryLabel,
   couponCategoryLabels,
   bestReachColorClass,
   campaignEndFromHtml,
@@ -487,26 +485,18 @@ test("筛选优惠券按「券·分区｜力度·条件｜进度」紧凑显示"
 });
 
 test("优惠券类别标签优先取站点限制，未收录分区码原样大写", () => {
-  assert.equal(couponCategoryLabel({
-    siteIds: ["comic"],
-    distributeTargets: ["maniax"],
-  }), "漫画");
-  assert.equal(couponCategoryLabel({
-    distributeTargets: ["girls", "maniax", "girls-pro"],
-  }), "女性向/同人");
-  assert.equal(couponCategoryLabel({
-    distributeTargets: ["appx", "pro", "comic", "bl"],
-  }), "手机游戏/游戏/漫画+1");
-  assert.equal(couponCategoryLabel({
-    distributeTargets: ["new-site-2027"],
-  }), "NEWSITE2027");
-  assert.equal(couponCategoryLabel({}), "");
   assert.equal(couponCategoryLabels({
     siteIds: ["comic"],
     distributeTargets: ["maniax"],
   }).join("/"), "漫画");
   assert.equal(couponCategoryLabels({
+    distributeTargets: ["girls", "maniax", "girls-pro"],
+  }).join("/"), "女性向/同人");
+  assert.equal(couponCategoryLabels({
     distributeTargets: ["appx", "pro", "comic", "bl"],
   }).join("/"), "手机游戏/游戏/漫画/女性向");
+  assert.equal(couponCategoryLabels({
+    distributeTargets: ["new-site-2027"],
+  }).join("/"), "NEWSITE2027");
   assert.equal(couponCategoryLabels({}).join("/"), "");
 });
