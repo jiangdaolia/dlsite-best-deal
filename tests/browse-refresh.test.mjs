@@ -47,7 +47,7 @@ test("平台活动和优惠券可以各选一种并按交集筛选", () => {
 
   const dialogSource = functionSource("openBrowseOfferFilterDialog");
   assert.match(dialogSource, /不选择平台活动/);
-  assert.match(dialogSource, /不选择优惠券/);
+  assert.match(functionSource("renderCouponFilterOptions"), /不选择优惠券/);
   assert.match(dialogSource, /setBrowseOfferFilters\(activityField\.select\.value, couponField\.select\.value\)/);
   assert.match(functionSource("injectBrowseControls"), /dltracker-offer-filter-button/);
   assert.match(functionSource("injectBuyLaterSortToggle"), /dltracker-offer-filter-button/);
@@ -80,7 +80,22 @@ test("具体优惠券和平台活动按优惠力度降序且同力度稳定", ()
   );
   assert.match(
     functionSource("browseOfferFilterChoices"),
-    /couponCategoryLabel/,
+    /couponCategoryLabels/,
+  );
+  assert.match(
+    functionSource("openBrowseOfferFilterDialog"),
+    /createCouponFilterField\(choices\.coupons, filters\.coupon\)/,
+  );
+  // 类别多选框：默认勾同人和女性向，勾选状态持久化，全不勾等于不选券。
+  assert.match(source, /DEFAULT_COUPON_CATEGORY_CHECKS = \["同人", "女性向"\]/);
+  assert.match(source, /BROWSE_COUPON_CATEGORY_STORAGE_KEY = "dltracker-browse-coupon-categories"/);
+  assert.match(
+    functionSource("createCouponFilterField"),
+    /getCouponCategoryChecks\(\)[\s\S]*?setCouponCategoryChecks\(checked\)/,
+  );
+  assert.match(
+    functionSource("renderCouponFilterOptions"),
+    /option\.categories \|\| \[\]\)\.some\(\(category\) => checked\.has\(category\)\)/,
   );
 });
 

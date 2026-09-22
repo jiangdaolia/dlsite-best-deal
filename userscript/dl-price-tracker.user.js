@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.70
+// @version      0.6.71
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.70";
+  const APP_VERSION = "0.6.71";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -52,6 +52,7 @@
   const BROWSE_FILTER_STORAGE_KEY = "dltracker-browse-bundle-filter";
   const BROWSE_ACTIVITY_FILTER_STORAGE_KEY = "dltracker-browse-activity-filter";
   const BROWSE_COUPON_FILTER_STORAGE_KEY = "dltracker-browse-coupon-filter";
+  const BROWSE_COUPON_CATEGORY_STORAGE_KEY = "dltracker-browse-coupon-categories";
   const BROWSE_HIDE_PURCHASED_STORAGE_KEY = "dltracker-browse-hide-purchased";
   const BROWSE_HIDE_CARTED_STORAGE_KEY = "dltracker-browse-hide-carted";
   const BROWSE_SORT_MODE_NATIVE = "native";
@@ -81,6 +82,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.71": [
+      "筛选弹窗的优惠券旁新增类别多选框，勾选哪几类就只看哪几类的券",
+      "首次默认勾选同人和女性向，勾选状态会记住；全不勾等于不选券",
+    ],
     "0.6.70": [
       "修复筛选、账号等按钮偶发点击无反应：点击监听不再等页面初始化完成才安装",
       "筛选弹窗读取选项失败时给出提示，不再静默失效",
@@ -5002,6 +5007,31 @@
     }
   }
 
+  // null 表示从未保存过，此时使用 DEFAULT_COUPON_CATEGORY_CHECKS。
+  function getCouponCategoryChecks() {
+    try {
+      const raw = localStorage.getItem(BROWSE_COUPON_CATEGORY_STORAGE_KEY);
+      if (raw === null) return null;
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed)
+        ? new Set(parsed.map((value) => String(value)))
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function setCouponCategoryChecks(checked) {
+    try {
+      localStorage.setItem(
+        BROWSE_COUPON_CATEGORY_STORAGE_KEY,
+        JSON.stringify([...(checked || [])].map((value) => String(value))),
+      );
+    } catch {
+      // noop
+    }
+  }
+
   function getBrowseHidePurchased() {
     try {
       return localStorage.getItem(BROWSE_HIDE_PURCHASED_STORAGE_KEY) === "1";
@@ -5223,21 +5253,24 @@
         progress.push(`${activeSubtotal >= coupon.minSpend ? "已满" : "已有"}${Math.round(activeSubtotal).toLocaleString("ja-JP")}/${Math.round(coupon.minSpend).toLocaleString("ja-JP")}円`);
       }
       if (!progress.length) progress.push("无门槛");
-      const category = couponCategoryLabel(coupon);
+      const categories = couponCategoryLabels(coupon);
+      if (!categories.length) categories.push("通用");
+      const shown = categories.slice(0, 3);
+      const category = `${shown.join("/")}${categories.length > 3 ? `+${categories.length - 3}` : ""}`;
       offerOptions.push({
         value,
-        label: `券${category ? `·${category}` : ""}｜${compactCouponBenefitLabel({
+        label: `券·${category}｜${compactCouponBenefitLabel({
           ...coupon,
           equivalentRate: rate,
         })}｜${progress.join("＋")}`,
+        categories,
         rate,
         order: offerOptions.length,
       });
     }
-    const sorted = sortBrowseOfferFilterOptions(offerOptions).map(({ value, label }) => ({
-      value,
-      label,
-    }));
+    const sorted = sortBrowseOfferFilterOptions(offerOptions).map(
+      ({ value, label, categories }) => ({ value, label, categories }),
+    );
     return {
       activities: sorted.filter((option) => option.value.startsWith("activity:")),
       coupons: sorted.filter((option) => option.value.startsWith("coupon:")),
@@ -5342,6 +5375,79 @@
     return { wrap, select };
   }
 
+  function orderedCouponCategories(options) {
+    const seen = [];
+    for (const option of options || []) {
+      for (const category of option?.categories || []) {
+        if (!seen.includes(category)) seen.push(category);
+      }
+    }
+    const order = new Map(COUPON_CATEGORY_DISPLAY_ORDER.map(
+      (label, index) => [label, index],
+    ));
+    return seen.sort((a, b) =>
+      (order.get(a) ?? order.size + seen.indexOf(a)) -
+      (order.get(b) ?? order.size + seen.indexOf(b)));
+  }
+
+  // 券下拉框只列勾选类别的券；已生效的筛选值始终保留在列表里，
+  // 避免“不选择优惠券”的视觉状态与实际生效的筛选不一致。
+  function renderCouponFilterOptions(select, options, checked, selected) {
+    const visible = (options || []).filter((option) =>
+      option.value === selected ||
+      (option.categories || []).some((category) => checked.has(category)));
+    const previous = select.value;
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "不选择优惠券";
+    select.replaceChildren(empty);
+    for (const option of visible) {
+      const node = document.createElement("option");
+      node.value = option.value;
+      node.textContent = option.label;
+      select.appendChild(node);
+    }
+    select.value = visible.some((option) => option.value === previous)
+      ? previous
+      : (visible.some((option) => option.value === selected) ? selected : "");
+  }
+
+  function createCouponFilterField(options, selected) {
+    const wrap = document.createElement("div");
+    wrap.className = "dltracker-offer-filter-field";
+    const head = document.createElement("div");
+    head.className = "dltracker-offer-filter-head";
+    const title = document.createElement("strong");
+    title.textContent = "优惠券";
+    const chips = document.createElement("div");
+    chips.className = "dltracker-coupon-category-checks";
+    head.append(title, chips);
+    const select = document.createElement("select");
+    wrap.append(head, select);
+
+    const saved = getCouponCategoryChecks();
+    const checked = new Set(saved === null ? DEFAULT_COUPON_CATEGORY_CHECKS : saved);
+    const renderOptions = () =>
+      renderCouponFilterOptions(select, options, checked, selected);
+    for (const category of orderedCouponCategories(options)) {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = category;
+      input.checked = checked.has(category);
+      input.addEventListener("change", () => {
+        if (input.checked) checked.add(category);
+        else checked.delete(category);
+        setCouponCategoryChecks(checked);
+        renderOptions();
+      });
+      label.append(input, document.createTextNode(category));
+      chips.appendChild(label);
+    }
+    renderOptions();
+    return { wrap, select };
+  }
+
   function openBrowseOfferFilterDialog() {
     let cards = [];
     let resolved = { choices: { activities: [], coupons: [] }, filters: {} };
@@ -5386,14 +5492,9 @@
       choices.activities,
       filters.activity,
     );
-    const couponField = createBrowseOfferFilterSelect(
-      "优惠券",
-      "不选择优惠券",
-      choices.coupons,
-      filters.coupon,
-    );
+    const couponField = createCouponFilterField(choices.coupons, filters.coupon);
     const hint = document.createElement("p");
-    hint.textContent = "活动和优惠券同时选择时，只显示两项都适用的作品；两项都不选则显示全部作品。";
+    hint.textContent = "勾选类别可缩小券列表，全不勾等于不选券；活动和优惠券同时选择时，只显示两项都适用的作品；两项都不选则显示全部作品。";
     const actions = document.createElement("div");
     actions.className = "dltracker-offer-filter-actions";
     const cancel = document.createElement("button");
@@ -5677,7 +5778,13 @@
     ai: "AI生成",
   };
 
-  function couponCategoryLabel(coupon) {
+  // 多选框与首次默认勾选：只默认同人+女性向，其余类别需要用户手动勾选。
+  const COUPON_CATEGORY_DISPLAY_ORDER = [
+    "同人", "漫画", "游戏", "手机游戏", "AI生成", "女性向", "通用",
+  ];
+  const DEFAULT_COUPON_CATEGORY_CHECKS = ["同人", "女性向"];
+
+  function couponCategoryLabels(coupon) {
     const siteIds = Array.isArray(coupon?.siteIds) ? coupon.siteIds : [];
     const distributed = Array.isArray(coupon?.distributeTargets)
       ? coupon.distributeTargets
@@ -5689,6 +5796,11 @@
       const label = COUPON_SITE_CATEGORY_LABELS[key] || key.toUpperCase();
       if (!labels.includes(label)) labels.push(label);
     }
+    return labels;
+  }
+
+  function couponCategoryLabel(coupon) {
+    const labels = couponCategoryLabels(coupon);
     const shown = labels.slice(0, 3);
     const rest = labels.length - shown.length;
     return `${shown.join("/")}${rest > 0 ? `+${rest}` : ""}`;
@@ -12653,6 +12765,36 @@ a.dltracker-browse-analysis-frame {
   background: #fff;
   color: #34434c;
   font-size: 12px;
+}
+
+.dltracker-offer-filter-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+}
+
+.dltracker-coupon-category-checks {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+}
+
+.dltracker-coupon-category-checks label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  font-weight: normal;
+  color: #34434c;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.dltracker-coupon-category-checks input {
+  margin: 0;
+  accent-color: #3f7a99;
 }
 
 .dltracker-offer-filter-form p {

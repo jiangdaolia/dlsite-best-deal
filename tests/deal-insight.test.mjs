@@ -51,6 +51,7 @@ vm.runInNewContext(
     compactCouponListLabel,
     compactCouponBenefitLabel,
     couponCategoryLabel,
+    couponCategoryLabels,
     bestReachColorClass,
     campaignEndFromHtml,
     bulkRuleIsActive,
@@ -82,6 +83,7 @@ const {
   compactCouponListLabel,
   compactCouponBenefitLabel,
   couponCategoryLabel,
+  couponCategoryLabels,
   bestReachColorClass,
   campaignEndFromHtml,
   bulkRuleIsActive,
@@ -499,4 +501,12 @@ test("优惠券类别标签优先取站点限制，未收录分区码原样大�
     distributeTargets: ["new-site-2027"],
   }), "NEWSITE2027");
   assert.equal(couponCategoryLabel({}), "");
+  assert.equal(couponCategoryLabels({
+    siteIds: ["comic"],
+    distributeTargets: ["maniax"],
+  }).join("/"), "漫画");
+  assert.equal(couponCategoryLabels({
+    distributeTargets: ["appx", "pro", "comic", "bl"],
+  }).join("/"), "手机游戏/游戏/漫画/女性向");
+  assert.equal(couponCategoryLabels({}).join("/"), "");
 });
