@@ -62,6 +62,10 @@ vm.runInNewContext(
     bulkRuleGroupTotal,
     bulkRuleLabel,
     campaignPageIsClosed,
+    mergeSameCouponRecords,
+    couponScopeLabel,
+    couponConditionLabel,
+    disambiguateCouponOptionLabels,
   };`,
   sandbox,
 );
@@ -100,6 +104,10 @@ const {
   bulkRuleGroupTotal,
   bulkRuleLabel,
   campaignPageIsClosed,
+  mergeSameCouponRecords,
+  couponScopeLabel,
+  couponConditionLabel,
+  disambiguateCouponOptionLabels,
 } = sandbox.dealInsightCore;
 
 const future = Math.floor(Date.parse("2026-10-01T00:00:00+08:00") / 1000);
@@ -611,4 +619,76 @@ test("定额型活动按整组结算：少于 3 件不生效，余数按原价",
     bulkRuleGroupTotal([item(200), item(880), item(880)], rule),
     999,
   );
+});
+
+test("同一 coupon_id 的多条投放记录合并为一张券，不按范围拆成两张", () => {
+  const raw = [
+    {
+      coupon_id: "GIRLS50",
+      coupon_name: "女性向け作品50%OFFクーポン",
+      discount_type: "rate",
+      discount: 50,
+      condition_type: "site_ids",
+      conditions: { site_ids: ["girls"] },
+      distribute_targets: ["girls"],
+      limit_date: future,
+    },
+    {
+      coupon_id: "GIRLS50",
+      coupon_name: "女性向け作品50%OFFクーポン",
+      discount_type: "rate",
+      discount: 50,
+      condition_type: "site_ids",
+      conditions: { site_ids: ["bl"] },
+      distribute_targets: ["bl"],
+      limit_date: future,
+    },
+  ];
+  const groups = groupDealCoupons(raw, now);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].instances, 1);
+  assert.deepEqual([...groups[0].siteIds].sort(), ["bl", "girls"]);
+  assert.deepEqual([...groups[0].distributeTargets].sort(), ["bl", "girls"]);
+});
+
+test("不同 coupon_id 但条件完全相同的券仍合并为一种，并计 2 张", () => {
+  const raw = ["A", "B"].map((id) => ({
+    coupon_id: id,
+    coupon_name: `50OFF-${id}`,
+    discount_type: "rate",
+    discount: 50,
+    condition_type: "site_ids",
+    conditions: { site_ids: ["girls"] },
+    limit_date: future,
+  }));
+  const groups = groupDealCoupons(raw, now);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].instances, 2);
+});
+
+test("同力度同进度的券用适用范围补后缀，避免看起来像重复项", () => {
+  const labels = disambiguateCouponOptionLabels([
+    { label: "50OFF｜无门槛", scope: "TL" },
+    { label: "50OFF｜无门槛", scope: "BL" },
+    { label: "30OFF｜无门槛", scope: "TL" },
+  ]);
+  assert.deepEqual(labels, ["50OFF｜无门槛｜TL", "50OFF｜无门槛｜BL", "30OFF｜无门槛"]);
+  assert.equal(couponScopeLabel({
+    siteIds: ["girls", "bl"],
+    distributeTargets: ["girls"],
+  }), "TL/BL");
+  assert.equal(couponScopeLabel({ siteIds: [], distributeTargets: ["maniax"] }), "同人");
+  assert.equal(couponScopeLabel({}), "");
+});
+
+test("范围相同的两张券再用条件区分，不再显示成两条一样的券", () => {
+  const labels = disambiguateCouponOptionLabels([
+    { label: "50OFF｜无门槛", scope: "TL", condition: "指定站点" },
+    { label: "50OFF｜无门槛", scope: "TL", condition: "全作品" },
+  ]);
+  assert.deepEqual(labels, ["50OFF｜无门槛｜TL·指定站点", "50OFF｜无门槛｜TL·全作品"]);
+  assert.equal(couponConditionLabel({ conditionType: "site_ids" }), "指定站点");
+  assert.equal(couponConditionLabel({ conditionType: "all" }), "全作品");
+  assert.equal(couponConditionLabel({ conditionType: "id_all" }), "指定作品");
+  assert.equal(couponConditionLabel({ conditionType: "unknown" }), "");
 });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.73
+// @version      0.6.74
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.73";
+  const APP_VERSION = "0.6.74";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -84,6 +84,10 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.74": [
+      "同一 coupon_id 的多条投放记录合并为一张券，不再在筛选里显示成两张",
+      "同力度同进度的券追加适用范围（TL/BL 等）或券名，便于区分",
+    ],
     "0.6.73": [
       "支持「3件999円」这类定额型多件活动，按整组计价、余数按原价",
       "活动页结束时间可识别「10/29 13:59まで」写法，活动到期立即停用",
@@ -1950,12 +1954,51 @@
     ].join("|");
   }
 
+  // DLsite 对同一张券可能按站点/发放渠道返回多条记录（coupon_id 相同）。
+  // 这些记录的条件字段只差适用范围，直接分组会显示成两张一模一样的券。
+  function mergeSameCouponRecords(coupons) {
+    const ordered = [];
+    const byId = new Map();
+    for (const coupon of Array.isArray(coupons) ? coupons : []) {
+      if (!coupon) continue;
+      const existing = byId.get(coupon.id);
+      if (!existing) {
+        const copy = { ...coupon };
+        byId.set(copy.id, copy);
+        ordered.push(copy);
+        continue;
+      }
+      for (const field of [
+        "productIds",
+        "makerIds",
+        "siteIds",
+        "customGenres",
+        "workTypes",
+        "distributeTargets",
+      ]) {
+        existing[field] = [...new Set([
+          ...(existing[field] || []),
+          ...(coupon[field] || []),
+        ])];
+      }
+      if (coupon.expiresAt && (
+        !Number.isFinite(existing.expiresAt) ||
+        coupon.expiresAt < existing.expiresAt
+      )) {
+        existing.expiresAt = coupon.expiresAt;
+      }
+    }
+    return ordered;
+  }
+
   function groupDealCoupons(rawCoupons, now = Date.now()) {
     const groups = new Map();
-    (Array.isArray(rawCoupons) ? rawCoupons : [])
-      .map(normalizeDealCoupon)
-      .filter(Boolean)
-      .filter((coupon) => !coupon.expiresAt || coupon.expiresAt > now)
+    mergeSameCouponRecords(
+      (Array.isArray(rawCoupons) ? rawCoupons : [])
+        .map(normalizeDealCoupon)
+        .filter(Boolean)
+        .filter((coupon) => !coupon.expiresAt || coupon.expiresAt > now),
+    )
       .forEach((coupon) => {
         const key = dealCouponGroupKey(coupon);
         const group = groups.get(key);
@@ -5533,10 +5576,19 @@
           equivalentRate: rate,
         })}｜${progress.join("＋")}`,
         categories,
+        scope: couponScopeLabel(coupon),
+        condition: couponConditionLabel(coupon),
+        name: String((Array.isArray(coupon.names) ? coupon.names[0] : coupon.name) || ""),
         rate,
         order: offerOptions.length,
       });
     }
+    // 同力度同进度的券折叠后可能完全同名，补上适用范围或券名再排序。
+    const couponOptions = offerOptions.filter((option) =>
+      option.value.startsWith("coupon:"));
+    disambiguateCouponOptionLabels(couponOptions).forEach((label, index) => {
+      couponOptions[index].label = label;
+    });
     const sorted = sortBrowseOfferFilterOptions(offerOptions).map(
       ({ value, label, categories }) => ({ value, label, categories }),
     );
@@ -6066,6 +6118,86 @@
       if (!labels.includes(label)) labels.push(label);
     }
     return labels;
+  }
+
+  // 比类别更细的适用范围，用来区分同力度、同类别但范围不同的两张券。
+  const COUPON_SCOPE_LABELS = {
+    girls: "TL",
+    girlspro: "TL",
+    girlsdrama: "TL",
+    bl: "BL",
+    blpro: "BL",
+    bldrama: "BL",
+    maniax: "同人",
+    comic: "漫画",
+    books: "漫画",
+    pro: "游戏",
+    app: "手机游戏",
+    appx: "手机游戏",
+    home: "全年龄",
+    soft: "软件",
+    eng: "英文",
+    ai: "AI",
+  };
+
+  function couponScopeLabel(coupon) {
+    const siteIds = Array.isArray(coupon?.siteIds) ? coupon.siteIds : [];
+    const distributed = Array.isArray(coupon?.distributeTargets)
+      ? coupon.distributeTargets
+      : [];
+    const labels = [];
+    for (const code of siteIds.length ? siteIds : distributed) {
+      const label = COUPON_SCOPE_LABELS[dealNormalizedSite(code)];
+      if (label && !labels.includes(label)) labels.push(label);
+    }
+    return labels.join("/");
+  }
+
+  const COUPON_CONDITION_LABELS = {
+    "": "全作品",
+    all: "全作品",
+    all_product: "全作品",
+    product_all: "全作品",
+    payment: "全作品",
+    id_all: "指定作品",
+    common: "指定社团",
+    site_ids: "指定站点",
+    custom_genre: "指定分类",
+    worktype: "指定类型",
+  };
+
+  function couponConditionLabel(coupon) {
+    const type = String(coupon?.conditionType || "").toLowerCase();
+    return COUPON_CONDITION_LABELS[type] || "";
+  }
+
+  // 两条券折叠后显示完全一样时，依次用适用范围、适用范围+条件、券名区分，
+  // 否则用户会把两张不同的券当成重复项。
+  function disambiguateCouponOptionLabels(options) {
+    const list = Array.isArray(options) ? options : [];
+    const base = list.map((option) => String(option?.label || ""));
+    const suffixes = list.map(() => "");
+    const levels = [
+      (option) => option?.scope,
+      (option) => [option?.scope, option?.condition].filter(Boolean).join("·"),
+      (option) => option?.name,
+    ];
+    for (const level of levels) {
+      const labels = base.map((text, index) =>
+        suffixes[index] ? `${text}｜${suffixes[index]}` : text);
+      const counts = new Map();
+      for (const label of labels) {
+        counts.set(label, (counts.get(label) || 0) + 1);
+      }
+      if ([...counts.values()].every((count) => count < 2)) return labels;
+      list.forEach((option, index) => {
+        if ((counts.get(labels[index]) || 0) < 2) return;
+        const next = String(level(option) || "").trim().slice(0, 20);
+        if (next) suffixes[index] = next;
+      });
+    }
+    return base.map((text, index) =>
+      suffixes[index] ? `${text}｜${suffixes[index]}` : text);
   }
 
   function compactCouponBenefitLabel(option) {
