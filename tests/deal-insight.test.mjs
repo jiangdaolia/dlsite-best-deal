@@ -55,6 +55,13 @@ vm.runInNewContext(
     campaignEndFromHtml,
     bulkRuleIsActive,
     cachedBulkRuleDecision,
+    bulkRuleFromHtml,
+    bulkRuleKind,
+    bulkRuleBundle,
+    bulkRuleUnitPrice,
+    bulkRuleGroupTotal,
+    bulkRuleLabel,
+    campaignPageIsClosed,
   };`,
   sandbox,
 );
@@ -86,6 +93,13 @@ const {
   campaignEndFromHtml,
   bulkRuleIsActive,
   cachedBulkRuleDecision,
+  bulkRuleFromHtml,
+  bulkRuleKind,
+  bulkRuleBundle,
+  bulkRuleUnitPrice,
+  bulkRuleGroupTotal,
+  bulkRuleLabel,
+  campaignPageIsClosed,
 } = sandbox.dealInsightCore;
 
 const future = Math.floor(Date.parse("2026-10-01T00:00:00+08:00") / 1000);
@@ -499,4 +513,102 @@ test("优惠券类别标签优先取站点限制，未收录分区码原样大�
     distributeTargets: ["new-site-2027"],
   }).join("/"), "NEWSITE2027");
   assert.equal(couponCategoryLabels({}).join("/"), "");
+});
+
+const FIX_CAMPAIGN_HTML = `<!doctype html><html><head>
+<title>ボイス・ASMR・音楽 3本999円まとめ買い【2026年10月】特設ページ</title>
+<meta name="description" content="ボイス・ASMR・音楽 3本999円まとめ買い【2026年10月】開催中！　～10/29 13:59">
+</head><body>
+<h2><span class="subcopy">ボイス・ASMR・音楽</span> <span class="maincopy">3本999円まとめ買い</span></h2>
+<h3 class="cp_date">10/29 (木) 13:59まで</h3>
+<script>window['97e4bcb5ad306cb8aa8e6e721c767bda_product'] = {"products":[],"type":"fix","discount_rate":null,"per_item":3,"bulkbuy_key":"matome20261023voice","limit_items":0,"required_worknos":[]};</script>
+</body></html>`;
+
+const RATE_CAMPAIGN_HTML = `<!doctype html><html><head><title>3作品以上30%OFF</title></head><body>
+<h3 class="cp_date">11/05 13:59まで</h3>
+<script>window['abc_product'] = {"products":[],"type":"rate","discount_rate":30,"per_item":3,"bulkbuy_key":"demo-rate"};</script>
+</body></html>`;
+
+const CLOSED_CAMPAIGN_HTML = `<!doctype html><html><head>
+<title>キャンペーン終了のお知らせ</title></head><body><p>このキャンペーンは終了しました。</p></body></html>`;
+
+test("定额型活动按「3件999円」解析，而不是当成无折扣", () => {
+  const rule = bulkRuleFromHtml(FIX_CAMPAIGN_HTML, "matome20261023voice");
+  assert.equal(bulkRuleKind(rule), "fix");
+  assert.deepEqual({ ...bulkRuleBundle(rule) }, { size: 3, total: 999 });
+  assert.equal(rule.discountRate, 0);
+  assert.equal(rule.minCount, 3);
+  assert.equal(bulkRuleLabel(rule), "3件999円");
+  const now = new Date();
+  const expected = [0, 1].map((offset) => Date.UTC(
+    now.getFullYear() + offset, 9, 29, 13 - 9, 59, 0,
+  )).find((value) => value >= Date.now() - 24 * 60 * 60 * 1000);
+  assert.equal(rule.expiresAt, expected);
+});
+
+test("比例型活动解析保持不变", () => {
+  const rule = bulkRuleFromHtml(RATE_CAMPAIGN_HTML, "demo-rate");
+  assert.equal(bulkRuleKind(rule), "rate");
+  assert.equal(rule.discountRate, 30);
+  assert.equal(rule.minCount, 3);
+  assert.equal(rule.fixedTotal, 0);
+  assert.equal(bulkRuleBundle(rule), null);
+  assert.equal(bulkRuleLabel(rule), "3件30OFF");
+});
+
+test("活动结束页不产出规则，并识别为已结束以便负缓存", () => {
+  assert.equal(bulkRuleFromHtml(CLOSED_CAMPAIGN_HTML, "closed"), null);
+  assert.equal(campaignPageIsClosed(CLOSED_CAMPAIGN_HTML), true);
+  assert.equal(campaignPageIsClosed(FIX_CAMPAIGN_HTML), false);
+  const negative = {
+    key: "closed",
+    unavailable: true,
+    fetchedAt: Date.now(),
+    ttlMs: 24 * 60 * 60 * 1000,
+  };
+  assert.equal(bulkRuleIsActive(negative), false);
+  assert.equal(cachedBulkRuleDecision(negative), null);
+  assert.equal(
+    cachedBulkRuleDecision({ ...negative, fetchedAt: Date.now() - 25 * 60 * 60 * 1000 }),
+    undefined,
+  );
+});
+
+test("定额型活动单件理论价取 999/3，券在平台价之上继续叠加", () => {
+  const rule = bulkRuleFromHtml(FIX_CAMPAIGN_HTML, "matome20261023voice");
+  const product = { id: "RJ1", bulkbuyKey: "matome20261023voice", price: 880, officialPrice: 880 };
+  assert.equal(bulkRuleUnitPrice(rule, product), 333);
+  const best = calculateBestReach(product, [], rule);
+  assert.ok(Math.abs(best.bulkRate - 62.159) < 0.01);
+  assert.equal(calculateHypotheticalPrice(product, best), 333);
+  const withCoupon = calculateBestReach(product, [{
+    groupKey: "C1",
+    discountType: "percent",
+    discount: 50,
+    minSpend: 0,
+    minCount: 1,
+    maxDiscount: 0,
+    equivalentRate: 50,
+  }], rule);
+  assert.ok(withCoupon.totalRate > best.totalRate);
+  assert.equal(calculateHypotheticalPrice(product, withCoupon), 167);
+});
+
+test("定额型活动按整组结算：少于 3 件不生效，余数按原价", () => {
+  const rule = bulkRuleFromHtml(FIX_CAMPAIGN_HTML, "matome20261023voice");
+  const item = (price) => ({ bulkbuyKey: "matome20261023voice", price, officialPrice: price });
+  assert.equal(bulkRuleGroupTotal([item(880), item(880)], rule), 1760);
+  assert.equal(bulkRuleGroupTotal([item(880), item(880), item(880)], rule), 999);
+  assert.equal(
+    bulkRuleGroupTotal([item(880), item(880), item(880), item(880)], rule),
+    999 + 880,
+  );
+  assert.equal(
+    bulkRuleGroupTotal(Array.from({ length: 6 }, () => item(880)), rule),
+    1998,
+  );
+  assert.equal(
+    bulkRuleGroupTotal([item(200), item(880), item(880)], rule),
+    999,
+  );
 });

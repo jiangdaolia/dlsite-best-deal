@@ -436,3 +436,38 @@ test("上限规模的购物车和优惠券可以完成精确计算", () => {
   assert.ok(result.total < result.baseline);
   assert.ok(result.orders.length <= 9);
 });
+
+test("定额型活动按整组计价：3 件 999 円，余数按原价", () => {
+  const bundleItems = (count, price = 880) => Array.from({ length: count }, (_, index) => ({
+    id: `RJ10000${index}`,
+    title: `作品${index}`,
+    regularPrice: price,
+    setPrice: 333,
+    setGroup: "matome20261023voice",
+    setMinCount: 3,
+    bundleSize: 3,
+    bundleTotal: 999,
+  }));
+  assert.equal(quoteBestSingleOrder(bundleItems(2)).total, 1760);
+  assert.equal(quoteBestSingleOrder(bundleItems(3)).total, 999);
+  assert.equal(quoteBestSingleOrder(bundleItems(4)).total, 1879);
+  assert.equal(quoteBestSingleOrder(bundleItems(6)).total, 1998);
+});
+
+test("定额型活动不把低价作品摊到高于自身价格", () => {
+  const items = [
+    { id: "RJ200001", regularPrice: 200, setPrice: 333, setGroup: "g", setMinCount: 3, bundleSize: 3, bundleTotal: 999 },
+    { id: "RJ200002", regularPrice: 880, setPrice: 333, setGroup: "g", setMinCount: 3, bundleSize: 3, bundleTotal: 999 },
+    { id: "RJ200003", regularPrice: 880, setPrice: 333, setGroup: "g", setMinCount: 3, bundleSize: 3, bundleTotal: 999 },
+  ];
+  const quote = quoteBestSingleOrder(items);
+  assert.equal(quote.total, 999);
+  const byId = new Map(quote.lines.map((line) => [line.id, line.price]));
+  assert.ok(byId.get("RJ200001") <= 200);
+  assert.ok(byId.get("RJ200002") < 880);
+  assert.ok(byId.get("RJ200003") < 880);
+  assert.equal(
+    [...byId.values()].reduce((sum, price) => sum + price, 0),
+    999,
+  );
+});

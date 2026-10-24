@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.72
+// @version      0.6.73
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.72";
+  const APP_VERSION = "0.6.73";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -35,6 +35,8 @@
   const CART_RENDER_CONCURRENCY = 4;
   const BROWSE_RENDER_CONCURRENCY = 4;
   const BULK_RULE_FETCH_CONCURRENCY = 3;
+  // 结构无法识别的活动页只做短期退避，避免一次改版让活动整天消失。
+  const BULK_RULE_RETRY_INTERVAL_MS = 10 * 60 * 1000;
   const RETRYABLE_FETCH_ATTEMPTS = 1;
   const RETRY_BASE_DELAY_MS = 450;
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -82,6 +84,11 @@
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const RELEASE_NOTES = {
+    "0.6.73": [
+      "支持「3件999円」这类定额型多件活动，按整组计价、余数按原价",
+      "活动页结束时间可识别「10/29 13:59まで」写法，活动到期立即停用",
+      "读取失败的活动页不再每次重算都重复请求",
+    ],
     "0.6.72": [
       "优惠券筛选项改为「力度·条件｜进度」紧凑格式，类别只由多选框表达",
     ],
@@ -685,6 +692,8 @@
         typeof parsedSetPrice === "number" && parsedSetPrice >= 0
           ? Math.round(parsedSetPrice)
           : null;
+      const bundleSize = plannerYen(raw?.bundleSize, 0);
+      const bundleTotal = plannerYen(raw?.bundleTotal, 0);
       return {
         id,
         title: String(raw?.title || id),
@@ -692,6 +701,9 @@
         setPrice,
         setGroup: String(raw?.setGroup || "").trim(),
         setMinCount: Math.max(2, plannerYen(raw?.setMinCount, 3)),
+        // 定额型活动：每 bundleSize 件合计 bundleTotal，余数按原价。
+        bundleSize: bundleSize > 1 ? bundleSize : 0,
+        bundleTotal: bundleTotal > 0 ? bundleTotal : 0,
       };
     });
   }
@@ -743,6 +755,60 @@
     return indexes;
   }
 
+  // 定额型活动按整组分配：组合价覆盖组内较贵的作品，余数保持原价，
+  // 因此「3 件 999 円」在 4 件时得到 999 + 第 4 件原价。
+  function plannerBundlePriceMap(items, selected, targetSet, coupon) {
+    const groups = new Map();
+    for (const index of selected) {
+      const item = items[index];
+      if (!item.setGroup || !(item.bundleSize > 1) || !(item.bundleTotal > 0)) continue;
+      // 被 replace/exclude 类券指定的作品不参与整组，避免余数凑不够一组还按组合价算。
+      if (coupon && coupon.stackMode !== "after" && targetSet.has(index)) continue;
+      if (!groups.has(item.setGroup)) groups.set(item.setGroup, []);
+      groups.get(item.setGroup).push(index);
+    }
+    const prices = new Map();
+    for (const indexes of groups.values()) {
+      const size = items[indexes[0]].bundleSize;
+      const bundleTotal = items[indexes[0]].bundleTotal;
+      if (indexes.length < size) continue;
+      const bundled = Math.floor(indexes.length / size) * size;
+      if (!bundled) continue;
+      const ordered = [...indexes].sort((a, b) =>
+        items[b].regularPrice - items[a].regularPrice || a - b);
+      const slots = ordered.slice(0, bundled);
+      const bundles = bundled / size;
+      const slotsRegular = slots.reduce(
+        (sum, index) => sum + items[index].regularPrice,
+        0,
+      );
+      // 组合价不得高于这一组原价合计，否则不该按活动价买。
+      const pool = Math.min(slotsRegular, bundles * bundleTotal);
+      if (!(pool > 0) || !(slotsRegular > 0)) continue;
+      // 按原价比例分摊，低价作品不会被摊到高于自身价格，合计仍然精确。
+      const shares = new Map();
+      let leftover = pool;
+      for (const index of slots) {
+        const share = Math.min(
+          items[index].regularPrice,
+          Math.floor(pool * items[index].regularPrice / slotsRegular),
+        );
+        shares.set(index, share);
+        leftover -= share;
+      }
+      for (const index of slots) {
+        if (leftover <= 0) break;
+        const headroom = items[index].regularPrice - shares.get(index);
+        const added = Math.min(headroom, leftover);
+        if (added <= 0) continue;
+        shares.set(index, shares.get(index) + added);
+        leftover -= added;
+      }
+      for (const [index, price] of shares) prices.set(index, price);
+    }
+    return prices;
+  }
+
   function quotePlannerSelection(items, selected, coupon = null, mask = null) {
     if (!selected.length) return null;
 
@@ -774,15 +840,24 @@
         groupCounts.set(item.setGroup, (groupCounts.get(item.setGroup) || 0) + 1);
       }
 
+      const bundlePrices = plannerBundlePriceMap(items, selected, targetSet, coupon);
       const lines = selected.map((index) => {
         const item = items[index];
+        const bundleItem = item.bundleSize > 1 && item.bundleTotal > 0;
+        const bundlePrice = bundleItem ? bundlePrices.get(index) : undefined;
         const dealApplied = Boolean(
-          item.setGroup &&
-            item.setPrice !== null &&
-            item.setPrice < item.regularPrice &&
-            (groupCounts.get(item.setGroup) || 0) >= item.setMinCount,
+          item.setGroup && (
+            Number.isFinite(bundlePrice)
+              ? bundlePrice < item.regularPrice
+              : !bundleItem &&
+                item.setPrice !== null &&
+                item.setPrice < item.regularPrice &&
+                (groupCounts.get(item.setGroup) || 0) >= item.setMinCount
+          ),
         );
-        let price = dealApplied ? item.setPrice : item.regularPrice;
+        let price = dealApplied
+          ? (Number.isFinite(bundlePrice) ? bundlePrice : item.setPrice)
+          : item.regularPrice;
         if (
           targetSet.has(index) &&
           coupon &&
@@ -2006,14 +2081,58 @@
         (a.earliestExpiry || Infinity) - (b.earliestExpiry || Infinity));
   }
 
+  // 多件活动的「单件等效价」：比例型按原价打折，定额型按整组均摊（999/3=333）。
+  // 券在平台价之上叠加，因此这里只负责叠加优惠券前的平台层价格。
+  function bulkRuleUnitPrice(rule, product) {
+    if (!rule || !product?.bulkbuyKey) return null;
+    const bundle = bulkRuleBundle(rule);
+    if (bundle) return bundle.total / bundle.size;
+    const officialPrice = Math.max(0, dealNumber(
+      product?.officialPrice,
+      dealNumber(product?.price, 0),
+    ));
+    const rate = Math.max(0, Math.min(100, dealNumber(rule?.discountRate, 0)));
+    if (!(rate > 0) || !(officialPrice > 0)) return null;
+    return officialPrice * (1 - rate / 100);
+  }
+
+  // 购物车层：定额型只对整组生效，余数按平台现价；比例型逐件取较小值。
+  function bulkRuleGroupTotal(items, rule) {
+    const list = Array.isArray(items) ? items : [];
+    const prices = list.map((item) => Math.max(0, dealNumber(item?.price)));
+    const subtotal = prices.reduce((sum, price) => sum + price, 0);
+    const bundle = bulkRuleBundle(rule);
+    if (bundle) {
+      if (list.length < bundle.size) return subtotal;
+      const bundles = Math.floor(list.length / bundle.size);
+      const bundled = bundles * bundle.size;
+      // 组合价覆盖较贵的一组，余数按原价，得到该组可达的最低合计。
+      const ordered = [...prices].sort((a, b) => b - a);
+      const bundledSum = ordered.slice(0, bundled)
+        .reduce((sum, price) => sum + price, 0);
+      const remainderSum = ordered.slice(bundled)
+        .reduce((sum, price) => sum + price, 0);
+      return Math.min(bundledSum, bundles * bundle.total) + remainderSum;
+    }
+    const minCount = Math.max(1, dealNumber(rule?.minCount, 3));
+    const rate = Math.max(0, Math.min(100, dealNumber(rule?.discountRate, 0)));
+    if (list.length < minCount || !(rate > 0)) return subtotal;
+    return list.reduce((sum, item) => {
+      const current = Math.max(0, dealNumber(item?.price));
+      const official = Math.max(current, dealNumber(item?.officialPrice, current));
+      return sum + Math.min(current, Math.round(official * (1 - rate / 100)));
+    }, 0);
+  }
+
   function calculateBestReach(product, couponOptions, bulkRule) {
     const officialPrice = Math.max(0, dealNumber(product?.officialPrice));
     const currentPrice = Math.max(0, dealNumber(product?.price));
     const saleRate = officialPrice > 0 && currentPrice < officialPrice
       ? (1 - currentPrice / officialPrice) * 100
       : 0;
-    const bulkRate = product?.bulkbuyKey && bulkRule?.discountRate
-      ? Math.max(0, dealNumber(bulkRule.discountRate))
+    const bulkUnit = bulkRuleUnitPrice(bulkRule, product);
+    const bulkRate = Number.isFinite(bulkUnit) && officialPrice > 0 && bulkUnit < officialPrice
+      ? (1 - bulkUnit / officialPrice) * 100
       : 0;
     const platformRate = Math.max(saleRate, bulkRate);
     const platformPrice = officialPrice * (1 - platformRate / 100);
@@ -4561,10 +4680,23 @@
     }, true);
   }
 
+  // 站点段优先取当前页面的真实站点（maniax/girls/bl/soft…），非站点页
+  // （mypage、cart、campaign 等）回退到作品自己的 site_id。
+  const CAMPAIGN_SITE_SECTIONS = new Set([
+    "maniax", "girls", "bl", "soft", "comipo", "pro", "dlaf", "ai", "book",
+  ]);
+
   function dealCampaignPath(product, key) {
-    const currentSection = location.pathname.split("/").filter(Boolean)[0] || "";
-    const section = currentSection.replace(/-touch$/i, "") ||
-      String(product?.siteId || "maniax").replace(/-touch$/i, "");
+    const currentSection = String(
+      location.pathname.split("/").filter(Boolean)[0] || "",
+    ).replace(/-touch$/i, "");
+    const productSection = String(product?.siteId || "")
+      .replace(/-touch$/i, "");
+    const section = CAMPAIGN_SITE_SECTIONS.has(currentSection)
+      ? currentSection
+      : CAMPAIGN_SITE_SECTIONS.has(productSection)
+        ? productSection
+        : "maniax";
     return `/${section}/campaign/bulkbuy/=/key/${encodeURIComponent(key)}/`;
   }
 
@@ -4592,9 +4724,47 @@
     return null;
   }
 
+  // 活动页头部常见写法：「10/29 (木) 13:59まで」，日期在时间之前，
+  // 与「終了 10/29 13:59」的语序相反，需要单独识别。
+  function campaignEndFromTrailingDate(html) {
+    const scoped = String(html || "").match(
+      /class="[^"]*cp_date[^"]*"[^>]*>([\s\S]{0,160}?)</i,
+    );
+    // 只认活动页头部的截止时间，避免抓到页脚其他活动的日期。
+    const texts = scoped ? [dealPlainText(scoped[1])] : [];
+    const pattern = /(\d{1,2})[\/月](\d{1,2})(?:日)?\s*(?:\([^)]{1,12}\))?\s*(\d{1,2}):(\d{2})\s*(?:まで|迄)/;
+    for (const text of texts) {
+      const matched = text.match(pattern);
+      if (!matched) continue;
+      const now = new Date();
+      let result = new Date(Date.UTC(
+        now.getFullYear(),
+        Number(matched[1]) - 1,
+        Number(matched[2]),
+        Number(matched[3]) - 9,
+        Number(matched[4]),
+        0,
+      ));
+      if (result.getTime() < Date.now() - 24 * 60 * 60 * 1000) {
+        result = new Date(Date.UTC(
+          now.getFullYear() + 1,
+          Number(matched[1]) - 1,
+          Number(matched[2]),
+          Number(matched[3]) - 9,
+          Number(matched[4]),
+          0,
+        ));
+      }
+      return result.getTime();
+    }
+    return null;
+  }
+
   function campaignEndFromHtml(html, embedded = null) {
     const structured = campaignEndFromEmbedded(embedded);
     if (structured) return structured;
+    const trailing = campaignEndFromTrailingDate(html);
+    if (trailing) return trailing;
     const labelled = String(html || "").match(
       /(?:end_date|endDate|period_end|終了|截止|结束|까지|まで)[\s\S]{0,160}?(20\d{2})[\/-年](\d{1,2})[\/-月](\d{1,2})(?:日)?(?:[^\d]{0,12}(\d{1,2}):(\d{2}))?/i,
     );
@@ -4633,8 +4803,97 @@
     }
     return result.getTime();
   }
+  // 定额型活动的「N件X円」只写在活动页标题/主文案里，配置对象没有金额字段。
+  function bulkRuleBundleHint(html) {
+    const page = String(html || "");
+    const sources = [];
+    const title = page.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (title) sources.push(dealPlainText(title[1]));
+    const maincopy = page.match(/class="[^"]*maincopy[^"]*"[^>]*>([\s\S]{0,120}?)</i);
+    if (maincopy) sources.push(dealPlainText(maincopy[1]));
+    const description = page.match(
+      /<meta[^>]+name="description"[^>]+content="([^"]{0,300})"/i,
+    );
+    if (description) sources.push(dealPlainText(description[1]));
+    const pattern = /(\d{1,2})\s*(?:本|作品|件)[^\d]{0,8}?(\d{1,3}(?:,\d{3})+|\d{2,6})\s*(?:円|pt|ポイント|点)/i;
+    for (const text of sources) {
+      const matched = text.match(pattern);
+      if (!matched) continue;
+      const count = Math.round(dealNumber(matched[1], 0));
+      const total = dealNumber(String(matched[2]).replace(/,/g, ""), 0);
+      if (count > 1 && total > 0) return { count, total };
+    }
+    return null;
+  }
+
+  function campaignPageIsClosed(html) {
+    return /キャンペーン終了|キャンペーンは終了|このキャンペーンは終了/i.test(
+      String(html || ""),
+    );
+  }
+
+  // 活动页 HTML → 规则。比例型看 discount_rate，定额型看「3本999円」文案。
+  function bulkRuleFromHtml(html, key) {
+    const page = String(html || "");
+    const objectMatch = page.match(
+      /window\[[^\]]*?_product[^\]]*\]\s*=\s*(\{[\s\S]*?\})\s*;/i,
+    );
+    let embedded = null;
+    if (objectMatch) {
+      try { embedded = JSON.parse(objectMatch[1]); } catch { /* noop */ }
+    }
+    const embeddedKey = String(embedded?.bulkbuy_key || "");
+    if (embeddedKey && key && embeddedKey !== key) return null;
+    // 只有真正的活动页才解析文案，避免错误跳转到首页时抓到首页横幅。
+    const canonical = page.match(/<link[^>]+rel="canonical"[^>]+href="([^"]+)"/i);
+    if (!embedded && !(canonical && /campaign\//i.test(canonical[1]))) {
+      return null;
+    }
+    const titleMatch = dealPlainText(page).match(/(\d+)\s*(?:作品|本|件).*?(\d+)\s*%/i);
+    const discountRate = dealNumber(
+      embedded?.discount_rate,
+      titleMatch ? dealNumber(titleMatch[2]) : 0,
+    );
+    let minCount = Math.max(1, Math.round(dealNumber(
+      embedded?.per_item,
+      titleMatch ? dealNumber(titleMatch[1]) : 3,
+    )));
+    const bundleHint = discountRate > 0 ? null : bulkRuleBundleHint(page);
+    if (bundleHint && !embedded?.per_item) minCount = bundleHint.count;
+    const kind = discountRate > 0 ? "rate" : bundleHint ? "fix" : "";
+    if (!kind) return null;
+    if (kind === "fix" && minCount < 2) return null;
+    return {
+      key,
+      kind,
+      discountRate: kind === "rate" ? discountRate : 0,
+      fixedTotal: kind === "fix" ? bundleHint.total : 0,
+      minCount,
+      expiresAt: campaignEndFromHtml(page, embedded),
+    };
+  }
+
+  function bulkRuleKind(rule) {
+    if (!rule || rule.unavailable) return "";
+    if (rule.kind === "rate" || rule.kind === "fix") {
+      return rule.kind === "fix" && !bulkRuleBundle(rule) ? "" : rule.kind;
+    }
+    if (dealNumber(rule.discountRate, 0) > 0) return "rate";
+    return dealNumber(rule.fixedTotal, 0) > 0 ? "fix" : "";
+  }
+
+  function bulkRuleBundle(rule) {
+    if (!rule || rule.unavailable) return null;
+    const total = Math.max(0, dealNumber(rule.fixedTotal, 0));
+    if (!(total > 0)) return null;
+    if (rule.kind && rule.kind !== "fix") return null;
+    const size = Math.max(0, Math.round(dealNumber(rule.minCount, 0)));
+    if (size < 2) return null;
+    return { size, total };
+  }
+
   function bulkRuleIsActive(rule, now = Date.now()) {
-    if (!rule) return false;
+    if (!rule || rule.unavailable) return false;
     const expiresAt = Number(rule.expiresAt);
     return !rule.expiresAt || !Number.isFinite(expiresAt) || expiresAt > now;
   }
@@ -4642,13 +4901,17 @@
   function bulkRuleRefreshAfter(rule) {
     const fetchedAt = Number(rule?.fetchedAt);
     if (Number.isFinite(fetchedAt) && fetchedAt > 0) {
-      return fetchedAt + BULK_RULE_REFRESH_INTERVAL_MS;
+      const ttl = Number(rule?.ttlMs);
+      return fetchedAt + (Number.isFinite(ttl) && ttl > 0
+        ? ttl
+        : BULK_RULE_REFRESH_INTERVAL_MS);
     }
     return Number(rule?.cacheUntil);
   }
 
   function cachedBulkRuleDecision(rule, now = Date.now()) {
     if (!rule || bulkRuleRefreshAfter(rule) <= now) return undefined;
+    if (rule.unavailable) return null;
     return bulkRuleIsActive(rule, now) ? rule : null;
   }
   // </campaign-time-core>
@@ -4660,32 +4923,37 @@
     const cached = cache.bulkRules[key];
     const cachedDecision = cachedBulkRuleDecision(cached);
     if (cachedDecision !== undefined) return cachedDecision;
+    let html = null;
     try {
-      const html = await fetchSameOriginText(
+      html = await fetchSameOriginText(
         new URL(dealCampaignPath(product, key), location.origin),
-        "三件折扣活动页",
+        "多件活动页",
       );
-      const objectMatch = html.match(
-        /window\[[^\]]*?_product[^\]]*\]\s*=\s*(\{[\s\S]*?\})\s*;/i,
-      );
-      let embedded = null;
-      if (objectMatch) {
-        try { embedded = JSON.parse(objectMatch[1]); } catch { /* noop */ }
-      }
-      const titleMatch = dealPlainText(html).match(/(\d+)\s*(?:作品|本|件).*?(\d+)\s*%/i);
-      const discountRate = dealNumber(embedded?.discount_rate, titleMatch ? dealNumber(titleMatch[2]) : 0);
-      const minCount = Math.max(1, Math.round(dealNumber(embedded?.per_item, titleMatch ? dealNumber(titleMatch[1]) : 3)));
-      if (!discountRate) return null;
-      const parsedEnd = campaignEndFromHtml(html, embedded);
+      const parsed = bulkRuleFromHtml(html, key);
       const fetchedAt = Date.now();
+      if (!parsed) {
+        // 结束页与结构未知页都写负缓存：前者 24 小时，后者短期退避，
+        // 避免同一活动页在每次重算时被反复请求。
+        const closed = campaignPageIsClosed(html);
+        const ttlMs = closed
+          ? BULK_RULE_REFRESH_INTERVAL_MS
+          : BULK_RULE_RETRY_INTERVAL_MS;
+        cache.bulkRules[key] = {
+          key,
+          unavailable: true,
+          fetchedAt,
+          ttlMs,
+          cacheUntil: fetchedAt + ttlMs,
+        };
+        saveDealCache(cache);
+        return null;
+      }
       const rule = {
-        key,
-        discountRate,
-        minCount,
-        expiresAt: parsedEnd,
+        ...parsed,
+        fetchedAt,
+        ttlMs: BULK_RULE_REFRESH_INTERVAL_MS,
         // 活动有效性由 expiresAt 判断；无论何时结束，同一活动页 24 小时内不再请求。
         cacheUntil: fetchedAt + BULK_RULE_REFRESH_INTERVAL_MS,
-        fetchedAt,
       };
       cache.bulkRules[key] = rule;
       saveDealCache(cache);
@@ -5234,7 +5502,7 @@
       const count = active.filter((item) => item.bulkbuyKey === key).length;
       offerOptions.push({
         value,
-        label: `平台活动｜${rule.minCount}件${compactOff(rule.discountRate)}｜${count >= rule.minCount ? "已满" : "已有"}${count}/${rule.minCount}`,
+        label: `平台活动｜${bulkRuleLabel(rule)}｜${count >= rule.minCount ? "已满" : "已有"}${count}/${rule.minCount}`,
         rate: dealNumber(rule.discountRate),
         order: offerOptions.length,
       });
@@ -5821,6 +6089,15 @@
     return `${benefit}${threshold}${cap}`;
   }
 
+  // 活动标签：比例型显示 OFF，定额型显示真实合计价（如 3件999円）。
+  function bulkRuleLabel(rule) {
+    const bundle = bulkRuleBundle(rule);
+    if (bundle) {
+      return `${bundle.size}件${Math.round(bundle.total).toLocaleString("ja-JP")}円`;
+    }
+    return `${Math.max(2, Math.round(dealNumber(rule?.minCount, 3)))}件${compactOff(rule?.discountRate)}`;
+  }
+
   function bestReachColorClass(bestPrice, lowestPrice) {
     return Number.isFinite(bestPrice) &&
       Number.isFinite(lowestPrice) && bestPrice <= lowestPrice
@@ -5886,28 +6163,21 @@
 
   function platformSubtotalWithBulkRules(products, rules = new Map()) {
     const cart = Array.isArray(products) ? products : [];
-    const counts = new Map();
+    const groups = new Map();
+    let total = 0;
     for (const product of cart) {
       const key = String(product?.bulkbuyKey || "");
-      if (key) counts.set(key, (counts.get(key) || 0) + 1);
-    }
-    return cart.reduce((sum, product) => {
-      const currentPrice = Math.max(0, dealNumber(product?.price));
-      const officialPrice = Math.max(
-        currentPrice,
-        dealNumber(product?.officialPrice, currentPrice),
-      );
-      const key = String(product?.bulkbuyKey || "");
-      const rule = rules.get(key);
-      if (!key || !rule ||
-        (counts.get(key) || 0) < dealNumber(rule.minCount, 3)) {
-        return sum + currentPrice;
+      if (!key || !rules.get(key)) {
+        total += Math.max(0, dealNumber(product?.price));
+        continue;
       }
-      const activityPrice = Math.round(
-        officialPrice * (1 - dealNumber(rule.discountRate) / 100),
-      );
-      return sum + Math.min(currentPrice, Math.max(0, activityPrice));
-    }, 0);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(product);
+    }
+    for (const [key, items] of groups) {
+      total += bulkRuleGroupTotal(items, rules.get(key));
+    }
+    return total;
   }
 
   function plannerItemsFromProducts(products, rules, theoretical = false) {
@@ -5915,9 +6185,12 @@
       const currentPrice = Math.max(0, dealNumber(product?.price));
       const officialPrice = Math.max(currentPrice, dealNumber(product?.officialPrice, currentPrice));
       const rule = rules.get(String(product?.bulkbuyKey || ""));
-      const bulkPrice = rule?.discountRate
-        ? Math.round(officialPrice * (1 - dealNumber(rule.discountRate) / 100))
-        : null;
+      const bundle = bulkRuleBundle(rule);
+      const bulkPrice = bundle
+        ? Math.round(bundle.total / bundle.size)
+        : rule?.discountRate
+          ? Math.round(officialPrice * (1 - dealNumber(rule.discountRate) / 100))
+          : null;
       return {
         id: String(product?.id || "").toUpperCase(),
         title: String(product?.title || product?.id || "未命名作品"),
@@ -5925,6 +6198,9 @@
         setPrice: Number.isFinite(bulkPrice) && bulkPrice < currentPrice ? bulkPrice : null,
         setGroup: rule ? String(product?.bulkbuyKey || "") : "",
         setMinCount: theoretical ? 1 : Math.max(2, dealNumber(rule?.minCount, 3)),
+        // 定额型按整组计价：理论价用均摊单件价，实际报价由整组函数处理余数。
+        bundleSize: bundle && !theoretical ? bundle.size : 0,
+        bundleTotal: bundle && !theoretical ? bundle.total : 0,
       };
     });
   }
@@ -6231,8 +6507,13 @@
       ? cart.filter((product) =>
         product.bulkbuyKey === targetProduct.bulkbuyKey).length
       : 0;
+    const targetUnit = bulkRuleUnitPrice(targetRule, targetProduct);
+    const activityRate = Number.isFinite(targetUnit) &&
+      officialPrice > 0 && targetUnit < officialPrice
+      ? (1 - targetUnit / officialPrice) * 100
+      : 0;
     const activityMissing = targetRule &&
-      dealNumber(targetRule.discountRate) > saleRate + 0.001
+      activityRate > saleRate + 0.001
       ? Math.max(0, dealNumber(targetRule.minCount, 3) - activityCount)
       : 0;
     const couponOffers = highestRecommendationCoupons(coupons, targetProduct)
@@ -6320,8 +6601,10 @@
       ? Math.max(0, (1 - dealNumber(product.price) / officialPrice) * 100)
       : 0;
     const rule = recommendationRuleForProduct(product, rules, offer);
-    const activityRate = rule && product.bulkbuyKey
-      ? Math.max(0, dealNumber(rule.discountRate))
+    const activityUnit = bulkRuleUnitPrice(rule, product);
+    const activityRate = rule && product.bulkbuyKey && Number.isFinite(activityUnit) &&
+      officialPrice > 0 && activityUnit < officialPrice
+      ? Math.max(0, (1 - activityUnit / officialPrice) * 100)
       : 0;
     const useActivity = Boolean(rule) &&
       (offer.needsActivity || activityRate > saleRate + 0.001);
@@ -6358,7 +6641,7 @@
       totalRate,
       platformRate,
       platformLabel: useActivity
-        ? `${dealNumber(rule.minCount, 3)}件${compactOff(activityRate)}`
+        ? bulkRuleLabel(rule)
         : saleRate > 0 ? `当前${compactOff(saleRate)}` : "无折扣",
       coupon,
       couponLabel: coupon ? compactCouponListLabel({
@@ -6366,10 +6649,10 @@
         equivalentRate: couponEquivalentRate(coupon, product),
       }) : "—",
       activityLabel: useActivity
-        ? `${dealNumber(rule.minCount, 3)}件${compactOff(activityRate)}`
+        ? bulkRuleLabel(rule)
         : "—",
       applicableActivityLabel: rule && product.bulkbuyKey && activityRate > 0
-        ? `${dealNumber(rule.minCount, 3)}件${compactOff(activityRate)}`
+        ? bulkRuleLabel(rule)
         : "—",
       alternativeLabels,
     };
@@ -6415,11 +6698,11 @@
         : 0;
       const rule = recommendationRuleForProduct(product, rules, offer);
       const activityLabel = line?.dealApplied && rule
-        ? `${dealNumber(rule.minCount, 3)}件${compactOff(rule.discountRate)}`
+        ? bulkRuleLabel(rule)
         : "—";
       const applicableActivityLabel = rule && product.bulkbuyKey &&
-        dealNumber(rule.discountRate) > 0
-        ? `${dealNumber(rule.minCount, 3)}件${compactOff(rule.discountRate)}`
+        (dealNumber(rule.discountRate) > 0 || bulkRuleBundle(rule))
+        ? bulkRuleLabel(rule)
         : "—";
       return {
         ...product,
@@ -7086,7 +7369,7 @@
         ? Boolean(insight.product.bulkbuyKey) && insight.product.bulkbuyKey === offer.key
         : couponMatchesDealProduct(offer.coupon, insight.product))
         .map((offer) => offer.type === "activity"
-          ? `${offer.rule.minCount}件${compactOff(offer.rule.discountRate)}·还差${offer.missing}件`
+          ? `${bulkRuleLabel(offer.rule)}·还差${offer.missing}件`
           : `${compactOff(couponEquivalentRate(offer.coupon, insight.product), "券")}·${cartCouponConditionText({
               ...offer.coupon,
               countShortfall: offer.type === "count" ? offer.missing : 0,
@@ -7098,7 +7381,7 @@
         const satisfied = [];
         if (insight.bestReach.bulkRate > insight.bestReach.saleRate + 0.001 &&
           insight.bulkRule) {
-          satisfied.push(`${insight.bulkRule.minCount}件${compactOff(insight.bulkRule.discountRate)}`);
+          satisfied.push(bulkRuleLabel(insight.bulkRule));
         }
         if (insight.bestReach.bestCoupon) {
           satisfied.push(cartCouponConditionText(insight.bestReach.bestCoupon));
@@ -7148,7 +7431,7 @@
               })}`);
             }
             if (offer.needsActivity) {
-              offerLabels.push(`本单适用平台活动：${dealNumber(offer.activityRule?.minCount, 3)}件${compactOff(offer.activityRule?.discountRate)}`);
+              offerLabels.push(`本单适用平台活动：${bulkRuleLabel(offer.activityRule)}`);
             }
             const offerSummary = offerLabels.length
               ? `${offerLabels.join("＋")}｜`
@@ -7472,7 +7755,7 @@
       if (insight.bulkRule) {
         offerGroups.push({
           label: "平台活动：",
-          values: [`${insight.bulkRule.minCount}件${compactOff(insight.bulkRule.discountRate)}`],
+          values: [bulkRuleLabel(insight.bulkRule)],
         });
       }
       if (offerGroups.length || insight.partial) {
@@ -8784,7 +9067,7 @@
     if (insight.bulkRule) {
       const activity = document.createElement("div");
       activity.className = "dltracker-deal-row dltracker-activity-row";
-      activity.textContent = `${insight.bulkRule.minCount}件${compactOff(insight.bulkRule.discountRate)}`;
+      activity.textContent = bulkRuleLabel(insight.bulkRule);
       box.appendChild(activity);
     }
     if (insight.couponOptions.length) {
@@ -8833,7 +9116,7 @@
       const shortfall = Math.max(0, insight.bulkRule.minCount - cartBulkCount);
       const activityText = document.createElement("span");
       activityText.textContent = [
-        `${insight.bulkRule.minCount}件${compactOff(insight.bulkRule.discountRate)}`,
+        bulkRuleLabel(insight.bulkRule),
         shortfall ? `还差${shortfall}件` : "已满足",
         chinaExpiryText(insight.bulkRule.expiresAt),
       ].join("｜");
@@ -9045,7 +9328,7 @@
       item.bulkbuyKey && item.bulkbuyKey === insight.product.bulkbuyKey,
     ).length;
     const missing = Math.max(0, dealNumber(insight.bulkRule.minCount, 1) - count);
-    const condition = `${dealNumber(insight.bulkRule.minCount, 3)}件${compactOff(insight.bulkRule.discountRate)}·${missing ? `还差${missing}件` : "可用"}`;
+    const condition = `${bulkRuleLabel(insight.bulkRule)}·${missing ? `还差${missing}件` : "可用"}`;
     const section = document.createElement("section");
     section.className = "dltracker-cart-offer-section dltracker-cart-activity-section";
     const heading = document.createElement("h4");

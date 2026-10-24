@@ -31,6 +31,10 @@ vm.runInNewContext(
   ${functionSource("couponMatchesDealProduct")}
   ${functionSource("couponEquivalentRate")}
   ${functionSource("currencyRateFromProducts")}
+  ${functionSource("bulkRuleBundle")}
+  ${functionSource("bulkRuleKind")}
+  ${functionSource("bulkRuleUnitPrice")}
+  ${functionSource("bulkRuleGroupTotal")}
   ${functionSource("platformSubtotalWithBulkRules")}
   ${functionSource("buildDealCouponOptions")}
   ${functionSource("cartDealStatus")}
