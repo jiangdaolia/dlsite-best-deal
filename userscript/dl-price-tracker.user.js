@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.84
+// @version      0.6.85
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -25,7 +25,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.84";
+  const APP_VERSION = "0.6.85";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -87,6 +87,12 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.85": [
+      "「算算亏了多少」不再被禁用：以前只要价格列解析不到金额（例如中文界面按人民币显示 ¥62.00），整个按钮就是灰的点不动，看起来像坏了",
+      "价格列支持人民币写法（¥62.00 / 62.00元 / CNY 1,234.50 / JPY 1980），按本地 CNY/JPY 比例折成日元再和史低比，估不出汇率时该行标为未解析",
+      "解析不到金额也照常开弹窗，并把价格列原文（表头位置 + 前 5 行单元格文本）摊出来，可一键复制反馈",
+      "点击监听改挂在工具栏上，页面重绘克隆按钮也不会丢；读取卡住 120 秒后允许重新点击，不再永久锁死",
+    ],
     "0.6.84": [
       "更新源从 raw.githubusercontent.com 换成 jsDelivr（指向最新 tag）：国内网络经常连不上 raw，脚本管理器会表现为「检查更新」永远没有新版本",
       "本次需要手动重装一次才会切到新的更新源，之后就能自动更新了（同一脚本就地升级，不会出现两份）",
@@ -8286,6 +8292,7 @@
   // 列里补一行史低，在列头放一个结算按钮；不碰原站的排列、筛选和下载入口。
   const PURCHASED_ROW_ATTRIBUTE = "data-dltracker-purchased-row";
   const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+  const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
   const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
   const PURCHASED_TOOLBAR_CLASSNAME = "dltracker-purchased-toolbar";
   const PURCHASED_LOSS_OVERLAY_CLASSNAME = "dltracker-purchased-loss-overlay";
@@ -8296,20 +8303,45 @@
   // 记录「已经点过按钮、取过史低」的那张表。换页或改筛选后表格会被整张替换，
   // 这里就不相等，按钮重新可点——不在用户点之前发任何请求。
   let purchasedLowStartedFor = null;
+  let purchasedLowBusySince = 0;
+  // 上一次读取卡死（例如 IndexedDB 被其它标签页占住）时不要把按钮永久锁住。
+  const PURCHASED_LOW_BUSY_TIMEOUT_MS = 120000;
   let purchasedCnyRateMemo;
 
-  // 从「1,980円」「￥1,980」「1,980 日元」里取金额。一格里有多个金额时取最后一个：
-  // DLsite 的划线原价在前、实付在后。
-  function parseYenAmount(value) {
+  // 从「1,980円」「￥1,980」「1,980 日元」「¥62.00」里取金额和币种。
+  // 一格里有多个金额时取最后一个：DLsite 的划线原价在前、实付在后。
+  // 中文界面（currency=CNY）会把价格显示成带两位小数的人民币，只认「円/JPY」会解析失败，
+  // 所以这里把人民币标记和小数写法一起认下来，交给上层换算。
+  function parseAmountInfo(value) {
     const text = String(value ?? "").replace(/[\u00a0\u3000]/g, " ");
+    const AMOUNT = "([0-9][0-9,，]*(?:\\.[0-9]+)?)";
     const collect = (pattern) => [...text.matchAll(pattern)]
-      .map((matched) => Number(String(matched[1]).replace(/[,，]/g, "")))
-      .filter((number) => Number.isFinite(number));
-    const withUnit = collect(/([0-9][0-9,，]*)\s*(?:円|日元|日圓|JPY|yen)/gi);
-    const numbers = withUnit.length
-      ? withUnit
-      : collect(/[¥￥]\s*([0-9][0-9,，]*)/g);
-    return numbers.length ? numbers[numbers.length - 1] : null;
+      .map((matched) => ({
+        amount: Number(String(matched[1]).replace(/[,，]/g, "")),
+        raw: String(matched[0]).trim(),
+      }))
+      .filter((item) => Number.isFinite(item.amount));
+    const last = (list) => list[list.length - 1];
+    const yen = collect(new RegExp(`${AMOUNT}\\s*(?:円|日元|日圓|JPY|yen)`, "gi"));
+    if (yen.length) return { ...last(yen), currency: "JPY" };
+    const cny = collect(new RegExp(`${AMOUNT}\\s*(?:元|人民币|人民幣|CNY|RMB)`, "gi"));
+    if (cny.length) return { ...last(cny), currency: "CNY" };
+    // 也有把币种写在前面的（「CNY 1,234.50」「JPY 1980」）。
+    const cnyPrefix = collect(new RegExp(`(?:CNY|RMB)\\s*${AMOUNT}`, "gi"));
+    if (cnyPrefix.length) return { ...last(cnyPrefix), currency: "CNY" };
+    const yenPrefix = collect(new RegExp(`(?:JPY|yen)\\s*${AMOUNT}`, "gi"));
+    if (yenPrefix.length) return { ...last(yenPrefix), currency: "JPY" };
+    const symbolic = collect(new RegExp(`[¥￥]\\s*${AMOUNT}`, "g"));
+    if (symbolic.length) {
+      const picked = last(symbolic);
+      // 只有符号时靠小数位判断：「¥62.00」是人民币，「￥2,530」是日元。
+      return { ...picked, currency: /\./.test(picked.raw) ? "CNY" : "JPY" };
+    }
+    return { amount: null, currency: "", raw: "" };
+  }
+
+  function parseYenAmount(value) {
+    return parseAmountInfo(value).amount;
   }
 
   // 页面里可能有多张表（筛选、分页等），取包含作品链接最多的那张。
@@ -8335,6 +8367,18 @@
       /価格|价格|價格|price/i.test(cell.textContent || ""));
   }
 
+  // 已购页在中文界面下按人民币显示；史低永远是日元，所以这里统一折算成日元再比较，
+  // 同时记下原始人民币金额与原文，方便在弹窗里解释「为什么这一行没算」。
+  function purchasedPaidToYen(amount, currency) {
+    if (!Number.isFinite(amount)) return { yen: null, cny: null };
+    if (currency !== "CNY") return { yen: amount, cny: null };
+    const rate = typeof purchasedCnyRate === "function" ? purchasedCnyRate() : null;
+    return {
+      yen: Number.isFinite(rate) && rate > 0 ? amount / rate : null,
+      cny: amount,
+    };
+  }
+
   function purchasedRowsFromRoot(root = document) {
     const table = purchasedPriceTable(root);
     if (!table) return { table: null, priceIndex: -1, rows: [] };
@@ -8350,14 +8394,25 @@
       const cell = priceIndex >= 0 ? tr.cells?.[priceIndex] || null : null;
       // 注入史低后单元格文本会被污染，所以实付金额只解析一次并写回属性。
       const stored = tr.getAttribute(PURCHASED_PAID_ATTRIBUTE);
-      const paid = stored !== null && stored !== ""
+      const rawText = (cell?.textContent || "").replace(/\s+/g, " ").trim();
+      let amount = stored !== null && stored !== ""
         ? Number(stored)
-        : parseYenAmount(cell?.textContent || "");
+        : parseAmountInfo(rawText).amount;
+      let currency = stored !== null && stored !== ""
+        ? (tr.getAttribute(PURCHASED_PAID_CURRENCY_ATTRIBUTE) || "")
+        : parseAmountInfo(rawText).currency;
+      if (!Number.isFinite(amount)) amount = null;
+      // 老版本只写过日元金额，没有币种属性；那时页面也只会显示日元。
+      if (amount !== null && !currency) currency = "JPY";
+      const normalized = purchasedPaidToYen(amount, currency);
       rows.push({
         id,
         tr,
         cell,
-        paid: Number.isFinite(paid) ? paid : null,
+        paid: normalized.yen,
+        paidCny: normalized.cny,
+        paidRaw: rawText,
+        currency,
         title: (link.textContent || "").replace(/\s+/g, " ").trim().slice(0, 90),
         href: link.href || "",
       });
@@ -8400,6 +8455,7 @@
       };
     const compared = [];
     const missing = [];
+    const unparsed = [];
     let totalPaid = 0;
     let totalLowest = 0;
     let overpaidCount = 0;
@@ -8409,7 +8465,11 @@
     let savedTotal = 0;
     for (const row of Array.isArray(rows) ? rows : []) {
       const paid = Number.isFinite(row?.paid) ? row.paid : null;
-      if (paid === null) continue;
+      if (paid === null) {
+        // 价格列解析不到金额的行单独留档，弹窗里要摊出原文来定位格式。
+        unparsed.push({ ...row });
+        continue;
+      }
       const lowestValue = resolve(row);
       const lowest = Number.isFinite(lowestValue) ? lowestValue : null;
       if (lowest === null) {
@@ -8435,6 +8495,7 @@
     return {
       compared,
       missing,
+      unparsed,
       totalPaid,
       totalLowest,
       overpaidCount,
@@ -8603,20 +8664,23 @@
       button.type = "button";
       button.className = "dltracker-purchased-button dltracker-purchased-loss-button";
       button.textContent = "算算亏了多少";
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        void runPurchasedLowestComparison();
-      });
       const diffButton = document.createElement("button");
       diffButton.type = "button";
       diffButton.className = "dltracker-purchased-button dltracker-purchased-diff-button";
       diffButton.textContent = "数量对不上？";
       diffButton.title = "把本页（含翻页）列出的作品和 DLsite 已购接口清单逐条对比，看少了哪几部";
-      diffButton.addEventListener("click", (event) => {
+      // 事件挂在工具栏上而不是按钮上：页面重绘可能把按钮克隆成新节点，
+      // 那样直接挂在按钮上的监听就丢了，表现为「点了没反应」。
+      toolbar.addEventListener("click", (event) => {
+        const target = event.target?.closest?.(".dltracker-purchased-button") || null;
+        if (!target || !toolbar.contains(target)) return;
         event.preventDefault();
         event.stopPropagation();
-        void openPurchasedDiffDialog();
+        if (target.classList.contains("dltracker-purchased-diff-button")) {
+          void openPurchasedDiffDialog();
+        } else {
+          void runPurchasedLowestComparison();
+        }
       });
       const status = document.createElement("span");
       status.className = "dltracker-purchased-status";
@@ -8633,10 +8697,13 @@
     const withPaid = (Array.isArray(rows) ? rows : []).filter((row) =>
       Number.isFinite(row.paid)).length;
     if (button) {
-      button.disabled = !withPaid;
+      // 以前这里按「有没有解析到实付金额」禁用按钮：价格列一旦换了格式（比如中文界面
+      // 按人民币显示），整页都解析不到金额，按钮就变成点不动的灰按钮，用户只能以为坏了。
+      // 现在永远可点，解析不到就在弹窗里把价格列原文摊出来。
+      button.disabled = false;
       button.title = withPaid
         ? "点一下才去读史低：把本页每一部的实付价和历史最低价对比，算出多花了多少"
-        : "这一页没解析到「价格（含税）」金额，暂时无法结算";
+        : "价格列还没解析到金额，点一下会打开弹窗并显示价格列原文，方便反馈";
     }
   }
 
@@ -8644,10 +8711,18 @@
   // 没点之前这一页保持原样，不发任何史低请求。
   async function runPurchasedLowestComparison() {
     if (!isPurchasedWorksPage(location.href)) return;
-    if (purchasedLowBusy) return;
+    if (purchasedLowBusy) {
+      // 上一次读取卡住了才允许重入，正常读取中忽略重复点击。
+      if (Date.now() - purchasedLowBusySince < PURCHASED_LOW_BUSY_TIMEOUT_MS) return;
+      purchasedLowBusy = false;
+    }
     const { table, rows } = purchasedRowsFromRoot(document);
-    if (!table || !rows.length) return;
+    if (!table || !rows.length) {
+      setPurchasedToolbarStatus("没读到作品行，刷新页面后再点");
+      return;
+    }
     purchasedLowBusy = true;
+    purchasedLowBusySince = Date.now();
     const button = document.querySelector(
       `.${PURCHASED_TOOLBAR_CLASSNAME} .dltracker-purchased-loss-button`,
     );
@@ -8680,7 +8755,8 @@
         `.${PURCHASED_TOOLBAR_CLASSNAME} .dltracker-purchased-loss-button`,
       );
       const currentTable = purchasedRowsFromRoot(document).table;
-      if (current && currentTable) current.disabled = false;
+      // 无论表格有没有被换掉，按钮都要回到可点状态，否则一次异常就永久卡死。
+      if (current) current.disabled = false;
       // 读取过程中翻页了：表格已被替换，重新挂按钮，等用户再点。
       if (currentTable && currentTable !== table) enhancePurchasedWorksPage();
     }
@@ -9149,6 +9225,8 @@
       row.tr.setAttribute(PURCHASED_ROW_ATTRIBUTE, "1");
       if (Number.isFinite(row.paid)) {
         row.tr.setAttribute(PURCHASED_PAID_ATTRIBUTE, String(row.paid));
+        // 存进去的是已折算成日元的金额，读回时按 JPY 处理，避免人民币被当成日元再用一次。
+        row.tr.setAttribute(PURCHASED_PAID_CURRENCY_ATTRIBUTE, "JPY");
       }
     }
     ensurePurchasedToolbar(table, priceIndex, rows);
@@ -9157,7 +9235,24 @@
     if (purchasedLowStartedFor === table) renderPurchasedLowChips(rows);
   }
 
-  function purchasedLossText(summary) {
+  // 价格列解析不到金额时，把表头与几行单元格原文摊出来：用户复制这一块就能定位格式。
+  function purchasedPriceDiagnosticText(rows, priceIndex = -1) {
+    const list = Array.isArray(rows) ? rows : [];
+    const lines = [
+      priceIndex >= 0
+        ? `价格列：第 ${priceIndex + 1} 列`
+        : "没定位到「价格」列（表头里没有 価格/价格/價格/price 字样）",
+      `本页作品行：${list.length}`,
+    ];
+    const samples = list.slice(0, 5).map((row) => {
+      const text = String(row?.paidRaw || "").slice(0, 48);
+      return `${row?.id || "?"}｜${text || "（空）"}${row?.currency ? `｜${row.currency}` : ""}`;
+    });
+    if (samples.length) lines.push("价格列原文：", ...samples.map((line) => `  ${line}`));
+    return lines.join("\n");
+  }
+
+  function purchasedLossText(summary, diagnostic = "") {
     const lines = [
       "已购买作品｜实付 vs 史低",
       `有史低 ${summary.compared.length} 部｜无史低 ${summary.missing.length} 部`,
@@ -9180,6 +9275,7 @@
     if (summary.missing.length) {
       lines.push("", `无史低数据：${summary.missing.map((row) => row.id).join(", ")}`);
     }
+    if (diagnostic) lines.push("", "价格列解析情况：", diagnostic);
     return lines.join("\n");
   }
 
@@ -9190,8 +9286,9 @@
 
   function openPurchasedLossDialog() {
     closePurchasedLossDialog();
-    const { rows } = purchasedRowsFromRoot(document);
+    const { rows, priceIndex } = purchasedRowsFromRoot(document);
     const summary = purchasedLossSummary(rows);
+    const diagnostic = purchasedPriceDiagnosticText(rows, priceIndex);
     const cnyRate = purchasedCnyRate();
     const overlay = document.createElement("div");
     overlay.className = `dltracker-reach-overlay ${PURCHASED_LOSS_OVERLAY_CLASSNAME}`;
@@ -9298,9 +9395,16 @@
     if (!summary.compared.length) {
       const empty = document.createElement("p");
       empty.className = "dltracker-purchased-loss-note";
-      empty.textContent = "史低只在点了「算算亏了多少」之后才读取；" +
-        "若点了仍为空，说明这一页没解析到「价格（含税）」金额。";
-      tableWrap.replaceChildren(empty);
+      empty.textContent = summary.unparsed.length
+        ? `这一页有 ${summary.unparsed.length} 部作品，但价格列一个金额都没解析出来，` +
+          "所以算不出亏了多少。下面是价格列原文，复制给助手就能按你页面的实际格式修。"
+        : "史低只在点了「算算亏了多少」之后才读取；若点了仍为空，请刷新页面再点一次。";
+      const pre = document.createElement("pre");
+      pre.className = "dltracker-purchased-loss-note";
+      pre.style.whiteSpace = "pre-wrap";
+      pre.style.margin = "0";
+      pre.textContent = diagnostic;
+      tableWrap.replaceChildren(empty, pre);
     }
     const notes = [];
     if (summary.missing.length) {
@@ -9322,7 +9426,9 @@
     copyButton.textContent = "复制文本版";
     const status = document.createElement("span");
     copyButton.addEventListener("click", async () => {
-      const copied = await copyCartDiagnosticText(purchasedLossText(summary));
+      const copied = await copyCartDiagnosticText(
+        purchasedLossText(summary, summary.unparsed.length ? diagnostic : ""),
+      );
       status.textContent = copied ? "已复制" : "复制失败，可先截图";
     });
     actions.append(copyButton, status);
@@ -14327,6 +14433,7 @@
     for (const node of document.querySelectorAll(`[${PURCHASED_ROW_ATTRIBUTE}]`)) {
       node.removeAttribute(PURCHASED_ROW_ATTRIBUTE);
       node.removeAttribute(PURCHASED_PAID_ATTRIBUTE);
+      node.removeAttribute(PURCHASED_PAID_CURRENCY_ATTRIBUTE);
     }
     for (const node of document.querySelectorAll([
       `[${DEAL_PROCESSED_ATTRIBUTE}]`,

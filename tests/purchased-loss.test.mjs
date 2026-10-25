@@ -26,6 +26,7 @@ function makeSandbox(extraSource = "") {
   vm.runInNewContext(
     `${extraSource}
     globalThis.parseYenAmount = parseYenAmount;
+    globalThis.parseAmountInfo = parseAmountInfo;
     globalThis.purchasedLossSummary = purchasedLossSummary;
     globalThis.purchasedRowsFromRoot = purchasedRowsFromRoot;`,
     sandbox,
@@ -35,7 +36,9 @@ function makeSandbox(extraSource = "") {
 
 const coreSource = () =>
   [
+    functionSource("parseAmountInfo"),
     functionSource("parseYenAmount"),
+    functionSource("purchasedPaidToYen"),
     functionSource("purchasedLowestFor"),
     functionSource("purchasedLowChipText"),
     functionSource("purchasedLossSummary"),
@@ -47,6 +50,7 @@ const coreSource = () =>
 test("已购页从价格（含税）列解析实付金额", () => {
   const sandbox = makeSandbox(`${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
     const purchasedLowCache = new Map();`);
   const parse = sandbox.parseYenAmount;
   assert.equal(parse("1,980円"), 1980);
@@ -61,9 +65,64 @@ test("已购页从价格（含税）列解析实付金额", () => {
   assert.equal(parse(null), null);
 });
 
+test("已购页把人民币显示的价格也认出来，并折算成日元比较", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const purchasedLowCache = new Map();
+    let rateValue = 0.05;
+    function purchasedCnyRate() {
+      return rateValue;
+    }
+    globalThis.paidToYen = purchasedPaidToYen;
+    globalThis.setRate = (next) => { rateValue = next; };`);
+  const info = sandbox.parseAmountInfo;
+  // 中文界面（currency=CNY）会带两位小数，或者干脆写成「62.00元 / CNY 62.00」。
+  assert.deepEqual(
+    [info("¥62.00").amount, info("¥62.00").currency],
+    [62, "CNY"],
+  );
+  assert.deepEqual(
+    [info("62.00 元").amount, info("62.00 元").currency],
+    [62, "CNY"],
+  );
+  assert.deepEqual(
+    [info("CNY 1,234.50").amount, info("CNY 1,234.50").currency],
+    [1234.5, "CNY"],
+  );
+  // 日文界面的整数写法仍然是日元。
+  assert.equal(info("￥2,530").currency, "JPY");
+  assert.equal(info("1,980円").currency, "JPY");
+  // 人民币按本地比例折成日元：62 / 0.05 = 1240。
+  const converted = sandbox.paidToYen(62, "CNY");
+  assert.equal(converted.cny, 62);
+  assert.equal(converted.yen, 1240);
+  // 没有汇率时不要瞎算：金额留空，但人民币原值还在，弹窗可以解释。
+  sandbox.setRate(null);
+  const noRate = sandbox.paidToYen(62, "CNY");
+  assert.equal(noRate.yen, null);
+  assert.equal(noRate.cny, 62);
+  // 日元金额原样返回。
+  assert.deepEqual(
+    [sandbox.paidToYen(1980, "JPY").yen, sandbox.paidToYen(1980, "JPY").cny],
+    [1980, null],
+  );
+});
+
+test("算算亏了多少按钮不再因为解析不到金额而被禁用", () => {
+  const toolbar = functionSource("ensurePurchasedToolbar");
+  // 一旦按「有没有实付金额」禁用，价格列换格式就会变成点不动的灰按钮。
+  assert.doesNotMatch(toolbar, /button\.disabled = !withPaid/);
+  assert.match(toolbar, /button\.disabled = false/);
+  const run = functionSource("runPurchasedLowestComparison");
+  // 异常后也要恢复可点，否则一次失败就永久卡死。
+  assert.match(run, /if \(current\) current\.disabled = false/);
+});
+
 test("已购页结算区分买贵、买便宜、持平与缺少史低", () => {
   const sandbox = makeSandbox(`${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
     const purchasedLowCache = new Map();`);
   const rows = [
     { id: "RJ00000001", paid: 2500 },
@@ -104,6 +163,7 @@ test("已购页结算区分买贵、买便宜、持平与缺少史低", () => {
 test("已购页从表格定位价格列并读出每一行的编号与实付", () => {
   const sandbox = makeSandbox(`${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
     const purchasedLowCache = new Map();`);
   const cell = (tagName, textContent) => ({ tagName, textContent });
   const header = {
@@ -147,6 +207,7 @@ test("已购页从表格定位价格列并读出每一行的编号与实付", ()
 test("已购页史低标签写成「史低N JPY / M RMB」", () => {
   const sandbox = makeSandbox(`${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
     const purchasedLowCache = new Map([
       ["RJ00000001", { lowest: 990 }],
       ["RJ00000002", { lowest: 1980 }],
@@ -169,6 +230,7 @@ test("已购页史低标签写成「史低N JPY / M RMB」", () => {
 test("已购页算不出人民币汇率时史低只显示日元", () => {
   const sandbox = makeSandbox(`${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
     const purchasedLowCache = new Map([["RJ00000001", { lowest: 379 }]]);`);
   const state = sandbox.purchasedLowChipText({ id: "RJ00000001", paid: 1980 });
   assert.equal(state.text, "史低379 JPY");
@@ -198,6 +260,7 @@ test("已购页对比只取主表格的作品编号，不把推荐位算进来",
     ${functionSource("purchasedPageTotalText")}
     ${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
     const purchasedLowCache = new Map();
     globalThis.purchasedPageIds = purchasedPageIds;
     globalThis.purchasedPageTotalText = purchasedPageTotalText;`);
@@ -243,6 +306,7 @@ test("已购页数量对比文本列出接口有而页面没有的编号", () =>
     ${functionSource("purchasedDiffReasonText")}
     ${functionSource("purchasedDiffText")}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
     const purchasedLowCache = new Map();
     function normalizedMetadataProduct(id, raw) {
       return {
@@ -282,6 +346,7 @@ test("已购页数量对比标出每条的差异原因与同作品多编号", ()
     ${functionSource("purchasedDiffReasonText")}
     ${functionSource("purchasedDiffText")}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
     const purchasedLowCache = new Map();
     function normalizedMetadataProduct(id, raw) {
       return { id, title: String(raw?.title || id), siteId: "", price: null };
