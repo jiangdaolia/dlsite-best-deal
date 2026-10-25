@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.78
+// @version      0.6.79
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.78";
+  const APP_VERSION = "0.6.79";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -85,6 +85,12 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.79": [
+      "已购买作品页「价格（含税）」列补上历史最低价，直接标出比史低贵多少、省多少",
+      "价格列表头新增「算算亏了多少」按钮：逐条对比本页实付与史低，列出差额排行并汇总多花/省下的金额",
+      "史低先读本地缓存，缺的再小批量补请求 DLwatcher，结果落库供下次直接复用",
+      "已购页翻页或改筛选后自动重新计算，只统计当前页列出的作品",
+    ],
     "0.6.78": [
       "已购清单核对新增「已购买作品页」对比：脚本同源读取已购买作品页，把页面实际列出的作品与已购接口清单做差集，并标出页面没有显示的条目",
       "对比结果同时输出页面上的筛选下拉/月份条件与翻页数，用于判断页面是否只显示了部分记录",
@@ -8184,6 +8190,550 @@
     return { ids, filters, pages };
   }
 
+  // ---- 已购买作品页：史低标注 + 「亏了多少」结算 ----
+  // 这一页以前完全不注入界面。按用户要求改为只做两件事：在「价格（含税）」
+  // 列里补一行史低，在列头放一个结算按钮；不碰原站的排列、筛选和下载入口。
+  const PURCHASED_ROW_ATTRIBUTE = "data-dltracker-purchased-row";
+  const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+  const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
+  const PURCHASED_TOOLBAR_CLASSNAME = "dltracker-purchased-toolbar";
+  const PURCHASED_LOSS_OVERLAY_CLASSNAME = "dltracker-purchased-loss-overlay";
+  const PURCHASED_LOW_BATCH_SIZE = 5;
+  const PURCHASED_LOW_BATCH_PAUSE_MS = 400;
+  const purchasedLowCache = new Map();
+  let purchasedLowTask = null;
+  let purchasedLowRerun = false;
+
+  // 从「1,980円」「￥1,980」「1,980 日元」里取金额。一格里有多个金额时取最后一个：
+  // DLsite 的划线原价在前、实付在后。
+  function parseYenAmount(value) {
+    const text = String(value ?? "").replace(/[\u00a0\u3000]/g, " ");
+    const collect = (pattern) => [...text.matchAll(pattern)]
+      .map((matched) => Number(String(matched[1]).replace(/[,，]/g, "")))
+      .filter((number) => Number.isFinite(number));
+    const withUnit = collect(/([0-9][0-9,，]*)\s*(?:円|日元|日圓|JPY|yen)/gi);
+    const numbers = withUnit.length
+      ? withUnit
+      : collect(/[¥￥]\s*([0-9][0-9,，]*)/g);
+    return numbers.length ? numbers[numbers.length - 1] : null;
+  }
+
+  // 页面里可能有多张表（筛选、分页等），取包含作品链接最多的那张。
+  function purchasedPriceTable(root = document) {
+    let best = null;
+    let bestCount = 0;
+    for (const table of root?.querySelectorAll?.("table") || []) {
+      const count = table.querySelectorAll('a[href*="product_id/"]').length;
+      if (count > bestCount) {
+        best = table;
+        bestCount = count;
+      }
+    }
+    return best;
+  }
+
+  function purchasedPriceColumnIndex(table) {
+    const rows = [...(table?.rows || [])];
+    const header = rows.find((row) =>
+      [...(row.cells || [])].some((cell) => cell.tagName === "TH"));
+    if (!header) return -1;
+    return [...header.cells].findIndex((cell) =>
+      /価格|价格|價格|price/i.test(cell.textContent || ""));
+  }
+
+  function purchasedRowsFromRoot(root = document) {
+    const table = purchasedPriceTable(root);
+    if (!table) return { table: null, priceIndex: -1, rows: [] };
+    const priceIndex = purchasedPriceColumnIndex(table);
+    const rows = [];
+    for (const tr of table.querySelectorAll("tr")) {
+      const link = tr.querySelector('a[href*="product_id/"]');
+      if (!link) continue;
+      const matched = String(link.getAttribute("href") || "").match(/([RBV]J\d{6,})/i);
+      if (!matched) continue;
+      const id = matched[1].toUpperCase();
+      if (rows.some((row) => row.id === id)) continue;
+      const cell = priceIndex >= 0 ? tr.cells?.[priceIndex] || null : null;
+      // 注入史低后单元格文本会被污染，所以实付金额只解析一次并写回属性。
+      const stored = tr.getAttribute(PURCHASED_PAID_ATTRIBUTE);
+      const paid = stored !== null && stored !== ""
+        ? Number(stored)
+        : parseYenAmount(cell?.textContent || "");
+      rows.push({
+        id,
+        tr,
+        cell,
+        paid: Number.isFinite(paid) ? paid : null,
+        title: (link.textContent || "").replace(/\s+/g, " ").trim().slice(0, 90),
+        href: link.href || "",
+      });
+    }
+    return { table, priceIndex, rows };
+  }
+
+  function purchasedLowestFor(id) {
+    return purchasedLowCache.get(String(id || "").toUpperCase()) || null;
+  }
+
+  function purchasedLowChipText(row) {
+    const cached = purchasedLowestFor(row?.id);
+    if (!cached) return { text: "史低读取中…", tone: "pending" };
+    const lowest = Number.isFinite(cached.lowest) ? cached.lowest : null;
+    if (lowest === null) return { text: "无史低数据", tone: "unknown" };
+    const head = `史低 ${toYen(lowest)}`;
+    const paid = Number.isFinite(row?.paid) ? row.paid : null;
+    if (paid === null) return { text: head, tone: "info" };
+    const diff = paid - lowest;
+    if (diff > 0) return { text: `${head}｜贵 ${toYen(diff)}`, tone: "loss" };
+    if (diff < 0) return { text: `${head}｜省 ${toYen(-diff)}`, tone: "win" };
+    return { text: `${head}｜持平`, tone: "even" };
+  }
+
+  // 逐条对比实付与史低。lowestOf 可注入，便于测试不依赖缓存。
+  function purchasedLossSummary(rows, lowestOf = null) {
+    const resolve = typeof lowestOf === "function"
+      ? lowestOf
+      : (row) => {
+        const cached = purchasedLowestFor(row?.id);
+        return Number.isFinite(cached?.lowest) ? cached.lowest : null;
+      };
+    const compared = [];
+    const missing = [];
+    let totalPaid = 0;
+    let totalLowest = 0;
+    let overpaidCount = 0;
+    let cheaperCount = 0;
+    let evenCount = 0;
+    let overpaidTotal = 0;
+    let savedTotal = 0;
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const paid = Number.isFinite(row?.paid) ? row.paid : null;
+      if (paid === null) continue;
+      const lowestValue = resolve(row);
+      const lowest = Number.isFinite(lowestValue) ? lowestValue : null;
+      if (lowest === null) {
+        // 没读到史低的条目只列出来，不参与两边合计，避免差额被单边拉偏。
+        missing.push({ ...row, paid });
+        continue;
+      }
+      totalPaid += paid;
+      totalLowest += lowest;
+      const diff = paid - lowest;
+      if (diff > 0) {
+        overpaidCount += 1;
+        overpaidTotal += diff;
+      } else if (diff < 0) {
+        cheaperCount += 1;
+        savedTotal += -diff;
+      } else {
+        evenCount += 1;
+      }
+      compared.push({ ...row, paid, lowest, diff });
+    }
+    compared.sort((left, right) => right.diff - left.diff);
+    return {
+      compared,
+      missing,
+      totalPaid,
+      totalLowest,
+      overpaidCount,
+      cheaperCount,
+      evenCount,
+      overpaidTotal,
+      savedTotal,
+      netDiff: totalPaid - totalLowest,
+    };
+  }
+
+  // 用本地已缓存的商品元数据估算人民币汇率，估不出来就只显示日元。
+  function purchasedCnyRate() {
+    const metadata = loadDealCache()?.metadata || {};
+    const products = Object.keys(metadata)
+      .slice(0, 200)
+      .map((id) => normalizedMetadataProduct(id, metadata[id]?.raw))
+      .filter((product) => product.price > 0);
+    const rate = currencyRateFromProducts(products);
+    return Number.isFinite(rate) && rate > 0 ? rate : null;
+  }
+
+  async function persistPurchasedLowest(item) {
+    if (!isValidRjCode(item?.rjCode)) return;
+    const now = nowIso();
+    const existing = await getPriceRecord(item.rjCode);
+    const input = {
+      rjCode: item.rjCode,
+      lowestPrice: item.lowestPrice,
+      lastChecked: now,
+      updatedAt: now,
+      dlwatcherUrl: item.dlwatcherUrl || buildDlwatcherPageUrl(item.rjCode),
+    };
+    if (Number.isFinite(item.regularPrice)) input.regularPrice = item.regularPrice;
+    if (Number.isFinite(item.discountRate)) input.discountRate = item.discountRate;
+    if (existing && !Number.isFinite(existing.lowestPrice)) {
+      // upsertPriceRecord 里的 Math.min(undefined, x) 会变成 NaN，这里直接覆盖。
+      await storePut(STORE_PRICES, { ...existing, ...input });
+      return;
+    }
+    await upsertPriceRecord(input);
+  }
+
+  // 先查本地 IndexedDB，再按小批量补请求 DLwatcher，成功后顺手落到同一个库里，
+  // 下次打开这一页就不用再联网。
+  async function ensurePurchasedLowestPrices(rows, onProgress = null) {
+    const targets = [];
+    for (const row of Array.isArray(rows) ? rows : []) {
+      if (!row?.id) continue;
+      const id = String(row.id).toUpperCase();
+      // VJ 这类 DLwatcher 不收录的编号直接标记为无数据，避免一直停在「读取中」。
+      if (!isValidRjCode(id) && !purchasedLowCache.has(id)) {
+        purchasedLowCache.set(id, { lowest: null, source: "unsupported" });
+        continue;
+      }
+      if (targets.some((item) => item.id === id)) continue;
+      targets.push(row);
+    }
+    const total = targets.length;
+    let done = 0;
+    const report = () => {
+      if (typeof onProgress !== "function") return;
+      try {
+        onProgress(done, total);
+      } catch (error) {
+        console.warn(`[${APP_NAME}] purchased progress failed:`, error);
+      }
+    };
+    const pending = [];
+    for (const row of targets) {
+      if (purchasedLowCache.has(row.id)) {
+        done += 1;
+        continue;
+      }
+      let record = null;
+      try {
+        record = await getPriceRecord(row.id);
+      } catch {
+        record = null;
+      }
+      if (record && Number.isFinite(record.lowestPrice)) {
+        purchasedLowCache.set(row.id, {
+          lowest: record.lowestPrice,
+          regular: Number.isFinite(record.regularPrice) ? record.regularPrice : null,
+          source: "cache",
+        });
+        done += 1;
+        continue;
+      }
+      pending.push(row);
+    }
+    report();
+    for (let index = 0; index < pending.length; index += PURCHASED_LOW_BATCH_SIZE) {
+      const batch = pending.slice(index, index + PURCHASED_LOW_BATCH_SIZE);
+      const fetched = await Promise.all(batch.map((row) =>
+        fetchPriceFromDlwatcher(row.id).catch(() => ({
+          rjCode: row.id,
+          lowestPrice: null,
+        }))));
+      for (const item of fetched) {
+        purchasedLowCache.set(item.rjCode, {
+          lowest: Number.isFinite(item?.lowestPrice) ? item.lowestPrice : null,
+          regular: Number.isFinite(item?.regularPrice) ? item.regularPrice : null,
+          source: "dlwatcher",
+          fetchedAt: Date.now(),
+        });
+        done += 1;
+      }
+      await Promise.all(fetched
+        .filter((item) => Number.isFinite(item?.lowestPrice))
+        .map((item) => persistPurchasedLowest(item).catch((error) => {
+          console.warn(`[${APP_NAME}] persist lowest failed:`, error);
+        })));
+      report();
+      if (index + PURCHASED_LOW_BATCH_SIZE < pending.length) {
+        await sleep(PURCHASED_LOW_BATCH_PAUSE_MS);
+      }
+    }
+    return purchasedLowCache;
+  }
+
+  function renderPurchasedLowChip(row) {
+    if (!row?.cell) return;
+    let chip = row.cell.querySelector(`.${PURCHASED_LOW_CLASSNAME}`);
+    if (!chip) {
+      chip = document.createElement("span");
+      chip.className = PURCHASED_LOW_CLASSNAME;
+      row.cell.appendChild(chip);
+    }
+    const state = purchasedLowChipText(row);
+    chip.dataset.tone = state.tone;
+    if (chip.textContent !== state.text) chip.textContent = state.text;
+    chip.title = `实付 ${Number.isFinite(row.paid) ? toYen(row.paid) : "-"}｜${state.text}`;
+  }
+
+  function setPurchasedToolbarStatus(text) {
+    const status = document.querySelector(
+      `.${PURCHASED_TOOLBAR_CLASSNAME} .dltracker-purchased-status`,
+    );
+    if (status && status.textContent !== text) status.textContent = text;
+  }
+
+  function ensurePurchasedToolbar(table, priceIndex, rows) {
+    let toolbar = document.querySelector(`.${PURCHASED_TOOLBAR_CLASSNAME}`);
+    if (!toolbar) {
+      const header = [...(table?.rows || [])].find((row) =>
+        [...(row.cells || [])].some((cell) => cell.tagName === "TH"));
+      const host = priceIndex >= 0 ? header?.cells?.[priceIndex] || null : null;
+      toolbar = document.createElement("div");
+      toolbar.className = PURCHASED_TOOLBAR_CLASSNAME;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "dltracker-purchased-button";
+      button.textContent = "算算亏了多少";
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openPurchasedLossDialog();
+      });
+      const status = document.createElement("span");
+      status.className = "dltracker-purchased-status";
+      toolbar.append(button, status);
+      if (host) {
+        host.appendChild(toolbar);
+      } else if (table?.parentElement) {
+        table.parentElement.insertBefore(toolbar, table);
+      } else {
+        return;
+      }
+    }
+    const button = toolbar.querySelector(".dltracker-purchased-button");
+    const withPaid = (Array.isArray(rows) ? rows : []).filter((row) =>
+      Number.isFinite(row.paid)).length;
+    if (button) {
+      button.disabled = !withPaid;
+      button.title = withPaid
+        ? "把本页每一部的实付价和历史最低价对比，算出你多花了多少"
+        : "这一页没解析到「价格（含税）」金额，暂时无法结算";
+    }
+  }
+
+  function enhancePurchasedWorksPage() {
+    if (!isPurchasedWorksPage(location.href)) return;
+    injectStyle();
+    const { table, priceIndex, rows } = purchasedRowsFromRoot(document);
+    if (!table || !rows.length) return;
+    for (const row of rows) {
+      row.tr.setAttribute(PURCHASED_ROW_ATTRIBUTE, "1");
+      if (Number.isFinite(row.paid)) {
+        row.tr.setAttribute(PURCHASED_PAID_ATTRIBUTE, String(row.paid));
+      }
+    }
+    ensurePurchasedToolbar(table, priceIndex, rows);
+    for (const row of rows) renderPurchasedLowChip(row);
+    if (purchasedLowTask) {
+      // 上一次还在跑（多半是翻页），跑完再补这一页缺的。
+      purchasedLowRerun = true;
+      return;
+    }
+    purchasedLowRerun = false;
+    purchasedLowTask = ensurePurchasedLowestPrices(rows, (done, total) => {
+      setPurchasedToolbarStatus(total ? `史低 ${done}/${total}` : "");
+      for (const row of rows) renderPurchasedLowChip(row);
+    })
+      .then(() => {
+        for (const row of rows) renderPurchasedLowChip(row);
+        const resolved = rows.filter((row) =>
+          Number.isFinite(purchasedLowestFor(row.id)?.lowest)).length;
+        setPurchasedToolbarStatus(`史低 ${resolved}/${rows.length}`);
+      })
+      .catch((error) => {
+        console.warn(`[${APP_NAME}] purchased lowest failed:`, error);
+        setPurchasedToolbarStatus("史低读取失败");
+      })
+      .finally(() => {
+        purchasedLowTask = null;
+        if (purchasedLowRerun) {
+          purchasedLowRerun = false;
+          enhancePurchasedWorksPage();
+        }
+      });
+  }
+
+  function purchasedLossText(summary) {
+    const lines = [
+      "已购买作品｜实付 vs 史低",
+      `有史低 ${summary.compared.length} 部｜无史低 ${summary.missing.length} 部`,
+      `实付合计 ${toYen(summary.totalPaid)}｜史低合计 ${toYen(summary.totalLowest)}` +
+        `｜差额 ${summary.netDiff > 0 ? "+" : ""}${toYen(summary.netDiff)}`,
+      `比史低贵 ${summary.overpaidCount} 部，多花 ${toYen(summary.overpaidTotal)}` +
+        `；比史低便宜 ${summary.cheaperCount} 部，省 ${toYen(summary.savedTotal)}` +
+        `；持平 ${summary.evenCount} 部`,
+      "",
+      "编号｜实付｜史低｜差额",
+    ];
+    for (const row of summary.compared) {
+      lines.push([
+        row.id,
+        toYen(row.paid),
+        toYen(row.lowest),
+        `${row.diff > 0 ? "+" : ""}${toYen(row.diff)}`,
+      ].join("｜"));
+    }
+    if (summary.missing.length) {
+      lines.push("", `无史低数据：${summary.missing.map((row) => row.id).join(", ")}`);
+    }
+    return lines.join("\n");
+  }
+
+  function closePurchasedLossDialog() {
+    document.querySelector(`.${PURCHASED_LOSS_OVERLAY_CLASSNAME}`)?.remove();
+    unlockReachDialogScroll();
+  }
+
+  function openPurchasedLossDialog() {
+    closePurchasedLossDialog();
+    const { rows } = purchasedRowsFromRoot(document);
+    const summary = purchasedLossSummary(rows);
+    const cnyRate = purchasedCnyRate();
+    const overlay = document.createElement("div");
+    overlay.className = `dltracker-reach-overlay ${PURCHASED_LOSS_OVERLAY_CLASSNAME}`;
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) closePurchasedLossDialog();
+    });
+    const dialog = document.createElement("section");
+    dialog.className = "dltracker-reach-dialog dltracker-purchased-loss-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.tabIndex = -1;
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closePurchasedLossDialog();
+    });
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    title.textContent = "算算亏了多少";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "关闭");
+    close.addEventListener("click", closePurchasedLossDialog);
+    header.append(title, close);
+
+    const body = document.createElement("div");
+    body.className = "dltracker-reach-dialog-body";
+    const summaryBox = document.createElement("div");
+    summaryBox.className = "dltracker-purchased-loss-summary";
+    const chip = (label, value, tone) => {
+      const node = document.createElement("span");
+      if (tone) node.className = `is-${tone}`;
+      const strong = document.createElement("strong");
+      strong.textContent = `${label}：`;
+      node.append(strong, document.createTextNode(String(value)));
+      return node;
+    };
+    summaryBox.append(
+      chip("本页", `${summary.compared.length + summary.missing.length} 部`),
+      chip("有史低", `${summary.compared.length} 部`),
+      chip("比史低贵", `${summary.overpaidCount} 部`, "loss"),
+      chip("多花", toYen(summary.overpaidTotal), "loss"),
+      chip("比史低便宜", `${summary.cheaperCount} 部`, "win"),
+      chip("省下", toYen(summary.savedTotal), "win"),
+      chip("持平", `${summary.evenCount} 部`),
+      chip(
+        "合计差额",
+        summary.netDiff > 0
+          ? `多花 ${toYen(summary.netDiff)}`
+          : summary.netDiff < 0
+            ? `省 ${toYen(-summary.netDiff)}`
+            : "持平",
+        summary.netDiff > 0 ? "loss" : summary.netDiff < 0 ? "win" : "",
+      ),
+    );
+    if (cnyRate) {
+      const cny = document.createElement("span");
+      cny.className = "is-note";
+      cny.textContent = `约合 ${(Math.abs(summary.netDiff) * cnyRate).toFixed(2)} 元` +
+        `（按本地商品 CNY/JPY 比例估算，仅供参考）`;
+      summaryBox.appendChild(cny);
+    }
+    const tableWrap = document.createElement("div");
+    tableWrap.className = "dltracker-purchased-loss-table-wrap";
+    const table = document.createElement("table");
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    for (const label of ["#", "作品", "实付", "史低", "差额"]) {
+      const th = document.createElement("th");
+      th.textContent = label;
+      headRow.appendChild(th);
+    }
+    thead.appendChild(headRow);
+    const tbody = document.createElement("tbody");
+    summary.compared.forEach((row, position) => {
+      const tr = document.createElement("tr");
+      if (row.diff > 0) tr.className = "is-loss";
+      else if (row.diff < 0) tr.classList.add("is-win");
+      const cells = [
+        String(position + 1),
+        row.title ? `${row.id} ${row.title}` : row.id,
+        toYen(row.paid),
+        toYen(row.lowest),
+        row.diff > 0 ? `+${toYen(row.diff)}` : row.diff < 0 ? `-${toYen(-row.diff)}` : "持平",
+      ];
+      cells.forEach((text, cellIndex) => {
+        const td = document.createElement("td");
+        if (cellIndex === 1 && row.href) {
+          const link = document.createElement("a");
+          link.href = row.href;
+          link.target = "_blank";
+          link.rel = "noopener";
+          link.textContent = text;
+          td.appendChild(link);
+        } else {
+          td.textContent = text;
+        }
+        if (cellIndex === 4) td.className = "is-diff";
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.append(thead, tbody);
+    tableWrap.appendChild(table);
+    if (!summary.compared.length) {
+      const empty = document.createElement("p");
+      empty.className = "dltracker-purchased-loss-note";
+      empty.textContent = "还没读到任何史低：先等史低读完再点这个按钮；" +
+        "若一直为空，说明这一页没解析到「价格（含税）」金额。";
+      tableWrap.replaceChildren(empty);
+    }
+    const notes = [];
+    if (summary.missing.length) {
+      notes.push(
+        `有 ${summary.missing.length} 部没读到史低（${summary.missing
+          .map((row) => row.id)
+          .join("、")}），未计入合计。`,
+      );
+    }
+    notes.push("只统计当前页列出的作品；史低来自 DLwatcher，读到的结果会缓存到本地。");
+    const noteNode = document.createElement("p");
+    noteNode.className = "dltracker-purchased-loss-note";
+    noteNode.textContent = notes.join("");
+    const actions = document.createElement("div");
+    actions.className = "dltracker-purchased-loss-actions";
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "is-primary";
+    copyButton.textContent = "复制文本版";
+    const status = document.createElement("span");
+    copyButton.addEventListener("click", async () => {
+      const copied = await copyCartDiagnosticText(purchasedLossText(summary));
+      status.textContent = copied ? "已复制" : "复制失败，可先截图";
+    });
+    actions.append(copyButton, status);
+    body.append(summaryBox, tableWrap, noteNode, actions);
+    dialog.append(header, body);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    lockReachDialogScroll();
+    dialog.focus({ preventScroll: true });
+  }
+
   function boughtCountBreakdown(
     index = loadAccountIndex(),
     languageCache = loadLanguageFamilyCache(),
@@ -13012,6 +13562,7 @@
     closeLanguageDialog();
     closeAccountInformationDialog();
     closeReachDialog();
+    closePurchasedLossDialog();
     document.getElementById(STYLE_ID)?.remove();
     document.querySelectorAll([
       `.${UI_CLASSNAME}`,
@@ -13025,8 +13576,14 @@
       ".dltracker-language-entry-cart",
       ".dltracker-account-reminders",
       ".dltracker-account-fab",
+      ".dltracker-purchased-toolbar",
+      ".dltracker-purchased-low",
       ".dltracker-reach-overlay",
     ].join(",")).forEach((node) => node.remove());
+    for (const node of document.querySelectorAll(`[${PURCHASED_ROW_ATTRIBUTE}]`)) {
+      node.removeAttribute(PURCHASED_ROW_ATTRIBUTE);
+      node.removeAttribute(PURCHASED_PAID_ATTRIBUTE);
+    }
     for (const node of document.querySelectorAll([
       `[${DEAL_PROCESSED_ATTRIBUTE}]`,
       ".dltracker-browse-filtered-out",
@@ -13049,7 +13606,9 @@
   async function bootstrap() {
     const url = location.href;
     if (isPurchasedWorksPage(url)) {
+      // 已购买作品页只补史低和结算按钮，不挂浏览/购物车那一套界面。
       clearTrackerPresentation();
+      enhancePurchasedWorksPage();
       return;
     }
     injectStyle();
@@ -13996,6 +14555,163 @@ a.dltracker-browse-analysis-frame {
 }
 
 .dltracker-bought-diagnostic-status {
+  color: #52616b;
+  font-size: 12px;
+}
+
+.dltracker-purchased-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  font-weight: 400;
+  white-space: normal;
+}
+
+.dltracker-purchased-button {
+  padding: 3px 8px;
+  border: 1px solid #435a66;
+  border-radius: 999px;
+  background: #435a66;
+  color: #fff;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.dltracker-purchased-button:hover:not(:disabled) {
+  background: #374b56;
+}
+
+.dltracker-purchased-button:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.dltracker-purchased-status {
+  color: #5b6b75;
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.dltracker-purchased-low {
+  display: block;
+  margin-top: 2px;
+  color: #44535c;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.dltracker-purchased-low[data-tone="pending"],
+.dltracker-purchased-low[data-tone="unknown"] {
+  color: #8a949b;
+}
+
+.dltracker-purchased-low[data-tone="loss"] {
+  color: #c0392b;
+  font-weight: 600;
+}
+
+.dltracker-purchased-low[data-tone="win"] {
+  color: #1e8449;
+  font-weight: 600;
+}
+
+.dltracker-purchased-loss-dialog {
+  width: min(820px, calc(100vw - 28px));
+}
+
+.dltracker-purchased-loss-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-bottom: 8px;
+  padding: 9px;
+  border-radius: 7px;
+  background: #f4f7f9;
+}
+
+.dltracker-purchased-loss-summary span {
+  white-space: nowrap;
+}
+
+.dltracker-purchased-loss-summary .is-loss {
+  color: #c0392b;
+}
+
+.dltracker-purchased-loss-summary .is-win {
+  color: #1e8449;
+}
+
+.dltracker-purchased-loss-summary .is-note {
+  width: 100%;
+  color: #6b7a84;
+  font-size: 11px;
+}
+
+.dltracker-purchased-loss-table-wrap {
+  max-height: 50vh;
+  overflow: auto;
+  border: 1px solid #dbe4e8;
+  border-radius: 7px;
+}
+
+.dltracker-purchased-loss-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.dltracker-purchased-loss-table-wrap th,
+.dltracker-purchased-loss-table-wrap td {
+  padding: 4px 7px;
+  border-bottom: 1px solid #e8eef1;
+  text-align: left;
+  vertical-align: top;
+}
+
+.dltracker-purchased-loss-table-wrap th {
+  position: sticky;
+  top: 0;
+  background: #eef3f6;
+  font-weight: 600;
+}
+
+.dltracker-purchased-loss-table-wrap td.is-diff {
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.dltracker-purchased-loss-table-wrap tr.is-loss td.is-diff {
+  color: #c0392b;
+}
+
+.dltracker-purchased-loss-table-wrap tr.is-win td.is-diff {
+  color: #1e8449;
+}
+
+.dltracker-purchased-loss-note {
+  margin: 8px 0 0;
+  color: #6b7a84;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.dltracker-purchased-loss-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.dltracker-purchased-loss-actions button {
+  padding: 6px 10px;
+}
+
+.dltracker-purchased-loss-actions span {
   color: #52616b;
   font-size: 12px;
 }
@@ -15383,7 +16099,7 @@ a.dltracker-cart-deal-frame:focus-visible {
     lastUrl = currentUrl;
     resetBrowseOriginalOrder();
     if (isPurchasedWorksPage(currentUrl)) {
-      clearTrackerPresentation();
+      void bootstrap();
       return;
     }
     waitForElement(currentUrl)
@@ -15483,7 +16199,11 @@ a.dltracker-cart-deal-frame:focus-visible {
       domDebounceTimer = setTimeout(() => {
         domDebounceTimer = null;
         const currentUrl = location.href;
-        if (isPurchasedWorksPage(currentUrl)) return;
+        if (isPurchasedWorksPage(currentUrl)) {
+          // 翻页/筛选会整表替换，重新补一次史低与结算按钮。
+          enhancePurchasedWorksPage();
+          return;
+        }
         maybeConfirmPendingCartAdd();
 
         if (browseNativeSortPending) {
@@ -15537,7 +16257,6 @@ a.dltracker-cart-deal-frame:focus-visible {
 
   async function start() {
     try {
-      if (isPurchasedWorksPage(location.href)) return;
       injectStyle();
       showUpdateNoticeIfNeeded();
       await cleanExpiredCache();

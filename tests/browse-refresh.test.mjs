@@ -416,7 +416,7 @@ test("指定条件搜索跳过加载骨架并采集横向表格作品", () => {
   assert.match(functionSource("findBrowseTagAnchor"), /\.search_tag/);
 });
 
-test("DLsite已购买作品页不追加任何助手界面或操作", () => {
+test("DLsite已购买作品页只补史低与结算，不追加浏览或购物车界面", () => {
   const sandbox = {};
   vm.runInNewContext(
     `${functionSource("isPurchasedWorksPage")}
@@ -437,18 +437,23 @@ test("DLsite已购买作品页不追加任何助手界面或操作", () => {
     /  async function start\(\) \{[\s\S]*?\n  \}\n\n  void start\(\);/,
   )?.[0];
   assert.ok(startSource, "start function not found");
-  assert.ok(
-    startSource.indexOf("if (isPurchasedWorksPage(location.href)) return") <
-      startSource.indexOf("injectStyle()"),
-  );
   // 委托点击监听必须先于 bootstrap 安装：初始化挂起或失败时按钮仍要可用。
   assert.ok(
     startSource.indexOf("installDealEventListeners()") <
       startSource.indexOf("await bootstrap()"),
   );
+  // 已购页走专用的史低增强，浏览控件、购物车分析都不进这一页。
   assert.match(
     functionSource("bootstrap"),
-    /if \(isPurchasedWorksPage\(url\)\) \{\s*clearTrackerPresentation\(\);\s*return;\s*\}\s*injectStyle\(\);/,
+    /if \(isPurchasedWorksPage\(url\)\) \{[\s\S]*?clearTrackerPresentation\(\);[\s\S]*?enhancePurchasedWorksPage\(\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?injectStyle\(\);/,
+  );
+  assert.match(
+    functionSource("enhancePurchasedWorksPage"),
+    /if \(!isPurchasedWorksPage\(location\.href\)\) return;/,
+  );
+  assert.match(
+    functionSource("enhancePurchasedWorksPage"),
+    /purchasedRowsFromRoot\(document\)/,
   );
   assert.match(
     functionSource("collectBrowseCards"),
@@ -456,11 +461,11 @@ test("DLsite已购买作品页不追加任何助手界面或操作", () => {
   );
   assert.match(
     functionSource("restoreBrowseStateOnPageShow"),
-    /if \(isPurchasedWorksPage\(currentUrl\)\) \{\s*clearTrackerPresentation\(\);\s*return;/,
+    /if \(isPurchasedWorksPage\(currentUrl\)\) \{\s*void bootstrap\(\);/,
   );
   assert.match(
     functionSource("installSpaListeners"),
-    /const currentUrl = location\.href;\s*if \(isPurchasedWorksPage\(currentUrl\)\) return;/,
+    /if \(isPurchasedWorksPage\(currentUrl\)\) \{[\s\S]*?enhancePurchasedWorksPage\(\);/,
   );
 });
 
