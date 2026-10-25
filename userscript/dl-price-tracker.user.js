@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.74
+// @version      0.6.75
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.74";
+  const APP_VERSION = "0.6.75";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -83,7 +83,12 @@
   const DEAL_INSIGHT_CLASSNAME = "dltracker-deal-insight";
   const DEAL_PROCESSED_ATTRIBUTE = "data-dltracker-deal-processed";
   const MAX_PRODUCT_METADATA_BATCH = 100;
+  const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.75": [
+      "修复本地存储配额超限：商品元数据缓存按 30 分钟 TTL 自动淘汰过期条目并设 2000 条上限，从源头阻止 dltracker-deal-insight-cache-v3 无限增长",
+      "账号索引写入配额不足时先淘汰过期元数据，并在缓存自身过大时持续裁剪直至写入成功，不再把错误错位报成「账号索引存储失败」",
+    ],
     "0.6.74": [
       "同一 coupon_id 的多条投放记录合并为一张券，不再在筛选里显示成两张",
       "同力度同进度的券追加适用范围（TL/BL 等）或券名，便于区分",
@@ -2388,9 +2393,28 @@
     }
   }
 
+  function pruneStaleDealCacheMetadata(cache, { now = Date.now(), maxEntries = MAX_PRODUCT_METADATA_ENTRIES } = {}) {
+    const metadata = cache.metadata || {};
+    const entries = Object.entries(metadata);
+    if (!entries.length) return { cache, removed: 0 };
+    const alive = entries.filter(
+      ([, record]) => dealNumber(record?.fetchedAt, 0) > now - PRODUCT_METADATA_TTL_MS,
+    );
+    let kept = alive;
+    if (kept.length > maxEntries) {
+      kept = kept
+        .sort((left, right) => dealNumber(left[1]?.fetchedAt, 0) - dealNumber(right[1]?.fetchedAt, 0))
+        .slice(kept.length - maxEntries);
+    }
+    const removed = entries.length - kept.length;
+    if (removed) cache.metadata = Object.fromEntries(kept);
+    return { cache, removed };
+  }
+
   function saveDealCache(cache) {
+    pruneStaleDealCacheMetadata(cache, { now: Date.now() });
+    const serialized = JSON.stringify(cache);
     try {
-      const serialized = JSON.stringify(cache);
       localStorage.setItem(DEAL_CACHE_STORAGE_KEY, serialized);
       dealCacheMemo = { raw: serialized, value: cache };
     } catch (error) {
@@ -2931,6 +2955,9 @@
 
   function retryAccountIndexWriteAfterMetadataPrune(serializedIndex) {
     const cache = loadDealCache();
+    // Expired metadata can be refetched, so drop it first to reclaim space
+    // without sacrificing still-valid cached works.
+    pruneStaleDealCacheMetadata(cache, { now: Date.now() });
     const metadata = Object.entries(cache.metadata || {})
       .sort((left, right) =>
         dealNumber(left[1]?.fetchedAt, 0) - dealNumber(right[1]?.fetchedAt, 0));
@@ -2939,7 +2966,15 @@
       removed += metadata.splice(0, Math.min(20, metadata.length)).length;
       cache.metadata = Object.fromEntries(metadata);
       const serializedCache = JSON.stringify(cache);
-      localStorage.setItem(DEAL_CACHE_STORAGE_KEY, serializedCache);
+      try {
+        localStorage.setItem(DEAL_CACHE_STORAGE_KEY, serializedCache);
+      } catch (error) {
+        // The cache itself is too large to persist even after pruning; keep
+        // removing oldest records instead of letting the error bubble up as a
+        // misleading "account index" failure.
+        if (!storageQuotaExceeded(error)) throw error;
+        continue;
+      }
       dealCacheMemo = { raw: serializedCache, value: cache };
       try {
         localStorage.setItem(ACCOUNT_INDEX_STORAGE_KEY, serializedIndex);
@@ -2949,6 +2984,7 @@
         return true;
       } catch (error) {
         if (!storageQuotaExceeded(error)) throw error;
+        // Cache persisted but the account index still did not fit; keep pruning.
       }
     }
     return false;
@@ -2974,7 +3010,7 @@
       const detail = writeError instanceof Error
         ? writeError.message
         : String(writeError || "未知错误");
-      accountIndexRuntimeError = `账号索引存储失败：${detail}`;
+      accountIndexRuntimeError = `本地存储空间不足，无法保存账号索引（${detail}）。请清理 dltracker-* 本地数据后重试`;
       console.warn(`[${APP_NAME}] account index write failed:`, writeError);
       if (throwOnFailure) throw new Error(accountIndexRuntimeError);
     }

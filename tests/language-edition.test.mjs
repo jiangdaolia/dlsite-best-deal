@@ -333,9 +333,10 @@ test("RJ01684785这类残留失效译者SKU时保留已取得的在售译者", (
 
 test("账号索引写入超出配额时清理最旧作品元数据并重试", () => {
   const values = new Map();
+  const now = Date.now();
   const metadata = Object.fromEntries(Array.from({ length: 41 }, (_, index) => [
     `RJ${String(index).padStart(8, "0")}`,
-    { fetchedAt: index + 1, raw: { value: "x".repeat(50) } },
+    { fetchedAt: now - (41 - index) * 1000, raw: { value: "x".repeat(50) } },
   ]));
   values.set("deal-cache", JSON.stringify({
     coupons: { loaded: true, raw: [] },
@@ -372,8 +373,11 @@ test("账号索引写入超出配额时清理最旧作品元数据并重试", ()
     const APP_NAME = "test";
     const DEAL_CACHE_STORAGE_KEY = "deal-cache";
     const ACCOUNT_INDEX_STORAGE_KEY = "account-index";
+    const PRODUCT_METADATA_TTL_MS = 30 * 60 * 1000;
+    const MAX_PRODUCT_METADATA_ENTRIES = 2000;
     let accountIndexRuntimeError = "";
     ${functionSource("storageQuotaExceeded")}
+    ${functionSource("pruneStaleDealCacheMetadata")}
     ${functionSource("retryAccountIndexWriteAfterMetadataPrune")}
     ${functionSource("saveAccountIndex")}
     globalThis.saveAccountIndexForTest = saveAccountIndex;
@@ -383,6 +387,69 @@ test("账号索引写入超出配额时清理最旧作品元数据并重试", ()
   assert.equal(
     Object.keys(JSON.parse(values.get("deal-cache")).metadata).length,
     1,
+  );
+});
+
+test("商品缓存自身过大导致写入配额超限时持续裁剪直至可写", () => {
+  const values = new Map();
+  const now = Date.now();
+  const MAX_BYTES = 1200;
+  const metadata = Object.fromEntries(Array.from({ length: 30 }, (_, index) => [
+    `RJ${String(index).padStart(8, "0")}`,
+    { fetchedAt: now - (30 - index) * 1000, raw: { value: "x".repeat(150) } },
+  ]));
+  values.set("deal-cache", JSON.stringify({
+    coupons: { loaded: true, raw: [] },
+    metadata,
+    bulkRules: {},
+  }));
+  const totalBytes = () => {
+    let total = 0;
+    for (const value of values.values()) total += value.length;
+    return total;
+  };
+  const quotaSandbox = {
+    console: { warn() {} },
+    localStorage: {
+      getItem(key) {
+        return values.get(key) || null;
+      },
+      setItem(key, value) {
+        const projected = totalBytes() - (values.get(key)?.length || 0) + value.length;
+        if (projected > MAX_BYTES) {
+          const error = new Error("exceeded the quota");
+          error.name = "QuotaExceededError";
+          throw error;
+        }
+        values.set(key, value);
+      },
+    },
+    loadDealCache() {
+      return JSON.parse(values.get("deal-cache"));
+    },
+    dealNumber(value, fallback = 0) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    },
+  };
+  vm.runInNewContext(`
+    const APP_NAME = "test";
+    const DEAL_CACHE_STORAGE_KEY = "deal-cache";
+    const ACCOUNT_INDEX_STORAGE_KEY = "account-index";
+    const PRODUCT_METADATA_TTL_MS = 30 * 60 * 1000;
+    const MAX_PRODUCT_METADATA_ENTRIES = 2000;
+    let accountIndexRuntimeError = "";
+    ${functionSource("storageQuotaExceeded")}
+    ${functionSource("pruneStaleDealCacheMetadata")}
+    ${functionSource("retryAccountIndexWriteAfterMetadataPrune")}
+    ${functionSource("saveAccountIndex")}
+    globalThis.saveAccountIndexForTest = saveAccountIndex;
+  `, quotaSandbox);
+  quotaSandbox.saveAccountIndexForTest({ indexed: 40 }, { throwOnFailure: true });
+  assert.equal(JSON.parse(values.get("account-index")).indexed, 40);
+  assert.ok(
+    Object.keys(JSON.parse(values.get("deal-cache")).metadata).length < 30,
+    "should have pruned product metadata to fit the quota",
   );
 });
 
