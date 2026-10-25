@@ -627,3 +627,32 @@ test("账号读取完全手动：悬浮按钮、差分更新、可中断续接�
     /\["优惠券", accountCouponSummaryText\(\)\][\s\S]*?createAccountReadProgressBlock\(index\)/,
   );
 });
+
+test("已购清单核对区分编号数与作品家族数", () => {
+  const index = {
+    bought: ["RJ00000001", "RJ00000002", "RJ00000003", "RJ00000004"],
+    active: ["RJ00000003"],
+    later: [],
+    entries: {
+      RJ00000001: { id: "RJ00000001", familyId: "RJ00000001", parentId: "RJ00000001", lang: "JPN" },
+      RJ00000002: { id: "RJ00000002", familyId: "RJ00000001", parentId: "RJ00000001", lang: "CHI_HANS" },
+      RJ00000003: { id: "RJ00000003", familyId: "RJ00000003", parentId: "RJ00000003", lang: "JPN" },
+    },
+  };
+  const diagSandbox = {
+    loadAccountIndex: () => index,
+    loadLanguageFamilyCache: () => ({ parents: {} }),
+  };
+  vm.runInNewContext(`
+    ${functionSource("boughtCountBreakdown")}
+    globalThis.breakdownForTest = boughtCountBreakdown;
+  `, diagSandbox);
+  const breakdown = diagSandbox.breakdownForTest(index, { parents: {} });
+  // 4 个已购编号，其中 RJ00000001/RJ00000002 属于同一作品家族。
+  assert.equal(breakdown.bought.length, 4);
+  assert.equal(breakdown.familyCount, 3);
+  assert.equal(breakdown.multiSkuFamilies.length, 1);
+  assert.deepEqual([...breakdown.inActive], ["RJ00000003"]);
+  // RJ00000004 没有语言元数据，单独列出，不影响计数。
+  assert.deepEqual([...breakdown.missingEntries], ["RJ00000004"]);
+});

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.75
+// @version      0.6.76
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.75";
+  const APP_VERSION = "0.6.76";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -85,6 +85,10 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.76": [
+      "账号信息面板新增「已购清单核对」：列出脚本从 DLsite 已购接口读到的全部编号、标题、价格和站点，便于核对已购数量差异",
+      "支持一键复制核对结果（只含编号与计数，不含账号、Cookie 和标题）",
+    ],
     "0.6.75": [
       "修复本地存储配额超限：商品元数据缓存按 30 分钟 TTL 自动淘汰过期条目并设 2000 条上限，从源头阻止 dltracker-deal-insight-cache-v3 无限增长",
       "账号索引写入配额不足时先淘汰过期元数据，并在缓存自身过大时持续裁剪直至写入成功，不再把错误错位报成「账号索引存储失败」",
@@ -8072,21 +8076,424 @@
         refreshAccountInformationPanels();
       }
     });
+    const diagnose = document.createElement("button");
+    diagnose.type = "button";
+    diagnose.className = "dltracker-account-diagnose";
+    diagnose.textContent = "已购清单核对";
+    diagnose.title = "列出脚本读到的全部已购编号和标题，用来核对已购数量";
+    diagnose.disabled = reading || !index.loaded;
+    diagnose.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openBoughtDiagnosticDialog();
+    });
+    const actionRow = document.createElement("div");
+    actionRow.className = "dltracker-account-actions";
+    actionRow.append(action, diagnose);
     if (reading) {
       panel.replaceChildren(
         summary,
         createAccountReadProgressBlock(index),
-        action,
+        actionRow,
       );
       return;
     }
-    panel.replaceChildren(summary, action);
+    panel.replaceChildren(summary, actionRow);
   }
 
   function refreshAccountInformationPanels() {
     document.querySelectorAll(".dltracker-account-info-panel")
       .forEach(renderAccountInformationPanel);
     refreshAccountReadFabs();
+  }
+
+  // 「已购买 N 部」诊断：把本地记录、作品家族归并结果和 DLsite 已购接口
+  // 的原始条目放在一起对照，用来判断多算/少算到底出在哪一层。
+  function boughtCountBreakdown(
+    index = loadAccountIndex(),
+    languageCache = loadLanguageFamilyCache(),
+  ) {
+    const entries = index?.entries || {};
+    const parents = languageCache?.parents || {};
+    const normalize = (list) => (Array.isArray(list) ? list : [])
+      .map((id) => String(id || "").toUpperCase())
+      .filter(Boolean);
+    const bought = normalize(index?.bought);
+    const active = normalize(index?.active);
+    const later = normalize(index?.later);
+    const activeSet = new Set(active);
+    const laterSet = new Set(later);
+    const familyKeyOf = (id) => String(
+      entries[id]?.familyId || entries[id]?.parentId || parents[id] || id,
+    ).toUpperCase() || id;
+    const families = new Map();
+    for (const id of bought) {
+      const key = familyKeyOf(id);
+      if (!families.has(key)) families.set(key, []);
+      families.get(key).push(id);
+    }
+    return {
+      bought,
+      active,
+      later,
+      inActive: bought.filter((id) => activeSet.has(id)),
+      inLater: bought.filter((id) => laterSet.has(id)),
+      familyKeyOf,
+      families,
+      familyCount: families.size,
+      multiSkuFamilies: [...families.entries()].filter(([, ids]) => ids.length > 1),
+      missingEntries: bought.filter((id) => !entries[id]),
+    };
+  }
+
+  function boughtDiagnosticItems(payload) {
+    const nested = payload?.bought;
+    const list = Array.isArray(nested?.boughts)
+      ? nested.boughts
+      : Array.isArray(payload?.boughts)
+        ? payload.boughts
+        : Array.isArray(nested)
+          ? nested
+          : Array.isArray(payload)
+            ? payload
+            : [];
+    const ids = [];
+    const rejected = [];
+    for (const item of list) {
+      const raw = item && typeof item === "object"
+        ? item.product_id || item.workno || item.id || ""
+        : item || "";
+      const id = String(raw).toUpperCase();
+      if (!id) continue;
+      if (!isValidProductCode(id)) {
+        if (!rejected.includes(id)) rejected.push(id);
+        continue;
+      }
+      if (!ids.includes(id)) ids.push(id);
+    }
+    return { list, ids, rejected };
+  }
+
+  function boughtCountDiagnosticText({
+    index,
+    breakdown,
+    payload,
+    fetchError,
+    samples = 60,
+  }) {
+    const entries = index?.entries || {};
+    const items = payload ? boughtDiagnosticItems(payload) : null;
+    const nested = payload?.bought;
+    const totalFields = {};
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      for (const [key, value] of Object.entries(nested)) {
+        if (/total|count|num|size|all/i.test(key) &&
+          (typeof value === "number" || typeof value === "string")) {
+          totalFields[key] = value;
+        }
+      }
+    }
+    const firstItem = items?.list.find((item) => item && typeof item === "object");
+    const itemKeys = firstItem ? Object.keys(firstItem).slice(0, 12) : [];
+    const unique = (list) => [...new Set(list)];
+    const onlyApi = items
+      ? items.ids.filter((id) => !breakdown.bought.includes(id))
+      : [];
+    const onlyLocal = items
+      ? breakdown.bought.filter((id) => !items.ids.includes(id))
+      : [];
+    const lines = [
+      `DLsite 已购计数诊断 v${APP_VERSION}`,
+      `时间：${new Date().toISOString()}`,
+      `页面分区：${currentDlsiteSection()}`,
+      "",
+      "—— 脚本记录 ——",
+      `已购=${breakdown.bought.length}　立即购买=${breakdown.active.length}　稍后再买=${breakdown.later.length}`,
+      `已购∩立即购买=${breakdown.inActive.length}${
+        breakdown.inActive.length ? ` [${breakdown.inActive.join(", ")}]` : ""}`,
+      `已购∩稍后再买=${breakdown.inLater.length}${
+        breakdown.inLater.length ? ` [${breakdown.inLater.join(", ")}]` : ""}`,
+      `账号索引：loaded=${Boolean(index?.loaded)} complete=${Boolean(index?.complete)} ` +
+        `indexed=${dealNumber(index?.indexed, 0)}/${dealNumber(index?.total, 0)} ` +
+        `未读到元数据=${breakdown.missingEntries.length}`,
+      `按作品家族去重=${breakdown.familyCount}（多编号家族 ${breakdown.multiSkuFamilies.length} 组）`,
+    ];
+    if (breakdown.multiSkuFamilies.length) {
+      for (const [familyId, ids] of breakdown.multiSkuFamilies.slice(0, 10)) {
+        lines.push(`  · 家族 ${familyId}: ${ids.join(", ")}`);
+      }
+    }
+    lines.push("", "—— DLsite 已购接口 ——");
+    if (fetchError) {
+      lines.push(`接口读取失败：${fetchError}`);
+    } else if (items) {
+      lines.push(
+        `条目数=${items.list.length}　去重编号=${items.ids.length}　` +
+          `被过滤编号=${unique(items.rejected).length}${
+            items.rejected.length ? ` [${unique(items.rejected).slice(0, 10).join(", ")}]` : ""}`,
+      );
+      lines.push(`疑似总数字段：${JSON.stringify(totalFields)}`);
+      lines.push(`条目字段：${itemKeys.length ? itemKeys.join(", ") : "（无对象条目）"}`);
+      lines.push(`接口有而脚本没记=${onlyApi.length}${onlyApi.length ? ` [${onlyApi.join(", ")}]` : ""}`);
+      lines.push(`脚本记了但接口没有=${onlyLocal.length}${onlyLocal.length ? ` [${onlyLocal.join(", ")}]` : ""}`);
+    }
+    lines.push("", "—— 明细（编号｜元数据｜家族｜语言｜在购物车）——");
+    const detailIds = breakdown.bought.slice(0, samples);
+    for (const id of detailIds) {
+      const entry = entries[id] || {};
+      const cartFlag = breakdown.inActive.includes(id)
+        ? "立即购买"
+        : breakdown.inLater.includes(id)
+          ? "稍后再买"
+          : "-";
+      lines.push([
+        id,
+        entry.id ? "有" : "无",
+        breakdown.familyKeyOf(id),
+        entry.lang ? languageDisplayName(entry.lang) : "-",
+        cartFlag,
+      ].join("｜"));
+    }
+    if (breakdown.bought.length > detailIds.length) {
+      lines.push(`……其余 ${breakdown.bought.length - detailIds.length} 条略`);
+    }
+    lines.push("", "—— 初步判断 ——");
+    if (fetchError) {
+      lines.push("· 已购接口没读成功，先看上面的脚本记录；可稍后重试诊断。");
+    } else if (items && (onlyApi.length || onlyLocal.length)) {
+      lines.push("· 本地记录与接口不一致，本地可能是旧数据：请先「读取账号信息」再诊断。");
+    } else if (breakdown.multiSkuFamilies.length) {
+      lines.push(
+        `· 有 ${breakdown.multiSkuFamilies.length} 组同一作品的多个编号，` +
+          `按家族合并后为 ${breakdown.familyCount} 部。`,
+      );
+    } else if (breakdown.inActive.length || breakdown.inLater.length) {
+      lines.push(
+        `· 有 ${breakdown.inActive.length + breakdown.inLater.length} 个编号同时在购物车，` +
+          "可能被算进已购。",
+      );
+    } else if (items) {
+      lines.push(
+        `· 本地记录与接口条数一致（${items.ids.length} 条），且没有同作品多编号，` +
+          "说明多出的条目来自 DLsite 已购接口本身（免费领取、已下架、赠品/特典等）。",
+      );
+    }
+    return lines.join("\n");
+  }
+
+  async function buildBoughtCountDiagnostic() {
+    if (accountReadFlowInFlight || accountIndexRefreshInFlight) {
+      throw new Error("账号信息正在读取，请等读取结束后再诊断");
+    }
+    const index = loadAccountIndex();
+    const breakdown = boughtCountBreakdown(index, loadLanguageFamilyCache());
+    let payload = null;
+    let fetchError = "";
+    const section = currentDlsiteSection();
+    const url = new URL(`/${section}${DLSITE_BOUGHT_PRODUCTS_PATH}`, location.origin);
+    const token = dlsiteBoughtToken();
+    if (token) url.searchParams.set("_", token);
+    try {
+      payload = await fetchSameOriginJson(url, "已购清单");
+    } catch (error) {
+      fetchError = error instanceof Error ? error.message : String(error);
+    }
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    return {
+      text: boughtCountDiagnosticText({ index, breakdown, payload, fetchError }),
+      filename: `dltracker-bought-diagnostic-${timestamp}.txt`,
+    };
+  }
+
+  function boughtDiagnosticSummaryRows(index, breakdown) {
+    return [
+      ["已购买（按编号）", breakdown.bought.length],
+      ["按作品家族去重", breakdown.familyCount],
+      ["同作品多编号", breakdown.multiSkuFamilies.length],
+      ["与购物车重叠", breakdown.inActive.length + breakdown.inLater.length],
+      ["无本地元数据", breakdown.missingEntries.length],
+    ];
+  }
+
+  // 标题、价格、站点都取自本地已缓存的商品信息，不额外联网。
+  function boughtCountRows(index, breakdown, cache = loadDealCache()) {
+    const metadata = cache?.metadata || {};
+    const entries = index?.entries || {};
+    const rows = breakdown.bought.map((id) => {
+      const raw = metadata[id]?.raw;
+      const product = raw ? normalizedMetadataProduct(id, raw) : null;
+      const familyKey = breakdown.familyKeyOf(id);
+      return {
+        id,
+        title: product?.title && product.title !== id ? product.title : "",
+        price: product ? product.price : null,
+        siteId: product?.siteId || "",
+        lang: entries[id]?.lang ? languageDisplayName(entries[id].lang) : "",
+        familyKey,
+        familySize: (breakdown.families.get(familyKey) || []).length,
+      };
+    });
+    return rows.sort((left, right) => {
+      if (left.familyKey !== right.familyKey) {
+        return left.familyKey < right.familyKey ? -1 : 1;
+      }
+      return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+    });
+  }
+
+  function closeBoughtDiagnosticDialog() {
+    document.querySelector(".dltracker-bought-diagnostic-overlay")?.remove();
+    unlockReachDialogScroll();
+  }
+
+  async function openBoughtDiagnosticDialog() {
+    closeBoughtDiagnosticDialog();
+    const overlay = document.createElement("div");
+    overlay.className = "dltracker-reach-overlay dltracker-bought-diagnostic-overlay";
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) closeBoughtDiagnosticDialog();
+    });
+    const dialog = document.createElement("section");
+    dialog.className = "dltracker-reach-dialog dltracker-bought-diagnostic-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.tabIndex = -1;
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeBoughtDiagnosticDialog();
+    });
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    title.textContent = "已购清单核对";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "关闭");
+    close.addEventListener("click", closeBoughtDiagnosticDialog);
+    header.append(title, close);
+    const body = document.createElement("div");
+    body.className = "dltracker-reach-dialog-body";
+    const hint = document.createElement("p");
+    hint.className = "dltracker-bought-diagnostic-hint";
+    hint.textContent = "下面是脚本从 DLsite 已购接口读到的全部编号和本地缓存的标题。" +
+      "请对照看看哪几条不是你买的，把编号告诉我即可。";
+    const summary = document.createElement("div");
+    summary.className = "dltracker-bought-diagnostic-summary";
+    summary.textContent = "正在读取…";
+    const tableWrap = document.createElement("div");
+    tableWrap.className = "dltracker-bought-diagnostic-table-wrap";
+    const pre = document.createElement("pre");
+    pre.className = "dltracker-bought-diagnostic-text";
+    pre.textContent = "正在读取 DLsite 已购接口…";
+    const details = document.createElement("details");
+    details.className = "dltracker-bought-diagnostic-details";
+    const detailsTitle = document.createElement("summary");
+    detailsTitle.textContent = "文本版（复制给开发者用）";
+    details.append(detailsTitle, pre);
+    const actions = document.createElement("div");
+    actions.className = "dltracker-bought-diagnostic-actions";
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "is-primary";
+    copyButton.textContent = "复制文本版";
+    copyButton.disabled = true;
+    const downloadButton = document.createElement("button");
+    downloadButton.type = "button";
+    downloadButton.textContent = "下载 txt";
+    downloadButton.disabled = true;
+    const status = document.createElement("span");
+    status.className = "dltracker-bought-diagnostic-status";
+    let payload = null;
+    const renderRows = () => {
+      const index = loadAccountIndex();
+      const breakdown = boughtCountBreakdown(index, loadLanguageFamilyCache());
+      summary.replaceChildren();
+      for (const [label, value] of boughtDiagnosticSummaryRows(index, breakdown)) {
+        const chip = document.createElement("span");
+        const strong = document.createElement("strong");
+        strong.textContent = `${label}：`;
+        chip.append(strong, document.createTextNode(String(value)));
+        summary.appendChild(chip);
+      }
+      const rows = boughtCountRows(index, breakdown);
+      const blocked = rows.filter((row) => !row.title).length;
+      if (blocked) {
+        const note = document.createElement("span");
+        note.className = "dltracker-bought-diagnostic-note";
+        note.textContent = `其中 ${blocked} 条没有本地标题缓存（不影响计数）`;
+        summary.appendChild(note);
+      }
+      const section = currentDlsiteSection();
+      const table = document.createElement("table");
+      const head = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      for (const label of ["#", "编号", "标题", "价格", "站点", "语言"]) {
+        const th = document.createElement("th");
+        th.textContent = label;
+        headRow.appendChild(th);
+      }
+      head.appendChild(headRow);
+      const tbody = document.createElement("tbody");
+      rows.forEach((row, position) => {
+        const tr = document.createElement("tr");
+        if (row.familySize > 1) tr.className = "is-same-work";
+        if (row.price === 0) tr.classList.add("is-free");
+        const cells = [
+          String(position + 1),
+          row.id,
+          row.title || "（无标题缓存）",
+          row.price === null ? "-" : row.price === 0 ? "0 円" : `¥${row.price}`,
+          row.siteId || "-",
+          row.lang || "-",
+        ];
+        cells.forEach((text, cellIndex) => {
+          const td = document.createElement("td");
+          td.textContent = text;
+          if (cellIndex === 1) td.className = "is-id";
+          if (cellIndex === 2) td.className = "is-title";
+          if (cellIndex === 4 && row.siteId && row.siteId !== section) {
+            td.className = "is-other-site";
+          }
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.append(head, tbody);
+      tableWrap.replaceChildren(table);
+    };
+    copyButton.addEventListener("click", async () => {
+      if (!payload) return;
+      const copied = await copyCartDiagnosticText(payload.text);
+      if (copied) {
+        status.textContent = "已复制，直接粘贴发我即可";
+      } else {
+        downloadText(payload.filename, payload.text, "text/plain;charset=utf-8");
+        status.textContent = "无法复制，已改为下载 txt 文件";
+      }
+    });
+    downloadButton.addEventListener("click", () => {
+      if (!payload) return;
+      downloadText(payload.filename, payload.text, "text/plain;charset=utf-8");
+      status.textContent = "已下载 txt 文件";
+    });
+    actions.append(copyButton, downloadButton, status);
+    body.append(hint, summary, tableWrap, actions, details);
+    dialog.append(header, body);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    lockReachDialogScroll();
+    dialog.focus({ preventScroll: true });
+    try {
+      payload = await buildBoughtCountDiagnostic();
+      pre.textContent = payload.text;
+      renderRows();
+      copyButton.disabled = false;
+      downloadButton.disabled = false;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      summary.textContent = `读取失败：${message}`;
+      tableWrap.replaceChildren();
+      pre.textContent = `诊断失败：${message}`;
+    }
   }
 
   function closeAccountInformationDialog() {
@@ -13292,6 +13699,125 @@ a.dltracker-browse-analysis-frame {
 .dltracker-account-refresh {
   align-self: flex-start;
   padding: 6px 10px;
+}
+
+.dltracker-account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dltracker-account-diagnose {
+  padding: 6px 10px;
+}
+
+.dltracker-bought-diagnostic-dialog {
+  width: min(760px, calc(100vw - 28px));
+}
+
+.dltracker-bought-diagnostic-hint {
+  margin: 0 0 8px;
+  color: #4a5b64;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dltracker-bought-diagnostic-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-bottom: 8px;
+  padding: 9px;
+  border-radius: 7px;
+  background: #f4f7f9;
+}
+
+.dltracker-bought-diagnostic-summary span {
+  white-space: nowrap;
+}
+
+.dltracker-bought-diagnostic-note {
+  color: #8a6d3d;
+}
+
+.dltracker-bought-diagnostic-table-wrap {
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid #dbe4e8;
+  border-radius: 7px;
+}
+
+.dltracker-bought-diagnostic-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.dltracker-bought-diagnostic-table-wrap th,
+.dltracker-bought-diagnostic-table-wrap td {
+  padding: 4px 7px;
+  border-bottom: 1px solid #e8eef1;
+  text-align: left;
+  vertical-align: top;
+}
+
+.dltracker-bought-diagnostic-table-wrap th {
+  position: sticky;
+  top: 0;
+  background: #eef3f6;
+  font-weight: 600;
+}
+
+.dltracker-bought-diagnostic-table-wrap tr.is-same-work td {
+  background: #fff7e6;
+}
+
+.dltracker-bought-diagnostic-table-wrap td.is-id {
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.dltracker-bought-diagnostic-table-wrap td.is-title {
+  overflow-wrap: anywhere;
+}
+
+.dltracker-bought-diagnostic-table-wrap td.is-other-site {
+  color: #a3512b;
+  font-weight: 600;
+}
+
+.dltracker-bought-diagnostic-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.dltracker-bought-diagnostic-actions button {
+  padding: 6px 10px;
+}
+
+.dltracker-bought-diagnostic-status {
+  color: #52616b;
+  font-size: 12px;
+}
+
+.dltracker-bought-diagnostic-details {
+  margin-top: 10px;
+}
+
+.dltracker-bought-diagnostic-text {
+  max-height: 30vh;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: #f4f7f9;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .dltracker-account-progress-block {
