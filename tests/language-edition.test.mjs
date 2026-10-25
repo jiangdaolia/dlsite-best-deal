@@ -844,3 +844,40 @@ test("已购页对比按 product_id 提取编号并去重", () => {
     /document\.body\.appendChild/,
   );
 });
+
+// 用户要求：读取账号信息时只针对「已购买页面」里有的作品。
+// 接口会多返回跨分区、已下架、被 302 到主编号的旧编号，这些不计入「已购买」，
+// 否则页面上 39 部、账号信息里 43 条，数字又对不上。
+test("已购买数量按已购买作品页口径统计，接口多出来的单独列", () => {
+  const scopedSandbox = {};
+  vm.runInNewContext(`
+    ${constantSource("WORK_EDITION_WORD")}
+    ${constantSource("WORK_TITLE_EDITION_PREFIX")}
+    ${constantSource("WORK_TITLE_TRANSLATOR_SUFFIX")}
+    ${functionSource("boughtWorkTitleKey")}
+    ${functionSource("boughtWorkGroups")}
+    ${functionSource("boughtCountBreakdown")}
+    ${functionSource("pageScopedBoughtBreakdown")}
+    globalThis.scopedForTest = pageScopedBoughtBreakdown;
+  `, scopedSandbox);
+  const index = {
+    bought: ["RJ00000001", "RJ00000002", "RJ00000003", "RJ00000004"],
+    // 页面只列出前三条：第四条是已下架/旧编号，只在接口里存在。
+    pageIds: ["RJ00000001", "RJ00000002", "RJ00000003"],
+    active: [],
+    later: [],
+    entries: {},
+  };
+  const scoped = scopedSandbox.scopedForTest(index, { parents: {} });
+  assert.equal(scoped.bought.length, 3);
+  assert.equal(scoped.apiBought.length, 4);
+  assert.deepEqual([...scoped.offPage], ["RJ00000004"]);
+  assert.equal(scoped.scopedByPage, true);
+  // 页面数据缺失（未登录/结构变化/读取失败）时退回接口全量，
+  // 不能因为页面读不到就把已购算成 0。
+  const fallback = scopedSandbox.scopedForTest(
+    { ...index, pageIds: [] }, { parents: {} });
+  assert.equal(fallback.bought.length, 4);
+  assert.equal(fallback.scopedByPage, false);
+  assert.equal(fallback.offPage.length, 0);
+});

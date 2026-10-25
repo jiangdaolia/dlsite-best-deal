@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.94
+// @version      0.6.95
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -31,7 +31,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.94";
+  const APP_VERSION = "0.6.95";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -110,6 +110,12 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.95": [
+      "读取账号信息时，会先同源读一次「已购买作品页」（含翻页），只针对页面上真正列出的作品读取：接口里多出来的跨分区、已下架、被 302 到主编号的旧编号不再进读取队列，也不计入「已购买」数量",
+      "账号信息里的「已购买」现在和页面上看到的条数一致；多出来的条目单独标成「页面未列 N 条」，并附上页面自己写的「全 N 件」和已购页读取状态",
+      "已购页读不到（未登录、结构变化、风控）时自动退回接口全量，不会把已购买算成 0",
+      "「已购清单核对」优先用读取时已经抓到的页面编号，不再重复翻页请求；接口全量清单仍完整保留在那里做差集",
+    ],
     "0.6.94": [
       "「算算亏了多少」的实付、史低、差额三列现在都同时给日元和人民币：主行是金额本身，下一行小字是折算值，不用自己按汇率换算",
       "人民币界面下实付仍保留页面原文（¥62.00）做主行，小字给折算日元；日元界面反过来，主行日元、小字给人民币",
@@ -3137,7 +3143,16 @@
       loaded: false,
       active: [],
       later: [],
+      // 已购接口返回的全部编号（含跨分区、已下架、旧编号），只用于核对与跨分区提示。
       bought: [],
+      // 「已购买作品页」实际列出的编号：界面上显示的数量以它为准，
+      // 用户要求「读取账号信息只针对已购买页面里有的作品」，所以统计口径跟着页面走。
+      pageIds: [],
+      pageSection: "",
+      pageAt: 0,
+      pageTotalText: "",
+      pageNote: "",
+      pageComplete: false,
       entries: {},
       indexed: 0,
       total: 0,
@@ -3515,7 +3530,54 @@
       if (!renewAccountIndexLock()) return loadAccountIndex();
       const cartIds = cartIdsFromMemberStatus(status);
       const bought = boughtIdsFromPayload(boughtPayload);
-      const ids = [...new Set([...cartIds.active, ...cartIds.later, ...bought])];
+      // 用户要求「读取账号信息只针对已购买页面里有的作品」：同源读一次已购买作品页
+      // （含翻页），拿页面实际列出的编号。接口里多出来的那些（跨分区、已下架、
+      // 被 302 到主编号的旧编号、赠品）不再进入读取队列，也不再计入「已购买」数量，
+      // 只在「已购清单核对」里留档。页面读不到时退回接口全量，绝不把已购清成 0。
+      let pageSnapshot = { ids: [], totalText: "", complete: false, pages: 0 };
+      let pageNote = "";
+      if (!accountIndexSessionStopped) {
+        persistAccountIndex({
+          ...loadAccountIndex(),
+          indexing: true,
+          stage: "读取已购买作品页",
+          phase: "bought",
+          updatedAt: Date.now(),
+        });
+        refreshAccountInformationPanels();
+        // 当前就在已购买作品页且地址没带筛选参数时，直接复用眼前这份 DOM，
+        // 省掉一次请求；带了筛选就老老实实读默认列表，否则数量会被筛选裁小。
+        const onPurchasedPage = isPurchasedWorksPage(location.href) && !location.search;
+        try {
+          pageSnapshot = await fetchBoughtPageSnapshot({
+            seedDoc: onPurchasedPage ? document : null,
+            startUrl: onPurchasedPage ? location.href : null,
+          });
+        } catch (error) {
+          pageNote = `已购买作品页读取失败：${
+            error instanceof Error ? error.message : String(error)}`;
+        }
+        if (!renewAccountIndexLock()) return loadAccountIndex();
+      }
+      const pageIds = [...new Set(pageSnapshot.ids || [])];
+      const pageSet = new Set(pageIds);
+      if (!pageIds.length && !pageNote) {
+        pageNote = "已购买作品页没有解析到作品编号";
+      } else if (pageIds.length && pageSnapshot.complete === false) {
+        pageNote = `只读到 ${pageSnapshot.pages} 页，页面未读全`;
+      }
+      // 以页面为准：页面上列出的编号都要读（含极少数还没进接口的新购）。
+      const inPage = pageSet.size ? pageIds : bought;
+      // 页面口径为空（未读到页面）时按接口全量走，避免一条都不读。
+      const pageFields = {
+        pageIds: pageSet.size ? pageIds : [],
+        pageSection: pageSet.size ? section : "",
+        pageAt: pageSet.size ? Date.now() : 0,
+        pageTotalText: pageSnapshot.totalText || "",
+        pageNote,
+        pageComplete: pageSet.size > 0 && pageSnapshot.complete !== false,
+      };
+      const ids = [...new Set([...cartIds.active, ...cartIds.later, ...inPage])];
       // 差分更新：仍在清单中的作品保留已有语言条目，只补读新出现的编号；
       // 上次失败的编号重新进入待读队列，从清单消失的作品随 entries 一起移除。
       const retained = loadAccountIndex();
@@ -3556,6 +3618,7 @@
         active: cartIds.active,
         later: cartIds.later,
         bought: [...new Set(bought)],
+        ...pageFields,
         entries,
         indexed: keptCount,
         total: ids.length,
@@ -3672,6 +3735,7 @@
           active: cartIds.active,
           later: cartIds.later,
           bought: [...new Set(bought)],
+          ...pageFields,
           entries,
           indexed: Object.keys(entries).length - failedIds.length,
           total: ids.length,
@@ -3707,6 +3771,7 @@
         active: cartIds.active,
         later: cartIds.later,
         bought: [...new Set(bought)],
+        ...pageFields,
         entries,
         indexed: Object.keys(entries).length - failedIds.length,
         total: ids.length,
@@ -3894,7 +3959,7 @@
       parts[parts.length - 1] += `（含稍后再买 ${index.later.length} 部）`;
     }
     parts.push(`已购买 ${boughtCountLabel(
-      boughtCountBreakdown(index, loadLanguageFamilyCache(), loadDealCache()))}`);
+      pageScopedBoughtBreakdown(index, loadLanguageFamilyCache(), loadDealCache()))}`);
     const remaining = Math.max(0, dealNumber(index.total) - dealNumber(index.indexed));
     if (!index.complete && remaining) {
       parts.push(`语言索引 ${index.indexed}/${index.total}，可稍后继续`);
@@ -8264,7 +8329,7 @@
   function renderAccountInformationPanel(panel) {
     if (!panel) return;
     const index = loadAccountIndex();
-    const breakdown = boughtCountBreakdown(
+    const breakdown = pageScopedBoughtBreakdown(
       index, loadLanguageFamilyCache(), loadDealCache());
     const reading = Boolean(
       accountReadFlowInFlight || accountIndexRefreshInFlight,
@@ -8274,14 +8339,27 @@
     panel.className = "dltracker-account-info-panel";
     const summary = document.createElement("div");
     summary.className = "dltracker-account-info-summary";
+    // 「已购买」只按已购买作品页里列出的作品统计；接口里多出来的单独标一行，
+    // 免得又出现「页面 39 部、这里 43 条」的口径错觉。
+    const offPageNote = breakdown.scopedByPage && breakdown.offPage.length
+      ? `页面未列 ${breakdown.offPage.length} 条`
+      : "";
     const loadedValues = [
       ["优惠券", accountCouponSummaryText()],
       ["立即购买", index.active.length],
       ["稍后再买", index.later.length],
-      ["已购买", boughtCountLabel(breakdown)],
+      ["已购买", offPageNote
+        ? `${boughtCountLabel(breakdown)}（${offPageNote}）`
+        : boughtCountLabel(breakdown)],
       ["语言索引", accountIndexProgressText(index, reading)],
       ["上次读取", accountIndexTimeText(index.updatedAt)],
     ];
+    if (index.loaded && index.pageNote) {
+      loadedValues.push(["已购页", index.pageNote]);
+    }
+    if (index.loaded && index.pageTotalText) {
+      loadedValues.push(["页面合计", index.pageTotalText]);
+    }
     let values;
     if (!isDlsiteMemberLoggedIn()) {
       values = [["状态", "未登录"]];
@@ -8467,7 +8545,9 @@
         if (!visited.has(absolute) && !queue.includes(absolute)) queue.push(absolute);
       }
     }
-    return { ids, filters, pages, totalText };
+    // 队列还有没读的页说明 maxPages 被截断了，数量会比页面真实条数少，
+    // 调用方要据此提示「未读全」，不能当成页面全量用。
+    return { ids, filters, pages, totalText, complete: queue.length === 0 };
   }
 
   // ---- 已购买作品页：史低标注 + 「亏了多少」结算 ----
@@ -10126,6 +10206,38 @@
     };
   }
 
+  // 已购数量按「已购买作品页」的口径统计：接口里多出来的条目（跨分区、已下架、
+  // 被 302 到主编号的旧编号、赠品）不计入「已购买」，与页面上看到的条数一致。
+  // 没有读到页面时退回接口全量，保证「已购买」不会因为页面读取失败而变 0。
+  function pageScopedBoughtBreakdown(
+    index = loadAccountIndex(),
+    languageCache = loadLanguageFamilyCache(),
+    metadataCache = null,
+  ) {
+    const all = boughtCountBreakdown(index, languageCache, metadataCache);
+    const pageIds = (Array.isArray(index?.pageIds) ? index.pageIds : [])
+      .map((id) => String(id || "").toUpperCase())
+      .filter(Boolean);
+    if (!pageIds.length) {
+      return { ...all, apiBought: all.bought, offPage: [], scopedByPage: false };
+    }
+    const pageSet = new Set(pageIds);
+    // 以页面为准：页面上列出的就算已购买（含极少数还没进接口的新购），
+    // 接口里有但页面没列的单独归到 offPage，不参与统计。
+    const breakdown = boughtCountBreakdown(
+      { ...index, bought: pageIds },
+      languageCache,
+      metadataCache,
+    );
+    return {
+      ...breakdown,
+      apiBought: all.bought,
+      offPage: all.bought.filter((id) => !pageSet.has(id)),
+      extraOnPage: pageIds.filter((id) => !all.bought.includes(id)),
+      scopedByPage: true,
+    };
+  }
+
   function boughtDiagnosticItems(payload) {
     const nested = payload?.bought;
     const list = Array.isArray(nested?.boughts)
@@ -10362,7 +10474,19 @@
     let pageIds = null;
     let pageFilters = [];
     let pageNote = "";
-    if (isDlsiteMemberLoggedIn()) {
+    // 读取账号信息时已经同源读过已购买作品页，这里优先用那份结果，
+    // 省掉一次翻页抓取；只有从未读过页面时才现读。
+    const cachedPageIds = (Array.isArray(index?.pageIds) ? index.pageIds : [])
+      .map((id) => String(id || "").toUpperCase())
+      .filter(Boolean);
+    if (cachedPageIds.length) {
+      pageIds = cachedPageIds;
+      pageNote = index.pageNote || (
+        index.pageSection && index.pageSection !== currentDlsiteSection()
+          ? `读取时在 ${index.pageSection} 分区`
+          : ""
+      );
+    } else if (isDlsiteMemberLoggedIn()) {
       try {
         const snapshot = await fetchBoughtPageSnapshot();
         if (snapshot.ids.length) {
@@ -17610,6 +17734,9 @@ a.dltracker-cart-deal-frame:focus-visible {
             index.active.length,
             index.later.length,
             index.bought.length,
+            // 已购页口径也会变（新增作品、页面条数变化），一并进变更戳。
+            index.pageAt,
+            index.pageIds?.length || 0,
           ].join("|");
           if (stamp !== lastAccountIndexStorageStamp) {
             lastAccountIndexStorageStamp = stamp;
