@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.90
+// @version      0.6.91
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -12,10 +12,13 @@
 // @connect      dlwatcher.com
 // @homepageURL  https://github.com/jiangdaolia/dlsite-best-deal
 // @supportURL   https://github.com/jiangdaolia/dlsite-best-deal/issues
-// 更新源走 jsDelivr 的 @latest（指向最新 tag）：raw.githubusercontent.com 在部分网络下
-// 连不上或超时，会导致脚本管理器「检查更新」永远拿不到新版本。
-// @updateURL    https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.90/userscript/dl-price-tracker.user.js
-// @downloadURL  https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.90/userscript/dl-price-tracker.user.js
+// 更新地址必须是「会移动」的地址，不能钉死某个版本：
+// 之前写成 @v0.6.90 这种固定 tag，脚本里记的地址永远指向它自己，
+// 于是「检查更新」永远看到同一版本 → 表现为「油猴无法更新」。
+// 现在用 jsDelivr 的 @latest（跟随最新 tag）：raw.githubusercontent.com 在部分网络下
+// 连不上，所以仍走 CDN。刚发版时新 tag 需要几分钟被 CDN 解析，属正常延迟。
+// @updateURL    https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@latest/userscript/dl-price-tracker.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@latest/userscript/dl-price-tracker.user.js
 // ==/UserScript==
 
 (function () {
@@ -25,7 +28,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.90";
+  const APP_VERSION = "0.6.91";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -87,6 +90,11 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.91": [
+      "修「油猴无法更新」：v0.6.89/0.6.90 把 @updateURL 钉成了固定版本地址（@v0.6.90），脚本里记的更新地址永远指向它自己，检查更新只会看到同一版本，所以后面发版一概收不到",
+      "更新地址改回 jsDelivr 的 @latest（跟随最新 tag），以后发版无需再改地址；刚发版时新 tag 需要几分钟被 CDN 解析到，属正常延迟",
+      "本次仍要手动装一次（旧版本里存的死地址改不掉），装好后版本号应显示 0.6.91",
+    ],
     "0.6.90": [
       "「算算亏了多少」的「差额」列同时给出人民币：以前只写日元（+1,076円），和页面上的金额对不上，现在写成「+1,076円 ≈ +¥45.84」",
       "汇总里的「多花」「省下」「合计差额」也一并折成人民币，人民币按本地商品估算的汇率折算，弹窗末尾只留「1 元 ≈ N 円」的说明",

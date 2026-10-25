@@ -6,23 +6,25 @@
 
 ## 安装
 
-**[安装 DLsite 优惠助手 + 史低](https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.90/userscript/dl-price-tracker.user.js)**
+**[安装 DLsite 优惠助手 + 史低](https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@latest/userscript/dl-price-tracker.user.js)**
 
-上面这条走 jsDelivr，指向具体版本 tag（发出即可用；`@latest` 有约 12 小时解析缓存，刚发版时会拿不到新版，所以不用它）。桌面端可使用 Tampermonkey、Violentmonkey 等用户脚本管理器；Via 等支持 `.user.js` 的手机浏览器可直接打开安装链接。
+上面这条走 jsDelivr 的 `@latest`，永远指向最新 tag，装一次之后跟着发版自动更新（刚发版时新 tag 需要几分钟被 CDN 解析到）。桌面端可使用 Tampermonkey、Violentmonkey 等用户脚本管理器；Via 等支持 `.user.js` 的手机浏览器可直接打开安装链接。
+
+需要锁死版本时把 `@latest` 换成具体 tag（例如 `@v0.6.91`），但**不要**把 `@updateURL` 也锁死——那样脚本里记的更新地址永远指向自己，之后就再也收不到新版本。
 
 打不开时的备用入口（任选其一）：
 
-- 固定到某个提交的 raw 链接：`https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/d023c95e200abbccee52c751b44c2f205b5f9c1a/userscript/dl-price-tracker.user.js`
+- raw 直连（少数网络可用）：`https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/main/userscript/dl-price-tracker.user.js`
 - raw 被墙时代理：`https://gh-proxy.com/https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/main/userscript/dl-price-tracker.user.js`
-- [Releases](https://github.com/jiangdaolia/dlsite-best-deal/releases) 里每个版本的 `dl-price-tracker.user.js` 附件
+- [Releases](https://github.com/jiangdaolia/dlsite-best-deal/releases) 里每个版本的 `dl-price-tracker.user.js` 附件（也可以直接用 GitHub 的「最新版」永久地址：`https://github.com/jiangdaolia/dlsite-best-deal/releases/latest/download/dl-price-tracker.user.js`）
 
 ### 更新不到新版本怎么办
 
 脚本的 `@updateURL` / `@downloadURL` 指向 jsDelivr 的 `@latest`（跟着最新 tag 走），不再是 raw.githubusercontent.com——后者在部分网络下连不上，脚本管理器会表现为「检查更新」永远拿不到新版本。排查顺序：
 
 1. 打开 `chrome-extension://dhdgffkkebhmkfjojejmpbldmpobfkfo/options.html#nav=utils`（Tampermonkey 设置 → 工具）或在脚本列表里点「检查更新」。
-2. 看该脚本的「更新 URL」是不是 `cdn.jsdelivr.net/...@latest/...`。如果还是 `raw.githubusercontent.com` 或者别的仓库，说明装的是旧版/老分叉，用上面的安装链接重装一次即可就地升级。
-3. jsDelivr 有约 12 小时 CDN 缓存，刚发布的版本可能晚半天才检查到；急用就直接下 Releases 附件。
+2. 看该脚本的「更新 URL」：应该是 `cdn.jsdelivr.net/...@latest/...`。如果指向 `raw.githubusercontent.com`，或者指向**某个固定 tag**（`@v0.6.89`、`@v0.6.90` 这类），说明装的是旧版——固定 tag 的更新地址永远指向那一版自己，收不到新版本，用上面的安装链接重装一次即可就地升级。
+3. 地址对了但仍提示「已是最新」：新 tag 需要几分钟才会被 CDN 解析到，等一会儿再点一次；急用就直接下 Releases 附件或下面的 raw 链接。
 
 日常使用只需安装主脚本 `userscript/dl-price-tracker.user.js`。`userscript/dlsite-coupon-reader.user.js` 是诊断工具，与主脚本同时启用会在购物车页产生重复读取和重复展示。
 
