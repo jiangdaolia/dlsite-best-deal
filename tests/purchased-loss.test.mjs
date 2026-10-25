@@ -28,6 +28,7 @@ function makeSandbox(extraSource = "") {
     globalThis.parseYenAmount = parseYenAmount;
     globalThis.parseAmountInfo = parseAmountInfo;
     globalThis.purchasedLossSummary = purchasedLossSummary;
+    globalThis.purchasedCellText = purchasedCellText;
     globalThis.purchasedRowsFromRoot = purchasedRowsFromRoot;`,
     sandbox,
   );
@@ -44,6 +45,7 @@ const coreSource = () =>
     functionSource("purchasedLossSummary"),
     functionSource("purchasedPriceTable"),
     functionSource("purchasedPriceColumnIndex"),
+    functionSource("purchasedCellText"),
     functionSource("purchasedRowsFromRoot"),
   ].join("\n");
 
@@ -51,6 +53,8 @@ test("已购页从价格（含税）列解析实付金额", () => {
   const sandbox = makeSandbox(`${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
     const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
     const purchasedLowCache = new Map();`);
   const parse = sandbox.parseYenAmount;
   assert.equal(parse("1,980円"), 1980);
@@ -69,6 +73,8 @@ test("已购页把人民币显示的价格也认出来，并折算成日元比�
   const sandbox = makeSandbox(`${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
     const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
     const purchasedLowCache = new Map();
     let rateValue = 0.05;
     function purchasedCnyRate() {
@@ -123,6 +129,8 @@ test("已购页结算区分买贵、买便宜、持平与缺少史低", () => {
   const sandbox = makeSandbox(`${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
     const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
     const purchasedLowCache = new Map();`);
   const rows = [
     { id: "RJ00000001", paid: 2500 },
@@ -164,6 +172,8 @@ test("已购页从表格定位价格列并读出每一行的编号与实付", ()
   const sandbox = makeSandbox(`${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
     const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
     const purchasedLowCache = new Map();`);
   const cell = (tagName, textContent) => ({ tagName, textContent });
   const header = {
@@ -208,6 +218,8 @@ test("已购页史低标签写成「史低N JPY / M RMB」", () => {
   const sandbox = makeSandbox(`${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
     const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
     const purchasedLowCache = new Map([
       ["RJ00000001", { lowest: 990 }],
       ["RJ00000002", { lowest: 1980 }],
@@ -231,6 +243,8 @@ test("已购页算不出人民币汇率时史低只显示日元", () => {
   const sandbox = makeSandbox(`${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
     const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
     const purchasedLowCache = new Map([["RJ00000001", { lowest: 379 }]]);`);
   const state = sandbox.purchasedLowChipText({ id: "RJ00000001", paid: 1980 });
   assert.equal(state.text, "史低379 JPY");
@@ -261,6 +275,8 @@ test("已购页对比只取主表格的作品编号，不把推荐位算进来",
     ${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
     const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
     const purchasedLowCache = new Map();
     globalThis.purchasedPageIds = purchasedPageIds;
     globalThis.purchasedPageTotalText = purchasedPageTotalText;`);
@@ -307,6 +323,8 @@ test("已购页数量对比文本列出接口有而页面没有的编号", () =>
     ${functionSource("purchasedDiffText")}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
     const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
     const purchasedLowCache = new Map();
     function normalizedMetadataProduct(id, raw) {
       return {
@@ -347,6 +365,8 @@ test("已购页数量对比标出每条的差异原因与同作品多编号", ()
     ${functionSource("purchasedDiffText")}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
     const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
     const purchasedLowCache = new Map();
     function normalizedMetadataProduct(id, raw) {
       return { id, title: String(raw?.title || id), siteId: "", price: null };
@@ -478,4 +498,112 @@ test("已购页工具栏提供数量对比按钮，且对比沿用当前筛选�
   assert.match(collect, /startUrl: location\.href/);
   assert.match(collect, /seedDoc: document/);
   assert.match(functionSource("fetchBoughtPageSnapshot"), /seedDoc && !pages/);
+});
+
+test("价格格里已有史低标签时，二次解析不会把标签当成实付", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
+    const purchasedLowCache = new Map();`);
+  const text = (value) => ({ nodeType: 3, textContent: value });
+  const chip = (value) => ({
+    nodeType: 1,
+    textContent: value,
+    classList: { contains: (name) => name === "dltracker-purchased-low" },
+  });
+  const polluted = {
+    childNodes: [text("¥62.00"), chip("史低379 JPY / 16.16 RMB")],
+    textContent: "¥62.00史低379 JPY / 16.16 RMB",
+  };
+  // 注入标签之后单元格文本变成「¥62.00史低379…」，直接解析会取到 379。
+  assert.equal(sandbox.parseAmountInfo(polluted.textContent).amount, 379);
+  // 排除标签后仍然是实付的 62 元。
+  assert.equal(sandbox.purchasedCellText(polluted), "¥62.00");
+  // 没有 childNodes 时退回整体文本，并把标签文本剪掉。
+  const flat = {
+    textContent: "¥62.00 史低379 JPY / 16.16 RMB",
+    querySelector: () => ({ textContent: "史低379 JPY / 16.16 RMB" }),
+  };
+  assert.equal(sandbox.purchasedCellText(flat), "¥62.00");
+  assert.equal(sandbox.purchasedCellText(null), "");
+});
+
+test("明细差额之和与合计差额一致（金额先取整再累加）", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
+    const purchasedLowCache = new Map();`);
+  // 人民币折算出来的金额是带小数的，正是旧版「表格加起来和合计对不上」的来源。
+  const rows = [
+    { id: "RJ00000001", paid: 1455.39, currency: "CNY", paidCny: 62, paidRaw: "¥62.00" },
+    { id: "RJ00000002", paid: 1234.567, currency: "CNY", paidCny: 52.6, paidRaw: "¥52.60" },
+    { id: "RJ00000003", paid: 2420 },
+    { id: "RJ00000004", paid: 880, currency: "JPY" },
+    { id: "RJ00000005", paid: 1500 },
+    { id: "RJ00000006", paid: null },
+  ];
+  const lowest = {
+    RJ00000001: 379.4,
+    RJ00000002: 1234.567,
+    RJ00000003: 1980.6,
+    RJ00000004: null,
+    RJ00000005: 1500,
+    RJ00000006: 900,
+  };
+  const summary = sandbox.purchasedLossSummary(rows, (row) => (
+    Object.prototype.hasOwnProperty.call(lowest, row.id) ? lowest[row.id] : null
+  ));
+  // 每一行都是整数円，表格里显示的数就是参与计算的数。
+  assert.equal(summary.compared.every((row) => Number.isInteger(row.paid)), true);
+  assert.equal(summary.compared.every((row) => Number.isInteger(row.lowest)), true);
+  const diffSum = summary.compared.reduce((sum, row) => sum + row.diff, 0);
+  assert.equal(diffSum, summary.netDiff);
+  assert.equal(summary.diffSum, summary.netDiff);
+  assert.equal(summary.selfCheckOk, true);
+  assert.equal(
+    summary.compared.reduce((sum, row) => sum + row.paid, 0),
+    summary.totalPaid,
+  );
+  assert.equal(
+    summary.compared.reduce((sum, row) => sum + row.lowest, 0),
+    summary.totalLowest,
+  );
+  // 本页 = 计入 + 无史低 + 未解析，行数不能凭空少。
+  assert.equal(summary.rowsTotal, rows.length);
+  assert.equal(
+    summary.countedCount + summary.missing.length + summary.unparsed.length,
+    summary.rowsTotal,
+  );
+  assert.deepEqual([...summary.missing].map((row) => row.id), ["RJ00000004"]);
+  assert.deepEqual([...summary.unparsed].map((row) => row.id), ["RJ00000006"]);
+});
+
+test("文本版把未计入的行也列出来，并带上自检结果", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    ${functionSource("purchasedLossText")}
+    const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
+    const purchasedLowCache = new Map();
+    globalThis.purchasedLossText = purchasedLossText;`);
+  const rows = [
+    { id: "RJ00000001", paid: 1455.39, currency: "CNY", paidCny: 62, paidRaw: "¥62.00" },
+    { id: "RJ00000002", paid: 990 },
+    { id: "RJ00000003", paid: null, paidRaw: "无料" },
+  ];
+  const summary = sandbox.purchasedLossSummary(rows, (row) => (
+    row.id === "RJ00000002" ? 1980 : row.id === "RJ00000001" ? 379 : null
+  ));
+  const text = sandbox.purchasedLossText(summary);
+  assert.match(text, /本页 3 部｜计入合计 2 部｜未计入 1 部/);
+  // 人民币原值必须写出来，否则和页面上的「¥62.00」对不上。
+  assert.match(text, /RJ00000001｜¥62\.00（≈1,455円）｜379円｜\+1,076円/);
+  assert.match(text, /自检：明细差额之和 .*（与合计差额一致）/);
+  assert.match(text, /价格未解析（未计入）：/);
+  assert.match(text, /RJ00000003｜无料/);
 });
