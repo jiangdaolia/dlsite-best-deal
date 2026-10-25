@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.76
+// @version      0.6.77
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.76";
+  const APP_VERSION = "0.6.77";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -85,6 +85,9 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.77": [
+      "已购清单核对的文本版补上站点、价格，并统计站点分布、0 円条目和跨分区条目数",
+    ],
     "0.6.76": [
       "账号信息面板新增「已购清单核对」：列出脚本从 DLsite 已购接口读到的全部编号、标题、价格和站点，便于核对已购数量差异",
       "支持一键复制核对结果（只含编号与计数，不含账号、Cookie 和标题）",
@@ -8179,9 +8182,34 @@
     breakdown,
     payload,
     fetchError,
+    cache = null,
     samples = 60,
   }) {
     const entries = index?.entries || {};
+    const metadata = (cache || loadDealCache())?.metadata || {};
+    const siteOf = (id) => {
+      const raw = metadata[id]?.raw;
+      if (!raw) return "";
+      return String(normalizedMetadataProduct(id, raw).siteId || "");
+    };
+    const priceOf = (id) => {
+      const raw = metadata[id]?.raw;
+      if (!raw) return null;
+      const value = normalizedMetadataProduct(id, raw).price;
+      return Number.isFinite(value) ? value : null;
+    };
+    const siteCounts = {};
+    let freeCount = 0;
+    for (const id of breakdown.bought) {
+      const site = siteOf(id) || "未知";
+      siteCounts[site] = (siteCounts[site] || 0) + 1;
+      if (priceOf(id) === 0) freeCount += 1;
+    }
+    const currentSection = currentDlsiteSection();
+    const otherSite = breakdown.bought.filter((id) => {
+      const site = siteOf(id);
+      return site && site !== currentSection;
+    });
     const items = payload ? boughtDiagnosticItems(payload) : null;
     const nested = payload?.bought;
     const totalFields = {};
@@ -8217,6 +8245,11 @@
         `indexed=${dealNumber(index?.indexed, 0)}/${dealNumber(index?.total, 0)} ` +
         `未读到元数据=${breakdown.missingEntries.length}`,
       `按作品家族去重=${breakdown.familyCount}（多编号家族 ${breakdown.multiSkuFamilies.length} 组）`,
+      `站点分布：${Object.entries(siteCounts)
+        .map(([site, count]) => `${site}=${count}`)
+        .join("　") || "-"}`,
+      `价格 0 円的条目=${freeCount}　不在当前分区（${currentSection}）的条目=${otherSite.length}${
+        otherSite.length ? ` [${otherSite.join(", ")}]` : ""}`,
     ];
     if (breakdown.multiSkuFamilies.length) {
       for (const [familyId, ids] of breakdown.multiSkuFamilies.slice(0, 10)) {
@@ -8237,10 +8270,11 @@
       lines.push(`接口有而脚本没记=${onlyApi.length}${onlyApi.length ? ` [${onlyApi.join(", ")}]` : ""}`);
       lines.push(`脚本记了但接口没有=${onlyLocal.length}${onlyLocal.length ? ` [${onlyLocal.join(", ")}]` : ""}`);
     }
-    lines.push("", "—— 明细（编号｜元数据｜家族｜语言｜在购物车）——");
+    lines.push("", "—— 明细（编号｜元数据｜家族｜语言｜站点｜价格｜在购物车）——");
     const detailIds = breakdown.bought.slice(0, samples);
     for (const id of detailIds) {
       const entry = entries[id] || {};
+      const price = priceOf(id);
       const cartFlag = breakdown.inActive.includes(id)
         ? "立即购买"
         : breakdown.inLater.includes(id)
@@ -8251,6 +8285,8 @@
         entry.id ? "有" : "无",
         breakdown.familyKeyOf(id),
         entry.lang ? languageDisplayName(entry.lang) : "-",
+        siteOf(id) || "-",
+        price === null ? "-" : price === 0 ? "0円" : String(price),
         cartFlag,
       ].join("｜"));
     }
@@ -8262,6 +8298,15 @@
       lines.push("· 已购接口没读成功，先看上面的脚本记录；可稍后重试诊断。");
     } else if (items && (onlyApi.length || onlyLocal.length)) {
       lines.push("· 本地记录与接口不一致，本地可能是旧数据：请先「读取账号信息」再诊断。");
+    } else if (otherSite.length) {
+      lines.push(
+        `· 有 ${otherSite.length} 条不在当前分区（${currentSection}）：` +
+          "已购接口返回了跨分区（不同站点）的购买记录，DLsite 已购页按站点分区显示，两边数量本来就会不同。",
+      );
+    } else if (freeCount) {
+      lines.push(
+        `· 有 ${freeCount} 条价格为 0 円：免费领取/活动赠送的作品会被已购接口返回，但已购页可能不计入。`,
+      );
     } else if (breakdown.multiSkuFamilies.length) {
       lines.push(
         `· 有 ${breakdown.multiSkuFamilies.length} 组同一作品的多个编号，` +
@@ -8274,8 +8319,8 @@
       );
     } else if (items) {
       lines.push(
-        `· 本地记录与接口条数一致（${items.ids.length} 条），且没有同作品多编号，` +
-          "说明多出的条目来自 DLsite 已购接口本身（免费领取、已下架、赠品/特典等）。",
+        `· 本地记录与接口条数一致（${items.ids.length} 条），且都在同一分区、无 0 円条目、` +
+          "没有同作品多编号，说明差异来自 DLsite 已购接口与已购页的统计口径（例如已下架、赠品/特典）。",
       );
     }
     return lines.join("\n");
@@ -8287,6 +8332,7 @@
     }
     const index = loadAccountIndex();
     const breakdown = boughtCountBreakdown(index, loadLanguageFamilyCache());
+    const cache = loadDealCache();
     let payload = null;
     let fetchError = "";
     const section = currentDlsiteSection();
@@ -8300,7 +8346,7 @@
     }
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     return {
-      text: boughtCountDiagnosticText({ index, breakdown, payload, fetchError }),
+      text: boughtCountDiagnosticText({ index, breakdown, payload, fetchError, cache }),
       filename: `dltracker-bought-diagnostic-${timestamp}.txt`,
     };
   }
