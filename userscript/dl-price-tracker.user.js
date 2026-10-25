@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.77
+// @version      0.6.78
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.77";
+  const APP_VERSION = "0.6.78";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -85,6 +85,11 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.78": [
+      "已购清单核对新增「已购买作品页」对比：脚本同源读取已购买作品页，把页面实际列出的作品与已购接口清单做差集，并标出页面没有显示的条目",
+      "对比结果同时输出页面上的筛选下拉/月份条件与翻页数，用于判断页面是否只显示了部分记录",
+      "遵循既有约束：不在已购买作品页注入任何界面",
+    ],
     "0.6.77": [
       "已购清单核对的文本版补上站点、价格，并统计站点分布、0 円条目和跨分区条目数",
     ],
@@ -8112,6 +8117,73 @@
 
   // 「已购买 N 部」诊断：把本地记录、作品家族归并结果和 DLsite 已购接口
   // 的原始条目放在一起对照，用来判断多算/少算到底出在哪一层。
+  // 读取当前页面（已购买作品页）上实际列出的作品编号，用来和接口清单做差集。
+  function pageProductIds(root = document) {
+    const ids = [];
+    if (!root?.querySelectorAll) return ids;
+    for (const link of root.querySelectorAll('a[href*="product_id/"]')) {
+      const matched = String(link.getAttribute("href") || "").match(/([RBV]J\d{6,})/i);
+      if (!matched) continue;
+      const id = matched[1].toUpperCase();
+      if (!ids.includes(id)) ids.push(id);
+    }
+    return ids;
+  }
+
+  function pageFilterSummary(root = document) {
+    const filters = [];
+    if (!root?.querySelectorAll) return filters;
+    for (const select of root.querySelectorAll("select")) {
+      const options = select.options ? [...select.options] : [];
+      const selected = String(select.value || "") ||
+        String(options.find((option) => option.selected)?.value || "");
+      if (!selected && !options.length) continue;
+      filters.push({
+        name: String(select.getAttribute("name") || select.getAttribute("id") || "select"),
+        selected,
+        options: options.length,
+      });
+    }
+    return filters.slice(0, 6);
+  }
+
+  // 已购买作品页禁止注入任何界面，所以改为同源读取该页 HTML 再解析，
+  // 拿页面实际列出的编号与筛选条件，和已购接口清单做差集。
+  async function fetchBoughtPageSnapshot({ maxPages = 6 } = {}) {
+    const section = currentDlsiteSection();
+    const startUrl = new URL(`/${section}/mypage/userbuy`, location.origin);
+    const ids = [];
+    let filters = [];
+    let pages = 0;
+    const visited = new Set();
+    const queue = [startUrl.toString()];
+    while (queue.length && pages < maxPages) {
+      const next = queue.shift();
+      if (visited.has(next)) continue;
+      visited.add(next);
+      let html = "";
+      try {
+        html = await fetchSameOriginText(next, "已购买作品页");
+      } catch (error) {
+        if (!pages) throw error;
+        break;
+      }
+      pages += 1;
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      if (pages === 1) filters = pageFilterSummary(doc);
+      for (const id of pageProductIds(doc)) {
+        if (!ids.includes(id)) ids.push(id);
+      }
+      for (const link of doc.querySelectorAll('a[href*="userbuy"]')) {
+        const href = link.getAttribute("href") || "";
+        if (!/page\/\d+|[?&]page=\d+|p=\d+/i.test(href)) continue;
+        const absolute = new URL(href, next).toString();
+        if (!visited.has(absolute) && !queue.includes(absolute)) queue.push(absolute);
+      }
+    }
+    return { ids, filters, pages };
+  }
+
   function boughtCountBreakdown(
     index = loadAccountIndex(),
     languageCache = loadLanguageFamilyCache(),
@@ -8183,6 +8255,9 @@
     payload,
     fetchError,
     cache = null,
+    pageIds = null,
+    pageFilters = [],
+    pageNote = "",
     samples = 60,
   }) {
     const entries = index?.entries || {};
@@ -8256,6 +8331,27 @@
         lines.push(`  · 家族 ${familyId}: ${ids.join(", ")}`);
       }
     }
+    let missingOnPage = [];
+    let extraOnPage = [];
+    if (pageIds) {
+      const pageSet = new Set(pageIds);
+      missingOnPage = breakdown.bought.filter((id) => !pageSet.has(id));
+      extraOnPage = pageIds.filter((id) => !breakdown.bought.includes(id));
+      lines.push("", "—— 已购买作品页（脚本同源读取）——");
+      lines.push(`本页列出的作品=${pageIds.length}　接口清单=${breakdown.bought.length}${
+        pageNote ? `　${pageNote}` : ""}`);
+      lines.push(`接口有但本页没有=${missingOnPage.length}${
+        missingOnPage.length ? ` [${missingOnPage.join(", ")}]` : ""}`);
+      lines.push(`本页有但接口没有=${extraOnPage.length}${
+        extraOnPage.length ? ` [${extraOnPage.join(", ")}]` : ""}`);
+      if (pageFilters.length) {
+        lines.push(`页面筛选控件：${pageFilters
+          .map((filter) => `${filter.name}=${filter.selected || "?"}(${filter.options}项)`)
+          .join("　")}`);
+      }
+    } else if (pageNote) {
+      lines.push("", "—— 已购买作品页 ——", pageNote);
+    }
     lines.push("", "—— DLsite 已购接口 ——");
     if (fetchError) {
       lines.push(`接口读取失败：${fetchError}`);
@@ -8298,6 +8394,17 @@
       lines.push("· 已购接口没读成功，先看上面的脚本记录；可稍后重试诊断。");
     } else if (items && (onlyApi.length || onlyLocal.length)) {
       lines.push("· 本地记录与接口不一致，本地可能是旧数据：请先「读取账号信息」再诊断。");
+    } else if (missingOnPage.length) {
+      lines.push(
+        `· 本页比接口少 ${missingOnPage.length} 条，说明已购买作品页自己做了筛选或分页：` +
+          "DLsite 的购买/下载历史默认只显示当月，需要在上方月份下拉里切换年月；" +
+          "DLsite Play 的 My Items 也不显示配信終了（已下架）的作品。",
+      );
+    } else if (pageIds) {
+      lines.push(
+        `· 本页与接口清单完全一致（${pageIds.length} 条），页面没有筛掉任何编号，` +
+          "说明「38」是按作品/订单聚合后的显示结果，而不是 43 条记录里的子集。",
+      );
     } else if (otherSite.length) {
       lines.push(
         `· 有 ${otherSite.length} 条不在当前分区（${currentSection}）：` +
@@ -8333,6 +8440,24 @@
     const index = loadAccountIndex();
     const breakdown = boughtCountBreakdown(index, loadLanguageFamilyCache());
     const cache = loadDealCache();
+    let pageIds = null;
+    let pageFilters = [];
+    let pageNote = "";
+    if (isDlsiteMemberLoggedIn()) {
+      try {
+        const snapshot = await fetchBoughtPageSnapshot();
+        if (snapshot.ids.length) {
+          pageIds = snapshot.ids;
+          pageFilters = snapshot.filters;
+          if (snapshot.pages > 1) pageNote = `共 ${snapshot.pages} 页`;
+        } else {
+          pageNote = "已购买作品页没有解析到作品编号（可能未登录或页面结构变化）";
+        }
+      } catch (error) {
+        pageNote = `已购买作品页读取失败：${
+          error instanceof Error ? error.message : String(error)}`;
+      }
+    }
     let payload = null;
     let fetchError = "";
     const section = currentDlsiteSection();
@@ -8346,8 +8471,18 @@
     }
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     return {
-      text: boughtCountDiagnosticText({ index, breakdown, payload, fetchError, cache }),
+      text: boughtCountDiagnosticText({
+        index,
+        breakdown,
+        payload,
+        fetchError,
+        cache,
+        pageIds,
+        pageFilters,
+        pageNote,
+      }),
       filename: `dltracker-bought-diagnostic-${timestamp}.txt`,
+      pageIds,
     };
   }
 
@@ -8362,9 +8497,10 @@
   }
 
   // 标题、价格、站点都取自本地已缓存的商品信息，不额外联网。
-  function boughtCountRows(index, breakdown, cache = loadDealCache()) {
+  function boughtCountRows(index, breakdown, cache = loadDealCache(), pageIds = null) {
     const metadata = cache?.metadata || {};
     const entries = index?.entries || {};
+    const pageSet = pageIds ? new Set(pageIds) : null;
     const rows = breakdown.bought.map((id) => {
       const raw = metadata[id]?.raw;
       const product = raw ? normalizedMetadataProduct(id, raw) : null;
@@ -8377,6 +8513,7 @@
         lang: entries[id]?.lang ? languageDisplayName(entries[id].lang) : "",
         familyKey,
         familySize: (breakdown.families.get(familyKey) || []).length,
+        onPage: pageSet ? pageSet.has(id) : null,
       };
     });
     return rows.sort((left, right) => {
@@ -8420,8 +8557,8 @@
     body.className = "dltracker-reach-dialog-body";
     const hint = document.createElement("p");
     hint.className = "dltracker-bought-diagnostic-hint";
-    hint.textContent = "下面是脚本从 DLsite 已购接口读到的全部编号和本地缓存的标题。" +
-      "请对照看看哪几条不是你买的，把编号告诉我即可。";
+    hint.textContent = "下面是已购接口读到的全部编号和本地缓存标题；" +
+      "红底行代表「已购买作品页没有显示这一条」。点「复制文本版」发我即可。";
     const summary = document.createElement("div");
     summary.className = "dltracker-bought-diagnostic-summary";
     summary.textContent = "正在读取…";
@@ -8460,7 +8597,16 @@
         chip.append(strong, document.createTextNode(String(value)));
         summary.appendChild(chip);
       }
-      const rows = boughtCountRows(index, breakdown);
+      const pageIds = payload?.pageIds || null;
+      const rows = boughtCountRows(index, breakdown, undefined, pageIds);
+      if (pageIds) {
+        const missing = rows.filter((row) => row.onPage === false).length;
+        const chip = document.createElement("span");
+        const strong = document.createElement("strong");
+        strong.textContent = "本页未显示：";
+        chip.append(strong, document.createTextNode(String(missing)));
+        summary.appendChild(chip);
+      }
       const blocked = rows.filter((row) => !row.title).length;
       if (blocked) {
         const note = document.createElement("span");
@@ -8472,7 +8618,10 @@
       const table = document.createElement("table");
       const head = document.createElement("thead");
       const headRow = document.createElement("tr");
-      for (const label of ["#", "编号", "标题", "价格", "站点", "语言"]) {
+      const headers = pageIds
+        ? ["#", "编号", "标题", "价格", "站点", "语言", "本页"]
+        : ["#", "编号", "标题", "价格", "站点", "语言"];
+      for (const label of headers) {
         const th = document.createElement("th");
         th.textContent = label;
         headRow.appendChild(th);
@@ -8483,6 +8632,7 @@
         const tr = document.createElement("tr");
         if (row.familySize > 1) tr.className = "is-same-work";
         if (row.price === 0) tr.classList.add("is-free");
+        if (row.onPage === false) tr.classList.add("is-missing-on-page");
         const cells = [
           String(position + 1),
           row.id,
@@ -8491,6 +8641,7 @@
           row.siteId || "-",
           row.lang || "-",
         ];
+        if (pageIds) cells.push(row.onPage ? "有" : "未显示");
         cells.forEach((text, cellIndex) => {
           const td = document.createElement("td");
           td.textContent = text;
@@ -13864,6 +14015,11 @@ a.dltracker-browse-analysis-frame {
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.dltracker-bought-diagnostic-table-wrap tr.is-missing-on-page td {
+  background: #fdecec;
+  color: #8a3030;
 }
 
 .dltracker-account-progress-block {

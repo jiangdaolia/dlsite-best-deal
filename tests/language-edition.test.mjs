@@ -656,3 +656,31 @@ test("已购清单核对区分编号数与作品家族数", () => {
   // RJ00000004 没有语言元数据，单独列出，不影响计数。
   assert.deepEqual([...breakdown.missingEntries], ["RJ00000004"]);
 });
+
+test("已购页对比按 product_id 提取编号并去重", () => {
+  const links = [
+    { getAttribute: () => "/girls/work/=/product_id/RJ01234567.html" },
+    { getAttribute: () => "/girls/work/=/product_id/RJ01234567.html?foo=1" },
+    { getAttribute: () => "/girls/work/=/product_id/BJ000123.html" },
+    { getAttribute: () => "/girls/fsr/=/keyword/test" },
+  ];
+  const fakeRoot = { querySelectorAll: () => links };
+  const sandbox = {};
+  vm.runInNewContext(`
+    ${functionSource("pageProductIds")}
+    globalThis.pageProductIdsForTest = pageProductIds;
+  `, sandbox);
+  assert.deepEqual(
+    [...sandbox.pageProductIdsForTest(fakeRoot)],
+    ["RJ01234567", "BJ000123"],
+  );
+  // 已购页对比由脚本同源读取页面，不在该页面注入任何界面。
+  assert.match(
+    functionSource("buildBoughtCountDiagnostic"),
+    /fetchBoughtPageSnapshot\(\)[\s\S]*?pageIds/,
+  );
+  assert.doesNotMatch(
+    functionSource("buildBoughtCountDiagnostic"),
+    /document\.body\.appendChild/,
+  );
+});
