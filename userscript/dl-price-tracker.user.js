@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.96
+// @version      0.6.97
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -31,7 +31,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.96";
+  const APP_VERSION = "0.6.97";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -110,6 +110,13 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.97": [
+      "修正「读取账号信息后还是只有当月几部」：已购买页的月份筛选走的是地址路径（/mypage/userbuy/=/year/2026/month/10/），不在查询串里，之前只判断查询串，结果把「只看 10 月」的 3 条当成了全量",
+      "读取账号信息时一律从未筛选的已购买页地址开始，不再继承当前页的月份、类型、关键词筛选",
+      "读到的第一页如果还停在某个月，会自动找到「全期間 / すべて」入口改读那一份，并在面板上写「已切到「全期間」读取」",
+      "实在找不到「全期間」（页面结构不同）时不再拿当月几条当全量：改用已购接口的全量条数，并写明「已购页停在 2026年10月（3 条），已改用接口全量 43 条」",
+      "「算算亏了多少」在带筛选的页面上会提示「本页有筛选，只结算这 N 条」，避免又以为只买了这么点",
+    ],
     "0.6.96": [
       "点「算算亏了多少」时会先把购买历史展开到全部：反复点原站的「もっと見る」直到点不出新行，再结算，不再只算眼前显示的那几条",
       "展开时会在工具栏显示进度（第几次、已经多少条），展开完再开始读史低；点了没新行就立刻收手，不会无限点",
@@ -3552,13 +3559,14 @@
           updatedAt: Date.now(),
         });
         refreshAccountInformationPanels();
-        // 当前就在已购买作品页且地址没带筛选参数时，直接复用眼前这份 DOM，
-        // 省掉一次请求；带了筛选就老老实实读默认列表，否则数量会被筛选裁小。
-        const onPurchasedPage = isPurchasedWorksPage(location.href) && !location.search;
+        // 只有在「裸的已购买作品页」上才复用眼前这份 DOM：DLsite 的月份筛选
+        // 走路径段（/mypage/userbuy/=/year/2026/month/10/），不在 location.search 里，
+        // 之前只判断查询串，结果把「只看 10 月」的 3 条当成了全量。
+        const onPurchasedPage = purchasedPageIsUnfiltered(location.href);
         try {
           pageSnapshot = await fetchBoughtPageSnapshot({
             seedDoc: onPurchasedPage ? document : null,
-            startUrl: onPurchasedPage ? location.href : null,
+            startUrl: onPurchasedPage ? location.href : purchasedPageBaseUrl(),
             onExpandProgress: (clicks, rows) => {
               setAccountReadRuntime({
                 detail: `展开购买历史（第 ${clicks} 次，${rows} 条）`,
@@ -3571,15 +3579,23 @@
         }
         if (!renewAccountIndexLock()) return loadAccountIndex();
       }
-      const pageIds = [...new Set(pageSnapshot.ids || [])];
-      const pageSet = new Set(pageIds);
+      let pageIds = [...new Set(pageSnapshot.ids || [])];
       if (!pageIds.length && !pageNote) {
         pageNote = "已购买作品页没有解析到作品编号";
+      } else if (pageIds.length && pageSnapshot.periodFiltered && bought.length > pageIds.length) {
+        // 页面还停在某个月（没找到「全期間」入口）：这份列表只有当月几条，
+        // 当全量用会把「已购买」裁成 3 部。退回接口全量并写明原因。
+        pageNote = `已购页停在${pageSnapshot.periodLabel || "月份筛选"}` +
+          `（${pageIds.length} 条），已改用接口全量 ${bought.length} 条`;
+        pageIds = [];
       } else if (pageIds.length && pageSnapshot.expandBlocked) {
         pageNote = "已购页需要展开才能读全，请到已购买作品页上再读一次";
       } else if (pageIds.length && pageSnapshot.complete === false) {
         pageNote = `只读到 ${pageSnapshot.pages} 页，页面未读全`;
+      } else if (pageIds.length && pageSnapshot.followedAllPeriod) {
+        pageNote = "已切到「全期間」读取";
       }
+      const pageSet = new Set(pageIds);
       // 以页面为准：页面上列出的编号都要读（含极少数还没进接口的新购）。
       const inPage = pageSet.size ? pageIds : bought;
       // 页面口径为空（未读到页面）时按接口全量走，避免一条都不读。
@@ -8510,6 +8526,84 @@
     return matched ? matched[0].trim() : "";
   }
 
+  // ---- 「已购买页是不是被筛选过」----
+  // DLsite 的筛选走的是路径段：/mypage/userbuy/=/year/2026/month/10/。
+  // 这种筛选不会出现在 location.search 里，只看查询串会把「只看 10 月」的 3 条
+  // 当成页面全量（用户遇到的就是这个：读完还是 10 月那 3 部）。
+  const PURCHASED_FILTER_PATH_RE = /\/=\/|\/(?:year|month|work_type|keyword|page|sort)\//i;
+  const PURCHASED_PERIOD_FIELD_RE = /year|month|period|nen|getsu|期間|年月|月份/i;
+  const PURCHASED_PERIOD_LABEL_RE = /\d{4}\s*年\s*\d{1,2}\s*月|\d{1,2}\s*月|\d{4}[-/]\d{1,2}/;
+  // 「全期間 / すべて」这类能退回全量的入口。
+  const PURCHASED_ALL_PERIOD_TEXT_RE = /全期間|すべての期間|全ての期間|全件|すべて表示|全て表示|すべてを表示|期間指定なし|all\s*periods?/i;
+
+  // 地址必须是「裸的已购买页」才能直接复用眼前的 DOM：带路径筛选、查询串、
+  // 锚点都说明这一页不是全量列表。
+  function purchasedPageIsUnfiltered(url) {
+    if (!isPurchasedWorksPage(url)) return false;
+    let parsed = null;
+    try {
+      parsed = new URL(String(url || ""), location.origin);
+    } catch {
+      return false;
+    }
+    if (parsed.search || parsed.hash) return false;
+    const path = parsed.pathname.replace(/\/+$/, "");
+    if (!/\/mypage\/userbuy$/i.test(path)) return false;
+    return !PURCHASED_FILTER_PATH_RE.test(path);
+  }
+
+  // 未筛选的已购买页地址（读取账号信息时一律从这里开始，绝不继承当前页的筛选）。
+  function purchasedPageBaseUrl() {
+    return new URL(`/${currentDlsiteSection()}/mypage/userbuy`, location.origin).toString();
+  }
+
+  // 页面上还选着年份/月份（下拉框或高亮的月份标签）就说明只列了一个月。
+  // 只认「2026年10月 / 10月 / 2026-10 / 202610」这种明确的月份文案：
+  // 纯数字或空值当全量，免得把普通的排序下拉误判成筛选、把全量又裁回接口全量。
+  function purchasedPeriodFilterLabel(doc) {
+    if (!doc?.querySelectorAll) return "";
+    const looksLikePeriod = (label, value) => PURCHASED_PERIOD_LABEL_RE.test(label) ||
+      /^\d{6}$/.test(value) || /^\d{4}[-/]\d{1,2}$/.test(value);
+    for (const select of doc.querySelectorAll("select")) {
+      const field = `${select.getAttribute("name") || ""} ${select.getAttribute("id") || ""}`;
+      if (!PURCHASED_PERIOD_FIELD_RE.test(field)) continue;
+      const options = select.options ? [...select.options] : [];
+      const selectedOption = options.find((option) => option.selected);
+      const value = String(select.value || selectedOption?.value || "");
+      if (!value) continue;
+      const label = String(selectedOption?.textContent || value).replace(/\s+/g, " ").trim();
+      if (looksLikePeriod(label, value)) return label || value;
+    }
+    for (const node of doc.querySelectorAll(
+      'a.is-active, a.is-current, a.is-selected, li.is-active > a, .active > a, [aria-current="page"]',
+    )) {
+      const label = String(node.textContent || "").replace(/\s+/g, " ").trim();
+      if (label && label.length <= 20 && PURCHASED_PERIOD_LABEL_RE.test(label)) return label;
+    }
+    return "";
+  }
+
+  // 找到「全期間 / すべて」那个链接，用来把列表拉回全量。
+  function purchasedAllPeriodUrl(doc, base) {
+    if (!doc?.querySelectorAll) return "";
+    for (const link of doc.querySelectorAll("a[href]")) {
+      const text = String(link.textContent || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 24) continue;
+      if (!PURCHASED_ALL_PERIOD_TEXT_RE.test(text)) continue;
+      let absolute = "";
+      try {
+        absolute = new URL(link.getAttribute("href") || "", base).toString();
+      } catch {
+        continue;
+      }
+      if (!/\/mypage\/userbuy/i.test(absolute)) continue;
+      // 还带年月就是「某个月的筛选」，不是全量入口。
+      if (/\/year\/|\/month\/|[?&](?:year|month)=/i.test(absolute)) continue;
+      return absolute;
+    }
+    return "";
+  }
+
   // ---- 「购买历史展开到全部」----
   // 已购买作品页默认只显示最近一批，底部还有「もっと見る」这类加载更多控件；
   // 不展开就去读，结算和清单都只覆盖眼前这几行（用户要求：展开到全部后再读取）。
@@ -8629,6 +8723,7 @@
     startUrl = null,
     expand = true,
     onExpandProgress = null,
+    followAllPeriod = true,
   } = {}) {
     const section = currentDlsiteSection();
     const firstUrl = startUrl || new URL(`/${section}/mypage/userbuy`, location.origin).toString();
@@ -8640,6 +8735,12 @@
     // 远程抓来的 HTML 里如果还挂着「もっと見る」按钮（纯 JS、没有对应链接），
     // 说明这一页本来就只显示了一部分，翻页也补不回来，要告诉调用方。
     let expandBlocked = false;
+    // 这一页是不是只列了一个月：是的话条数会被裁小，不能当全量。
+    let periodFiltered = false;
+    let periodLabel = "";
+    let followedAllPeriod = false;
+    // 用来认定「哪一页才是这一轮列表的基准」：切到全期間时第一页作废，要重取一次表头/总数。
+    let metaReady = false;
     const visited = new Set();
     const queue = [firstUrl];
     while (queue.length && pages < maxPages) {
@@ -8672,9 +8773,25 @@
         if (purchasedMoreControl(doc)) expandBlocked = true;
       }
       pages += 1;
-      if (pages === 1) {
+      if (!metaReady) {
         filters = pageFilterSummary(doc);
         totalText = purchasedPageTotalText(doc);
+        periodLabel = purchasedPeriodFilterLabel(doc);
+        // 页面上还选着年份/月份（DLsite 的路径筛选、或者默认只列当月），
+        // 这份列表就不是全量：找到「全期間 / すべて」就改读那一份，这一页作废
+        // （连它自己写的「全 3 件」也不能用，否则面板会显示成 3）。
+        if (followAllPeriod && !followedAllPeriod && periodLabel) {
+          const allUrl = purchasedAllPeriodUrl(doc, next);
+          if (allUrl && !visited.has(allUrl) && allUrl !== next) {
+            followedAllPeriod = true;
+            filters = [];
+            totalText = "";
+            queue.unshift(allUrl);
+            continue;
+          }
+        }
+        periodFiltered = Boolean(periodLabel);
+        metaReady = true;
       }
       for (const id of purchasedPageIds(doc)) {
         if (!ids.includes(id)) ids.push(id);
@@ -8696,6 +8813,9 @@
       complete: queue.length === 0,
       expanded,
       expandBlocked,
+      periodFiltered,
+      periodLabel,
+      followedAllPeriod,
     };
   }
 
@@ -9380,6 +9500,13 @@
       if (expanded.clicks) {
         setPurchasedToolbarStatus(`已展开 ${rows.length} 条`);
       }
+      // 页面被月份/类型筛过的时候，结算只能覆盖眼前这几条 —— 说清楚，
+      // 免得又以为「就买了这么点」。
+      if (rows.length && !purchasedPageIsUnfiltered(location.href)) {
+        setPurchasedToolbarStatus(
+          `本页有筛选，只结算这 ${rows.length} 条（看全部请清掉筛选）`,
+        );
+      }
       if (!table || !rows.length) {
         setPurchasedToolbarStatus("没读到作品行，刷新页面后再点");
         return;
@@ -9642,10 +9769,12 @@
       apiNote = `接口读取失败，改用本地记录：${
         error instanceof Error ? error.message : String(error)}`;
     }
-    // 用当前地址当起点，页面上已经选好的月份/类型筛选会被带进翻页对比。
+    // 核对弹窗要的是「页面此刻列出的东西」，所以沿用当前地址（含筛选），
+    // 也不去追「全期間」——否则差异永远为 0，这个弹窗就没意义了。
     const snapshot = await fetchBoughtPageSnapshot({
       seedDoc: document,
       startUrl: location.href,
+      followAllPeriod: false,
     });
     const pageSet = new Set(snapshot.ids);
     const apiSet = new Set(apiIds);
@@ -10652,20 +10781,28 @@
     } else if (isDlsiteMemberLoggedIn()) {
       try {
         // 就在已购买作品页时复用眼前 DOM 并展开到全部，否则远程抓（翻页 + 提示需展开）。
-        const onPurchasedPage = isPurchasedWorksPage(location.href) && !location.search;
+        // 地址带月份/类型筛选（含路径段形式）时不复用，改读未筛选的全量列表。
+        const onPurchasedPage = purchasedPageIsUnfiltered(location.href);
         const snapshot = await fetchBoughtPageSnapshot({
           seedDoc: onPurchasedPage ? document : null,
-          startUrl: onPurchasedPage ? location.href : null,
+          startUrl: onPurchasedPage ? location.href : purchasedPageBaseUrl(),
         });
         if (snapshot.ids.length) {
           pageIds = snapshot.ids;
           pageFilters = snapshot.filters;
           if (snapshot.pages > 1) pageNote = `共 ${snapshot.pages} 页`;
+          if (snapshot.followedAllPeriod) {
+            pageNote = `${pageNote ? `${pageNote}；` : ""}已切到「全期間」`;
+          }
           if (snapshot.expanded?.clicks) {
             pageNote = `${pageNote ? `${pageNote}；` : ""}已展开 ${snapshot.expanded.clicks} 次` +
               `→ ${snapshot.expanded.rows} 条`;
           }
           if (snapshot.expandBlocked) pageNote = `${pageNote ? `${pageNote}；` : ""}页面需展开才能读全`;
+          if (snapshot.periodFiltered) {
+            pageNote = `${pageNote ? `${pageNote}；` : ""}页面停在` +
+              `${snapshot.periodLabel || "月份筛选"}，可能不是全量`;
+          }
         } else {
           pageNote = "已购买作品页没有解析到作品编号（可能未登录或页面结构变化）";
         }
