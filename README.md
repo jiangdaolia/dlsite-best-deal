@@ -12,7 +12,7 @@
 
 打不开时的备用入口（任选其一）：
 
-- 固定到某个提交的 raw 链接：`https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/cc7985e5feaac1d3eb8ab5cffa867c4e08ac646f/userscript/dl-price-tracker.user.js`
+- 固定到某个提交的 raw 链接：`https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/b99c1ec8e6e1d3e61a43eef96c780fba6d34987f/userscript/dl-price-tracker.user.js`
 - raw 被墙时代理：`https://gh-proxy.com/https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/main/userscript/dl-price-tracker.user.js`
 - [Releases](https://github.com/jiangdaolia/dlsite-best-deal/releases) 里每个版本的 `dl-price-tracker.user.js` 附件
 
