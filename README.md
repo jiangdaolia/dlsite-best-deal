@@ -6,26 +6,26 @@
 
 ## 安装
 
-**[安装 DLsite 优惠助手 + 史低](https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.92/userscript/dl-price-tracker.user.js)**
+**[安装 DLsite 优惠助手 + 史低](https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.93/userscript/dl-price-tracker.user.js)**
 
 上面这条钉在当前版本 tag，点开拿到的一定是这一版（`@latest` 会命中 jsDelivr 的 tag 解析缓存，实测可能返回好几版之前的旧文件，所以装的时候不用它）。桌面端可使用 Tampermonkey、Violentmonkey 等用户脚本管理器；Via 等支持 `.user.js` 的手机浏览器可直接打开安装链接。
 
-装完之后的新版本靠脚本自己提示：脚本每 6 小时问一次最新版本，**真有新版时**右下角会出现一条可关闭的小提示，点「去更新」即可装到那个版本——它不依赖脚本管理器的「检查更新」，也不受 CDN 缓存影响。
+装完之后就不用再手动装了：脚本的更新地址是 GitHub 官方的**最新 release 附件永久地址**（`releases/latest/download/...`，内容永远指向最新一版），同时脚本自己每 6 小时问一次最新版本，真有新版时右下角会出现一条可关闭的小提示，点「去更新」即可——两条路都不依赖 `@latest` 的解析缓存。
 
 打不开时的备用入口（任选其一）：
 
 - jsDelivr 跟随最新 tag（可能滞后几版）：`https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@latest/userscript/dl-price-tracker.user.js`
 - raw 直连（少数网络可用）：`https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/main/userscript/dl-price-tracker.user.js`
 - raw 被墙时代理：`https://gh-proxy.com/https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/main/userscript/dl-price-tracker.user.js`
-- [Releases](https://github.com/jiangdaolia/dlsite-best-deal/releases) 里每个版本的 `dl-price-tracker.user.js` 附件（也可以直接用 GitHub 的「最新版」永久地址：`https://github.com/jiangdaolia/dlsite-best-deal/releases/latest/download/dl-price-tracker.user.js`）
+- [Releases](https://github.com/jiangdaolia/dlsite-best-deal/releases) 里每个版本的 `dl-price-tracker.user.js` 附件
 
 ### 更新不到新版本怎么办
 
 先看右下角有没有「有新版本 vX.Y.Z」的小提示：有就点「去更新」，那条链接钉死在那个版本上，一定能装到。没有提示但确定发了新版，再按下面排查：
 
 1. 打开 `chrome-extension://dhdgffkkebhmkfjojejmpbldmpobfkfo/options.html#nav=utils`（Tampermonkey 设置 → 工具）或在脚本列表里点「检查更新」。
-2. 看该脚本的「更新 URL」：应该是 `cdn.jsdelivr.net/...@latest/...`。如果指向 `raw.githubusercontent.com`，或者指向**某个固定 tag**（`@v0.6.89`、`@v0.6.90`、`@v0.6.91` 这类），说明装的是旧版——固定 tag 的更新地址永远指向那一版自己，之后再发版一概收不到，用上面的安装链接重装一次即可就地升级。
-3. 地址对了但仍提示「已是最新」：jsDelivr 的 `@latest` 解析有缓存，同一时间不同节点可能返回不同版本（实测 2026-10-25 同时能取到 0.6.87 和 0.6.90）。这种情况等脚本自己的提示，或直接用 Releases 里的附件覆盖安装。
+2. 看该脚本的「更新 URL」：应该是 `github.com/.../releases/latest/download/dl-price-tracker.user.js`。如果指向 `raw.githubusercontent.com`，或者指向**某个固定 tag**（`@v0.6.89`、`@v0.6.90` 这类），或者还是 `cdn.jsdelivr.net/...@latest`，说明装的是旧版——这几种地址都收不到（或收不全）新版本，用上面的安装链接重装一次即可就地升级。
+3. 地址对了但仍提示「已是最新」或报网络错误：GitHub 的部分下载域在国内可能连不上，这种情况直接用 Releases 里的附件，或等脚本自己的提示。
 
 日常使用只需安装主脚本 `userscript/dl-price-tracker.user.js`。`userscript/dlsite-coupon-reader.user.js` 是诊断工具，与主脚本同时启用会在购物车页产生重复读取和重复展示。
 

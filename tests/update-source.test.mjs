@@ -24,15 +24,19 @@ const headerOf = (name) => {
 
 // v0.6.89/v0.6.90 踩过的坑：把 @updateURL 钉成 @v0.6.90 之后，脚本里记的
 // 更新地址永远指向那一版自己，检查更新只会看到同一版本，之后再也收不到新版。
-test("更新地址必须是会移动的 @latest，不能钉死版本 tag", () => {
+// jsDelivr 的 @latest 也不可靠：tag 解析缓存会在不同节点返回相差好几版的文件。
+test("更新地址必须是会移动的地址，不能钉死版本 tag，也不用 @latest / @main", () => {
   const updateUrl = headerOf("updateURL");
   const downloadUrl = headerOf("downloadURL");
-  assert.match(updateUrl, /^https:\/\/cdn\.jsdelivr\.net\/gh\/jiangdaolia\/dlsite-best-deal@latest\//);
-  assert.match(downloadUrl, /^https:\/\/cdn\.jsdelivr\.net\/gh\/jiangdaolia\/dlsite-best-deal@latest\//);
-  // 固定 tag（@v1.2.3）和分支引用（@main）都不行：前者自我锁定，后者缓存不刷新。
+  const expected =
+    "https://github.com/jiangdaolia/dlsite-best-deal/releases/latest/download/dl-price-tracker.user.js";
+  assert.equal(updateUrl, expected);
+  assert.equal(downloadUrl, expected);
+  // 固定 tag（@v1.2.3）自我锁定；@main 分支引用缓存不刷新；@latest 返回旧文件。
   for (const url of [updateUrl, downloadUrl]) {
-    assert.doesNotMatch(url, /@v\d+\.\d+\.\d+\//);
-    assert.doesNotMatch(url, /@main\//);
+    assert.doesNotMatch(url, /@v\d+\.\d+\.\d+/);
+    assert.doesNotMatch(url, /@main/);
+    assert.doesNotMatch(url, /@latest/);
   }
 });
 

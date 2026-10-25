@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.92
+// @version      0.6.93
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -17,10 +17,11 @@
 // 更新地址必须是「会移动」的地址，不能钉死某个版本：
 // 之前写成 @v0.6.90 这种固定 tag，脚本里记的地址永远指向它自己，
 // 于是「检查更新」永远看到同一版本 → 表现为「油猴无法更新」。
-// 现在用 jsDelivr 的 @latest（跟随最新 tag）：raw.githubusercontent.com 在部分网络下
-// 连不上，所以仍走 CDN。刚发版时新 tag 需要几分钟被 CDN 解析，属正常延迟。
-// @updateURL    https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@latest/userscript/dl-price-tracker.user.js
-// @downloadURL  https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@latest/userscript/dl-price-tracker.user.js
+// 也不要用 jsDelivr 的 @latest：它的 tag 解析缓存很顽固，实测同一时刻
+// 能返回 0.6.87、0.6.90 等好几版之前的文件（2026-10-25）。这里用 GitHub
+// 官方的「最新 release 附件」永久地址，内容永远指向最新一版、没有任何解析缓存。
+// @updateURL    https://github.com/jiangdaolia/dlsite-best-deal/releases/latest/download/dl-price-tracker.user.js
+// @downloadURL  https://github.com/jiangdaolia/dlsite-best-deal/releases/latest/download/dl-price-tracker.user.js
 // ==/UserScript==
 
 (function () {
@@ -30,7 +31,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.92";
+  const APP_VERSION = "0.6.93";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -71,15 +72,16 @@
   const UPDATE_CHECK_STORAGE_KEY = "dltracker-update-check-at";
   const UPDATE_DISMISSED_VERSION_KEY = "dltracker-update-dismissed-version";
   const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
-  // 先问 jsDelivr 的版本接口（国内可达性好），失败再退 GitHub API。
+  // 两个源都可能被缓存到旧版本（实测同时取到 0.6.90 与 0.6.92），所以都查、取更大的那个。
+  // GitHub API 排前面：它返回的是 release 本身，不受 jsDelivr 的 tag 解析缓存影响。
   const UPDATE_LATEST_SOURCES = [
-    {
-      url: `https://data.jsdelivr.com/v1/packages/gh/${UPDATE_REPO}/resolved?specifier=latest`,
-      pick: (json) => json?.version,
-    },
     {
       url: `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`,
       pick: (json) => json?.tag_name,
+    },
+    {
+      url: `https://data.jsdelivr.com/v1/packages/gh/${UPDATE_REPO}/resolved?specifier=latest`,
+      pick: (json) => json?.version,
     },
   ];
   const DEAL_PLANNER_STORAGE_KEY = "dltracker-deal-planner-v1";
@@ -108,6 +110,11 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.93": [
+      "更新地址换成 GitHub 官方的「最新 release 附件」永久地址（releases/latest/download/...）：内容永远指向最新一版，没有任何解析缓存；jsDelivr 的 @latest 实测会在不同节点返回 0.6.87、0.6.90 这种好几版之前的文件",
+      "自检不再只信一个源：GitHub API 与 jsDelivr 版本接口都查，取两者里更新的那个，任一源被缓存成旧版本都不会导致「明明有新版却不提示」",
+      "本版请手动装一次（旧版本里存的地址改不掉），装好后右下角有新版会自动提示",
+    ],
     "0.6.92": [
       "新增「自己检查新版本」：油猴的检查更新只会说「已是最新」，看不出是 CDN 缓存旧版还是真没新版；脚本现在每 6 小时自己问一次最新版本，只有真的有新版时才在右下角出一条可关闭的小提示",
       "提示里的「更新」链接钉到具体版本（@v0.6.92 这种），不走 tag 解析、点开一定能装到那一版；装完后提示自动消失",
@@ -810,16 +817,19 @@
   }
 
   async function fetchLatestPublishedVersion() {
+    let newest = "";
     for (const source of UPDATE_LATEST_SOURCES) {
       try {
         const json = await gmRequestJson(source.url, REQUEST_TIMEOUT_MS);
         const version = String(source.pick(json) || "").replace(/^v/i, "").trim();
-        if (/^\d+\.\d+\.\d+$/.test(version)) return version;
+        if (!/^\d+\.\d+\.\d+$/.test(version)) continue;
+        // 任一源被缓存到旧版本都不能当成结论：取两个源里更大的那个。
+        if (!newest || versionIsNewer(version, newest)) newest = version;
       } catch (error) {
         console.warn(`[${APP_NAME}] update check failed:`, source.url, error);
       }
     }
-    return "";
+    return newest;
   }
 
   // 成功后记时间戳，失败不记：网络恢复后下次打开页面还能重试。
