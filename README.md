@@ -6,9 +6,9 @@
 
 ## 安装
 
-**[安装 DLsite 优惠助手 + 史低](https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@latest/userscript/dl-price-tracker.user.js)**
+**[安装 DLsite 优惠助手 + 史低](https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.89/userscript/dl-price-tracker.user.js)**
 
-上面这条走 jsDelivr，会自动指向最新版本，国内网络也能直接打开。桌面端可使用 Tampermonkey、Violentmonkey 等用户脚本管理器；Via 等支持 `.user.js` 的手机浏览器可直接打开安装链接。
+上面这条走 jsDelivr，指向具体版本 tag（发出即可用；`@latest` 有约 12 小时解析缓存，刚发版时会拿不到新版，所以不用它）。桌面端可使用 Tampermonkey、Violentmonkey 等用户脚本管理器；Via 等支持 `.user.js` 的手机浏览器可直接打开安装链接。
 
 打不开时的备用入口（任选其一）：
 

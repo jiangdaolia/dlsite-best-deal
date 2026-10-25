@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.88
+// @version      0.6.89
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -14,8 +14,8 @@
 // @supportURL   https://github.com/jiangdaolia/dlsite-best-deal/issues
 // 更新源走 jsDelivr 的 @latest（指向最新 tag）：raw.githubusercontent.com 在部分网络下
 // 连不上或超时，会导致脚本管理器「检查更新」永远拿不到新版本。
-// @updateURL    https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@latest/userscript/dl-price-tracker.user.js
-// @downloadURL  https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@latest/userscript/dl-price-tracker.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.89/userscript/dl-price-tracker.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.89/userscript/dl-price-tracker.user.js
 // ==/UserScript==
 
 (function () {
@@ -25,7 +25,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.88";
+  const APP_VERSION = "0.6.89";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -87,6 +87,10 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.89": [
+      "更新地址改用显式版本 tag（@v0.6.89），不再依赖 jsDelivr 的 @latest：@latest 有约 12 小时解析缓存，刚发版时会一直检查不到新版本",
+      "以后每个版本都会把 @updateURL/@downloadURL 指到自己的 tag，发出即可用；本次需要手动装一次，之后沿新地址自动更新",
+    ],
     "0.6.88": [
       "「算算亏了多少」明细表新增「类型」列：按 DLsite 的 work_type 标出音声/漫画/游戏/CG·插画/小说/动画/音乐/工具等，光看编号分不清买的是什么",
       "类型来自商品元数据，缓存里没有的编号在点按钮时批量补一次（不超过 100 条，本身带 30 分钟缓存），失败只是该行显示「-」，不影响结算",
