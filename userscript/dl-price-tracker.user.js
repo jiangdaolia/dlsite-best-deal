@@ -3133,6 +3133,8 @@
         lang,
         resolved?.language || edition?.language,
       ),
+      // 已购数量按作品统计要用；存在账号索引里，避免商品元数据缓存过期后算回按编号。
+      workKey: boughtWorkTitleKey(product?.title, product?.siteId),
       identitySource: resolved ? "historical-purchase" : "metadata",
     };
   }
@@ -3321,10 +3323,27 @@
       );
       const listed = new Set(ids);
       const entries = {};
+      // 老版本索引没有 workKey：用还在缓存里的标题补一次，
+      // 否则缓存过期后「已购买」会算回按编号。
+      const cachedMetadata = loadDealCache().metadata || {};
       for (const [key, entry] of Object.entries(retained.entries || {})) {
         const id = String(entry?.id || key || "").toUpperCase();
         if (!listed.has(id) || retryIds.has(id)) continue;
-        entries[id] = entry;
+        if (entry?.workKey) {
+          entries[id] = entry;
+          continue;
+        }
+        let workKey = "";
+        const raw = cachedMetadata[id]?.raw;
+        if (raw) {
+          try {
+            const product = normalizedMetadataProduct(id, raw);
+            workKey = boughtWorkTitleKey(product?.title, product?.siteId);
+          } catch {
+            workKey = "";
+          }
+        }
+        entries[id] = workKey ? { ...entry, workKey } : entry;
       }
       const pendingIds = ids.filter((id) => !entries[id]);
       const keptCount = Object.keys(entries).length;
@@ -8827,6 +8846,7 @@
     const groups = boughtWorkGroups(apiIds, {
       titleOf: (id) => purchasedDiffTitle(id, cache)?.title || "",
       siteOf: (id) => purchasedDiffTitle(id, cache)?.siteId || "",
+      workKeyOf: (id) => index?.entries?.[id]?.workKey || "",
       familyKeyOf: breakdown.familyKeyOf,
     });
     const missingOnPage = apiIds.filter((id) => !pageSet.has(id));
@@ -9264,13 +9284,15 @@
       .filter(Boolean);
     const titleOf = typeof options.titleOf === "function" ? options.titleOf : () => "";
     const siteOf = typeof options.siteOf === "function" ? options.siteOf : () => "";
+    // 账号索引里持久化的作品键优先，标题只在没索引时兜底（元数据缓存会过期）。
+    const workKeyOf = typeof options.workKeyOf === "function" ? options.workKeyOf : () => "";
     const familyKeyOf = typeof options.familyKeyOf === "function"
       ? options.familyKeyOf
       : (id) => String(id || "").toUpperCase();
     const titleKeyById = new Map();
     const familyTitleKey = new Map();
     for (const id of list) {
-      const key = boughtWorkTitleKey(titleOf(id), siteOf(id));
+      const key = workKeyOf(id) || boughtWorkTitleKey(titleOf(id), siteOf(id));
       titleKeyById.set(id, key);
       if (key) familyTitleKey.set(familyKeyOf(id), key);
     }
@@ -9354,6 +9376,7 @@
     const works = boughtWorkGroups(bought, {
       titleOf: (id) => productOf(id)?.title || "",
       siteOf: (id) => productOf(id)?.siteId || "",
+      workKeyOf: (id) => entries[id]?.workKey || "",
       familyKeyOf,
     });
     const families = new Map();

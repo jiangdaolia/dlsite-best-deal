@@ -49,6 +49,10 @@ const sandbox = {
 
 vm.runInNewContext(
   `${matched[1]}
+  ${constantSource("WORK_EDITION_WORD")}
+  ${constantSource("WORK_TITLE_EDITION_PREFIX")}
+  ${constantSource("WORK_TITLE_TRANSLATOR_SUFFIX")}
+  ${functionSource("boughtWorkTitleKey")}
   ${functionSource("sortLanguageComparisonRows")}
   ${functionSource("languageWinnerRows")}
   ${functionSource("translationChildrenFromMetadata")}
@@ -148,6 +152,8 @@ test("RJ01285872这类非日语原作标记改用详情页日语版本作为家�
       familyId: "RJ421140",
       lang: "CHI_HANS",
       language: "简体中文",
+      // 没有标题时作品键为空，按作品计数会退回语言家族。
+      workKey: "",
       identitySource: "metadata",
     },
   );
@@ -198,6 +204,8 @@ test("RJ01212161这类历史购买SKU保留中文身份而不默认日语", () =
       familyId: "RJ01200697",
       lang: "CHI",
       language: "中文",
+      // 标题没有语言版前缀，作品键就是标题本身（无站点信息时站点段为空）。
+      workKey: "【癒されえっち】隣のスパダリな年下クン|",
       identitySource: "historical-purchase",
     },
   );
@@ -747,6 +755,53 @@ test("作品标题键忽略语言版前缀与译者后缀，但区分站点", ()
   // 只是标题里带【】但不是语言版标记时不能误删。
   assert.equal(key("【癒されえっち】ある作品", "girls"), "【癒されえっち】ある作品|girls");
   assert.equal(key("", "girls"), "");
+});
+
+test("作品键存进账号索引，元数据缓存过期后仍按作品计数", () => {
+  // 商品元数据缓存 30 分钟 TTL 到期会被清掉；workKey 落在账号索引里才能稳定。
+  const index = {
+    bought: ["RJ01010333", "RJ01011067", "RJ01011068"],
+    active: [],
+    later: [],
+    entries: {
+      RJ01010333: { id: "RJ01010333", familyId: "RJ01010333", workKey: "ある作品|girls" },
+      RJ01011067: { id: "RJ01011067", familyId: "RJ01011067", workKey: "ある作品|girls" },
+      RJ01011068: { id: "RJ01011068", familyId: "RJ01011067", workKey: "ある作品|girls" },
+    },
+  };
+  const diagSandbox = {
+    loadAccountIndex: () => index,
+    loadLanguageFamilyCache: () => ({ parents: {} }),
+  };
+  vm.runInNewContext(`
+    ${constantSource("WORK_EDITION_WORD")}
+    ${constantSource("WORK_TITLE_EDITION_PREFIX")}
+    ${constantSource("WORK_TITLE_TRANSLATOR_SUFFIX")}
+    ${functionSource("boughtWorkTitleKey")}
+    ${functionSource("boughtWorkGroups")}
+    ${functionSource("boughtCountBreakdown")}
+    globalThis.breakdownForTest = boughtCountBreakdown;
+  `, diagSandbox);
+  const breakdown = diagSandbox.breakdownForTest(
+    index, { parents: {} }, { metadata: {} });
+  assert.equal(breakdown.bought.length, 3);
+  assert.equal(breakdown.workCount, 1);
+  assert.equal(breakdown.duplicateWorks.length, 1);
+  // 索引缺 workKey 且缓存也没有标题时才退回语言家族（此例 2 组）。
+  const legacy = diagSandbox.breakdownForTest(
+    {
+      bought: ["RJ01010333", "RJ01011067", "RJ01011068"],
+      entries: {
+        RJ01010333: { id: "RJ01010333", familyId: "RJ01010333" },
+        RJ01011067: { id: "RJ01011067", familyId: "RJ01011067" },
+        RJ01011068: { id: "RJ01011068", familyId: "RJ01011067" },
+      },
+    },
+    { parents: {} },
+    { metadata: {} },
+  );
+  assert.equal(legacy.workCount, 2);
+  assert.equal(legacy.familyCount, 2);
 });
 
 test("账号面板的「已购买」按作品显示并附编号数", () => {
