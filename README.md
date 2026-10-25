@@ -6,7 +6,7 @@
 
 ## 安装
 
-**[安装 DLsite 优惠助手 + 史低](https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.93/userscript/dl-price-tracker.user.js)**
+**[安装 DLsite 优惠助手 + 史低](https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.94/userscript/dl-price-tracker.user.js)**
 
 上面这条钉在当前版本 tag，点开拿到的一定是这一版（`@latest` 会命中 jsDelivr 的 tag 解析缓存，实测可能返回好几版之前的旧文件，所以装的时候不用它）。桌面端可使用 Tampermonkey、Violentmonkey 等用户脚本管理器；Via 等支持 `.user.js` 的手机浏览器可直接打开安装链接。
 

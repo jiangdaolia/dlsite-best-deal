@@ -631,8 +631,8 @@ test("文本版把未计入的行也列出来，并带上自检结果", () => {
   assert.match(text, /RJ00000003｜游戏｜无料/);
 });
 
-// 用户要求：差额也要能直接对上页面上的人民币（页面按 CNY 显示 ¥62.00）。
-test("差额同时给出人民币折算，没有汇率时只留日元", () => {
+// 用户要求：实付、史低、差额三列都要同时有日元和人民币（页面按 CNY 显示 ¥62.00）。
+test("实付/史低/差额三列都同时给日元和人民币，没有汇率时只留日元", () => {
   const sandbox = makeSandbox(`${coreSource()}
     ${functionSource("purchasedLossText")}
     const purchasedCnyRate = () => 0.0426;`);
@@ -645,17 +645,19 @@ test("差额同时给出人民币折算，没有汇率时只留日元", () => {
     row.id === "RJ00000003" ? 1980 : row.id === "RJ00000002" ? 1980 : 379
   ));
   const text = sandbox.purchasedLossText(summary);
-  // 1,076 × 0.0426 = 45.8376 → 45.84；-990 × 0.0426 = -42.174 → -42.17。
-  assert.match(text, /\+1,076円 ≈ \+¥45\.84/);
-  assert.match(text, /-990円 ≈ -¥42\.17/);
-  // 差额为 0 时不写「0円 ≈ ¥0.00」，直接说持平。
-  assert.match(text, /RJ00000003｜游戏｜1,980円｜1,980円｜持平/);
-  // 合计差额 = 1,076 - 990 = 86。
-  assert.match(text, /差额 \+86円 ≈ \+¥3\.66/);
-  assert.match(text, /多花 1,076円 ≈ ¥45\.84/);
-  assert.match(text, /省 990円 ≈ ¥42\.17/);
+  // 每列都写成「日元（≈人民币）」：1,455 × 0.0426 = 61.983 → 61.98；
+  // 379 × 0.0426 = 16.1454 → 16.15；1,076 × 0.0426 = 45.8376 → 45.84。
+  assert.match(text, /RJ00000001｜音声｜1,455円（≈¥61\.98）｜379円（≈¥16\.15）｜\+1,076円（≈\+¥45\.84）/);
+  assert.match(text, /RJ00000002｜漫画｜990円（≈¥42\.17）｜1,980円（≈¥84\.35）｜-990円（≈-¥42\.17）/);
+  // 差额为 0 时不写「0円（≈¥0.00）」，直接说持平。
+  assert.match(text, /RJ00000003｜游戏｜1,980円（≈¥84\.35）｜1,980円（≈¥84\.35）｜持平/);
+  // 合计行与汇总金额也要双币种；合计差额 = 1,076 - 990 = 86。
+  assert.match(text, /实付合计 4,425円（≈¥188\.50）｜史低合计 4,339円（≈¥184\.84）/);
+  assert.match(text, /差额 \+86円（≈\+¥3\.66）/);
+  assert.match(text, /多花 1,076円（≈¥45\.84）/);
+  assert.match(text, /省 990円（≈¥42\.17）/);
 
-  // 估不出汇率（本地还没有带 CNY 价格的商品）时退回纯日元，不留半截符号。
+  // 估不出汇率（本地还没有带 CNY 价格的商品）时退回纯日元，不留半截括号。
   const bare = makeSandbox(`${coreSource()}
     ${functionSource("purchasedLossText")}
     const purchasedCnyRate = () => null;`);
@@ -665,6 +667,7 @@ test("差额同时给出人民币折算，没有汇率时只留日元", () => {
   const bareText = bare.purchasedLossText(bareSummary);
   assert.match(bareText, /｜\+1,076円\n/);
   assert.doesNotMatch(bareText, /¥/);
+  assert.doesNotMatch(bareText, /≈/);
 });
 
 

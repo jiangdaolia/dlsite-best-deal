@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.93
+// @version      0.6.94
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -31,7 +31,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.93";
+  const APP_VERSION = "0.6.94";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -110,6 +110,12 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.94": [
+      "「算算亏了多少」的实付、史低、差额三列现在都同时给日元和人民币：主行是金额本身，下一行小字是折算值，不用自己按汇率换算",
+      "人民币界面下实付仍保留页面原文（¥62.00）做主行，小字给折算日元；日元界面反过来，主行日元、小字给人民币",
+      "合计行与「多花 / 省下 / 合计差额」也一并双币种，复制的文本版同步（三列都写成「1,455円（≈¥61.98）」）",
+      "估不出汇率时只显示日元，不留空括号",
+    ],
     "0.6.93": [
       "更新地址换成 GitHub 官方的「最新 release 附件」永久地址（releases/latest/download/...）：内容永远指向最新一版，没有任何解析缓存；jsDelivr 的 @latest 实测会在不同节点返回 0.6.87、0.6.90 这种好几版之前的文件",
       "自检不再只信一个源：GitHub API 与 jsDelivr 版本接口都查，取两者里更新的那个，任一源被缓存成旧版本都不会导致「明明有新版却不提示」",
@@ -9679,32 +9685,38 @@
 
   function purchasedLossText(summary, diagnostic = "") {
     const rate = typeof purchasedCnyRate === "function" ? purchasedCnyRate() : null;
-    const amount = (yen, options = {}) => purchasedYenCnyText(yen, rate, options);
+    // 三列统一成「主（≈另一种货币）」：实付、史低、差额都能同时看到日元和人民币。
+    const money = (yen, options = {}) => {
+      const head = `${options.plus && yen > 0 ? "+" : ""}${toYen(yen)}`;
+      const cny = purchasedCnyAmountText(yen, rate, options);
+      return cny ? `${head}（≈${cny}）` : head;
+    };
     const lines = [
       "已购买作品｜实付 vs 史低",
       `本页 ${summary.rowsTotal} 部｜计入合计 ${summary.countedCount} 部` +
         `｜未计入 ${summary.missing.length + summary.unparsed.length} 部` +
         `（无史低 ${summary.missing.length}／价格未解析 ${summary.unparsed.length}）`,
-      `实付合计 ${toYen(summary.totalPaid)}｜史低合计 ${toYen(summary.totalLowest)}` +
-        `｜差额 ${summary.netDiff === 0 ? "持平" : amount(summary.netDiff, { plus: true })}`,
-      `比史低贵 ${summary.overpaidCount} 部，多花 ${amount(summary.overpaidTotal)}` +
-        `；比史低便宜 ${summary.cheaperCount} 部，省 ${amount(summary.savedTotal)}` +
+      `实付合计 ${money(summary.totalPaid)}｜史低合计 ${money(summary.totalLowest)}` +
+        `｜差额 ${summary.netDiff === 0 ? "持平" : money(summary.netDiff, { plus: true })}`,
+      `比史低贵 ${summary.overpaidCount} 部，多花 ${money(summary.overpaidTotal)}` +
+        `；比史低便宜 ${summary.cheaperCount} 部，省 ${money(summary.savedTotal)}` +
         `；持平 ${summary.evenCount} 部`,
-      `自检：明细差额之和 ${toYen(summary.diffSum)}` +
+      `自检：明细差额之和 ${money(summary.diffSum)}` +
         `（与合计差额${summary.selfCheckOk ? "一致" : "不一致"}）`,
       "",
       "编号｜类型｜实付｜史低｜差额",
     ];
     for (const row of summary.compared) {
+      // 人民币界面下实付的「原文」就是人民币，主行保留原文、副行给折算日元；其余一律日元主行。
       const paid = row.currency === "CNY" && Number.isFinite(row.paidCny)
         ? `${row.paidRaw || `${row.paidCny} 元`}（≈${toYen(row.paid)}）`
-        : toYen(row.paid);
+        : money(row.paid);
       lines.push([
         row.id,
         row.typeLabel || "-",
         paid,
-        toYen(row.lowest),
-        row.diff === 0 ? "持平" : amount(row.diff, { plus: true }),
+        money(row.lowest),
+        row.diff === 0 ? "持平" : money(row.diff, { plus: true }),
       ].join("｜"));
     }
     if (summary.missing.length) {
@@ -9819,59 +9831,66 @@
     }
     thead.appendChild(headRow);
     const tbody = document.createElement("tbody");
-    // 实付列同时给出原币与折算后的日元：页面按人民币显示时只写日元，用户就对不上页面上的数字。
-    const paidTextOf = (row) => {
-      if (!Number.isFinite(row.paid)) return "-";
-      const yen = toYen(row.paid);
+    // 三列金额都渲染成「日元主行 + 人民币小字」：之前只有差额带人民币，实付/史低
+    // 在人民币界面下还得自己心算，对不上页面上的数字。
+    const moneyCell = (yen, options = {}) => {
+      if (!Number.isFinite(yen)) return { main: "-" };
+      const main = `${options.plus && yen > 0 ? "+" : ""}${toYen(yen)}`;
+      const cny = purchasedCnyAmountText(yen, cnyRate, options);
+      return { main, sub: cny ? `≈ ${cny}` : "" };
+    };
+    const paidCell = (row) => {
+      if (!Number.isFinite(row.paid)) return { main: "-" };
       if (row.currency === "CNY" && Number.isFinite(row.paidCny)) {
-        const raw = row.paidRaw || `${row.paidCny} 元`;
-        return `${raw} ≈ ${yen}`;
+        // 页面原文就是人民币：主行保留原文（¥62.00），副行给折算的日元。
+        return {
+          main: row.paidRaw || `${row.paidCny} 元`,
+          sub: `≈ ${toYen(row.paid)}`,
+        };
       }
-      return yen;
+      return moneyCell(row.paid);
     };
     const appendRow = (row, position, options = {}) => {
       const tr = document.createElement("tr");
       if (options.excluded) tr.classList.add("is-muted");
       else if (row.diff > 0) tr.classList.add("is-loss");
       else if (row.diff < 0) tr.classList.add("is-win");
-      const diffText = options.excluded
-        ? "未计入"
+      const diffCell = options.excluded
+        ? { main: "未计入" }
         : row.diff === 0
-          ? "持平"
-          : purchasedYenCnyText(row.diff, cnyRate, { plus: true });
+          ? { main: "持平" }
+          : moneyCell(row.diff, { plus: true });
       const cells = [
         String(position + 1),
         row.title ? `${row.id} ${row.title}` : row.id,
         row.typeLabel || "-",
-        paidTextOf(row),
-        options.excluded || !Number.isFinite(row.lowest) ? "-" : toYen(row.lowest),
-        diffText,
+        paidCell(row),
+        options.excluded || !Number.isFinite(row.lowest) ? { main: "-" } : moneyCell(row.lowest),
+        diffCell,
         options.note || "",
       ];
-      cells.forEach((text, cellIndex) => {
+      cells.forEach((cell, cellIndex) => {
         const td = document.createElement("td");
+        const value = cell && typeof cell === "object" ? cell : { main: String(cell) };
         if (cellIndex === 1 && row.href) {
           const link = document.createElement("a");
           link.href = row.href;
           link.target = "_blank";
           link.rel = "noopener";
-          link.textContent = text;
+          link.textContent = value.main;
           td.appendChild(link);
-        } else if (cellIndex === 5 && String(text).includes(" ≈ ")) {
-          // 差额列把人民币折到第二行、淡一点：一行塞满「+1,076円 ≈ +¥45.84」
-          // 会把作品名和说明挤成一列字，分行后日元和人民币都看得清。
-          td.className = "is-diff";
-          const [yen, cny] = String(text).split(" ≈ ");
-          const small = document.createElement("small");
-          small.className = "is-cny";
-          small.textContent = `≈ ${cny}`;
-          td.append(document.createTextNode(yen), small);
-          tr.appendChild(td);
-          return;
         } else {
-          td.textContent = text;
+          td.appendChild(document.createTextNode(value.main));
+          if (value.sub) {
+            const small = document.createElement("small");
+            small.className = "is-cny";
+            small.textContent = value.sub;
+            td.appendChild(small);
+          }
         }
-        if (cellIndex === 5) td.className = "is-diff";
+        // 金额列不换行，人民币折行放在小字里。
+        if (cellIndex >= 3 && cellIndex <= 5) td.classList.add("is-money");
+        if (cellIndex === 5) td.classList.add("is-diff");
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
@@ -16047,13 +16066,16 @@ a.dltracker-browse-analysis-frame {
   font-weight: 600;
 }
 
-.dltracker-purchased-loss-table-wrap td.is-diff {
+.dltracker-purchased-loss-table-wrap td.is-money {
   white-space: nowrap;
+}
+
+.dltracker-purchased-loss-table-wrap td.is-diff {
   font-weight: 600;
 }
 
-/* 差额的人民币折算单独占一行，字号小一点，不跟日元抢宽度。 */
-.dltracker-purchased-loss-table-wrap td.is-diff small.is-cny {
+/* 折算的另一种货币单独占一行、字号小一点，不跟主行金额抢宽度。 */
+.dltracker-purchased-loss-table-wrap td small.is-cny {
   display: block;
   font-weight: 400;
   font-size: 11px;
