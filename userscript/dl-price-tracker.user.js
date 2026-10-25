@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.83
+// @version      0.6.84
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -12,8 +12,10 @@
 // @connect      dlwatcher.com
 // @homepageURL  https://github.com/jiangdaolia/dlsite-best-deal
 // @supportURL   https://github.com/jiangdaolia/dlsite-best-deal/issues
-// @updateURL    https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/main/userscript/dl-price-tracker.user.js
-// @downloadURL  https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/main/userscript/dl-price-tracker.user.js
+// 更新源走 jsDelivr 的 @latest（指向最新 tag）：raw.githubusercontent.com 在部分网络下
+// 连不上或超时，会导致脚本管理器「检查更新」永远拿不到新版本。
+// @updateURL    https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@latest/userscript/dl-price-tracker.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@latest/userscript/dl-price-tracker.user.js
 // ==/UserScript==
 
 (function () {
@@ -23,7 +25,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.83";
+  const APP_VERSION = "0.6.84";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -85,6 +87,11 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.84": [
+      "更新源从 raw.githubusercontent.com 换成 jsDelivr（指向最新 tag）：国内网络经常连不上 raw，脚本管理器会表现为「检查更新」永远没有新版本",
+      "本次需要手动重装一次才会切到新的更新源，之后就能自动更新了（同一脚本就地升级，不会出现两份）",
+      "jsDelivr 有约 12 小时 CDN 缓存，刚发布的版本最迟半天内能检查到；急用可以直接下 Releases 里的附件",
+    ],
     "0.6.83": [
       "差异「原因」列不再说「作品页已被 DLsite 删除」：作品页 404 时改用作品信息接口取标题，按作品键认出同一部作品当前在售的另一个编号，写成「原版销售页已下架，同一作品的 RJxxxx 仍在售/可下载（购买记录不受影响）」",
       "只有确实找不到同作品编号时才写「销售页已下架（404）」，并提示购买记录仍在「購入履歴」、2016 年后停售作品官方仍可再下载",
