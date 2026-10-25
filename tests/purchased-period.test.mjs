@@ -164,7 +164,9 @@ test("能找到「全期間」链接，带年月的筛选链接不算", () => {
 
 // ---- fetchBoughtPageSnapshot：第一页若停在某个月，改读「全期間」 ----
 function makeSnapshotSandbox(pagesByUrl) {
-  const sandbox = { console, URL, setTimeout, clearTimeout, pagesByUrl };
+  const sandbox = {
+    console, URL, setTimeout, clearTimeout, pagesByUrl, FormData, URLSearchParams,
+  };
   vm.runInNewContext(`
     var location = { origin: "https://www.dlsite.com", href: "https://www.dlsite.com/maniax/mypage/userbuy" };
     function currentDlsiteSection() { return "maniax"; }
@@ -185,13 +187,18 @@ function makeSnapshotSandbox(pagesByUrl) {
     const PURCHASED_PERIOD_FIELD_RE = ${constantSource("PURCHASED_PERIOD_FIELD_RE").replace(/^ {2}const [A-Z_]+ = /, "")}
     const PURCHASED_PERIOD_LABEL_RE = ${constantSource("PURCHASED_PERIOD_LABEL_RE").replace(/^ {2}const [A-Z_]+ = /, "")}
     const PURCHASED_ALL_PERIOD_TEXT_RE = ${constantSource("PURCHASED_ALL_PERIOD_TEXT_RE").replace(/^ {2}const [A-Z_]+ = /, "")}
+    const PURCHASED_SUBMIT_TEXT_RE = ${constantSource("PURCHASED_SUBMIT_TEXT_RE").replace(/^ {2}const [A-Z_]+ = /, "")}
     ${functionSource("isPurchasedWorksPage")}
     ${functionSource("purchasedPageIsUnfiltered")}
     ${functionSource("purchasedPageBaseUrl")}
     ${functionSource("purchasedPeriodFilterLabel")}
     ${functionSource("purchasedAllPeriodUrl")}
+    ${functionSource("purchasedAllPeriodFormUrl")}
+    ${functionSource("purchasedUrlHasPeriodFilter")}
+    ${functionSource("followAllPeriodPage")}
     ${functionSource("fetchBoughtPageSnapshot")}
     globalThis.snapshotForTest = fetchBoughtPageSnapshot;
+    globalThis.formUrlForTest = purchasedAllPeriodFormUrl;
   `, sandbox);
   return sandbox;
 }
@@ -250,4 +257,91 @@ test("找不到「全期間」时如实标出页面停在某个月，交给调�
   assert.equal(snapshot.followedAllPeriod, false);
   assert.equal(snapshot.periodFiltered, true);
   assert.equal(snapshot.periodLabel, "2026年10月");
+});
+
+// ---- 「切到全部后还要点一次显示」：把那次提交的地址算出来 ----
+function makeFilterForm() {
+  const monthSelectEl = makeSelect({
+    name: "month",
+    value: "10",
+    options: [
+      { value: "", label: "全期間", selected: false },
+      { value: "10", label: "2026年10月", selected: true },
+    ],
+  });
+  const submitter = {
+    name: "go",
+    value: "表示",
+    textContent: "表示",
+    formAction: "https://www.dlsite.com/maniax/mypage/userbuy/",
+  };
+  const form = {
+    method: "get",
+    action: "https://www.dlsite.com/maniax/mypage/userbuy/",
+    getAttribute: () => "https://www.dlsite.com/maniax/mypage/userbuy/",
+    querySelectorAll: (selector) => (selector.includes("submit") ? [submitter] : []),
+    // 提交时浏览器会带上：当前月份（可能被改成全期間）+ 其它隐藏字段。
+    fields: { month: () => monthSelectEl.value, type: "all" },
+  };
+  monthSelectEl.form = form;
+  monthSelectEl.closest = () => form;
+  return { monthSelectEl, form, submitter };
+}
+
+test("切到「全部」后要再点「显示」：算出提交地址给脚本去抓", () => {
+  const sandbox = makeSnapshotSandbox({});
+  // 用能读到 DOM 当前值的 FormData 桩替掉真的 FormData。
+  vm.runInNewContext(`
+    class FakeFormData {
+      constructor(form) {
+        this.list = Object.entries(form.fields).map(([key, value]) => [
+          key, typeof value === "function" ? value() : value,
+        ]);
+      }
+      entries() { return this.list[Symbol.iterator](); }
+    }
+    globalThis.FormData = FakeFormData;
+  `, sandbox);
+  const { monthSelectEl } = makeFilterForm();
+  const doc = makePageDoc({ selects: [monthSelectEl], links: [], ids: ["RJ00000001"] });
+  // 月份被这次「提交」清空，其它字段保留 → 等于点了「显示」。
+  assert.equal(
+    sandbox.formUrlForTest(doc),
+    "https://www.dlsite.com/maniax/mypage/userbuy/?type=all",
+  );
+  // 算完必须把下拉还原，不能让用户看到「全期間」但列表没变。
+  assert.equal(monthSelectEl.value, "10");
+});
+
+test("没有「全期間」链接时也能靠表单提交拿到全量", async () => {
+  const { monthSelectEl } = makeFilterForm();
+  const filtered = makePageDoc({
+    selects: [monthSelectEl],
+    links: [],
+    ids: ["RJ00000001", "RJ00000002", "RJ00000003"],
+  });
+  filtered.totalText = "全 3 件";
+  const all = makePageDoc({ selects: [], links: [], ids: ["RJ00000001", "RJ00000004"] });
+  all.totalText = "全 39 件";
+  const allUrl = "https://www.dlsite.com/maniax/mypage/userbuy/?type=all";
+  const sandbox = makeSnapshotSandbox({
+    "https://www.dlsite.com/maniax/mypage/userbuy": filtered,
+    [allUrl]: all,
+  });
+  vm.runInNewContext(`
+    class FakeFormData {
+      constructor(form) {
+        this.list = Object.entries(form.fields).map(([key, value]) => [
+          key, typeof value === "function" ? value() : value,
+        ]);
+      }
+      entries() { return this.list[Symbol.iterator](); }
+    }
+    globalThis.FormData = FakeFormData;
+  `, sandbox);
+  const snapshot = await sandbox.snapshotForTest({});
+  assert.equal(snapshot.followedAllPeriod, true);
+  assert.equal(snapshot.periodFiltered, false);
+  assert.deepEqual([...snapshot.ids], ["RJ00000001", "RJ00000004"]);
+  assert.equal(snapshot.totalText, "全 39 件");
 });

@@ -881,3 +881,41 @@ test("已购买数量按已购买作品页口径统计，接口多出来的单�
   assert.equal(fallback.scopedByPage, false);
   assert.equal(fallback.offPage.length, 0);
 });
+
+// 用户第二次报「还是只有 3 部」：页面被月份筛选成 3 条时，就算脚本没认出筛选，
+// 也不能把「已购买」缩成 3 —— 页面条数明显少于接口就直接按接口全量算。
+test("页面只列出全量的一小部分时退回接口全量，不会把已购买缩成几条", () => {
+  const sandbox = {};
+  vm.runInNewContext(`
+    ${constantSource("WORK_EDITION_WORD")}
+    ${constantSource("WORK_TITLE_EDITION_PREFIX")}
+    ${constantSource("WORK_TITLE_TRANSLATOR_SUFFIX")}
+    ${functionSource("boughtWorkTitleKey")}
+    ${functionSource("boughtWorkGroups")}
+    ${functionSource("boughtCountBreakdown")}
+    ${functionSource("pageScopedBoughtBreakdown")}
+    globalThis.scopedForTest = pageScopedBoughtBreakdown;
+  `, sandbox);
+  const many = Array.from({ length: 43 }, (_, index) => `RJ${String(index + 1).padStart(8, "0")}`);
+  const index = {
+    bought: many,
+    pageIds: many.slice(0, 3),
+    active: [],
+    later: [],
+    entries: {},
+  };
+  const scoped = sandbox.scopedForTest(index, { parents: {} });
+  assert.equal(scoped.bought.length, 43);
+  assert.equal(scoped.scopedByPage, false);
+  assert.equal(scoped.pagePartial, true);
+  assert.equal(scoped.offPage.length, 0);
+  // 页面只少几条（39 vs 43）时仍以页面为准：那是「接口有、页面没列」，
+  // 属于已下架/旧编号，不该把数字改回 43。
+  const minor = sandbox.scopedForTest(
+    { ...index, bought: many.slice(0, 43), pageIds: many.slice(0, 39) },
+    { parents: {} },
+  );
+  assert.equal(minor.bought.length, 39);
+  assert.equal(minor.scopedByPage, true);
+  assert.equal(minor.pagePartial, undefined);
+});
