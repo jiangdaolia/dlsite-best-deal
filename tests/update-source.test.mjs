@@ -1,11 +1,20 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
 
 const source = readFileSync(
   new URL("../userscript/dl-price-tracker.user.js", import.meta.url),
   "utf8",
 );
+
+function functionSource(name) {
+  const result = source.match(new RegExp(
+    `  (?:async )?function ${name}\\([\\s\\S]*?(?=\\n  (?:async )?function )`,
+  ));
+  if (!result) throw new Error(`${name} not found`);
+  return result[0];
+}
 
 const headerOf = (name) => {
   const result = source.match(new RegExp(`^// @${name}\\s+(\\S+)$`, "m"));
@@ -32,4 +41,34 @@ test("脚本版本号三处保持一致", () => {
   assert.match(version, /^\d+\.\d+\.\d+$/);
   assert.match(source, new RegExp(`const APP_VERSION = "${version.replace(/\./g, "\\.")}";`));
   assert.match(source, new RegExp(`^    "${version.replace(/\./g, "\\.")}": \\[$`, "m"));
+});
+
+// 自检提示里的安装链接必须钉到具体版本：@latest 会命中 tag 解析缓存，
+// 用户点「去更新」有可能又装回旧版；@vX.Y.Z 一定取到那一版。
+test("自检提示的安装链接钉到具体版本，版本比较按数字逐段比", () => {
+  const sandbox = { console: { warn() {} } };
+  vm.runInNewContext(
+    `
+    const UPDATE_REPO = "jiangdaolia/dlsite-best-deal";
+    ${functionSource("versionTuple")}
+    ${functionSource("versionIsNewer")}
+    ${functionSource("updateInstallUrl")}
+    globalThis.versionIsNewer = versionIsNewer;
+    globalThis.updateInstallUrl = updateInstallUrl;`,
+    sandbox,
+  );
+  const newer = sandbox.versionIsNewer;
+  assert.equal(newer("0.6.92", "0.6.91"), true);
+  assert.equal(newer("0.6.100", "0.6.99"), true);
+  assert.equal(newer("v0.7.0", "0.6.92"), true);
+  assert.equal(newer("0.6.91", "0.6.92"), false);
+  assert.equal(newer("0.6.92", "0.6.92"), false);
+  assert.equal(newer("", "0.6.92"), false);
+
+  const url = sandbox.updateInstallUrl("0.6.92");
+  assert.equal(
+    url,
+    "https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.92/userscript/dl-price-tracker.user.js",
+  );
+  assert.doesNotMatch(url, /@latest/);
 });

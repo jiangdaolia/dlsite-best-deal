@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.91
+// @version      0.6.92
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -10,6 +10,8 @@
 // @noframes
 // @grant        GM_xmlhttpRequest
 // @connect      dlwatcher.com
+// @connect      data.jsdelivr.com
+// @connect      api.github.com
 // @homepageURL  https://github.com/jiangdaolia/dlsite-best-deal
 // @supportURL   https://github.com/jiangdaolia/dlsite-best-deal/issues
 // 更新地址必须是「会移动」的地址，不能钉死某个版本：
@@ -28,7 +30,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.91";
+  const APP_VERSION = "0.6.92";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -64,6 +66,22 @@
   const BROWSE_HIDE_CARTED_STORAGE_KEY = "dltracker-browse-hide-carted";
   const BROWSE_SORT_MODE_NATIVE = "native";
   const UPDATE_NOTICE_SEEN_VERSION_KEY = "dltracker-update-notice-seen-version";
+  const UPDATE_REPO = "jiangdaolia/dlsite-best-deal";
+  const UPDATE_BANNER_CLASSNAME = "dltracker-update-banner";
+  const UPDATE_CHECK_STORAGE_KEY = "dltracker-update-check-at";
+  const UPDATE_DISMISSED_VERSION_KEY = "dltracker-update-dismissed-version";
+  const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+  // 先问 jsDelivr 的版本接口（国内可达性好），失败再退 GitHub API。
+  const UPDATE_LATEST_SOURCES = [
+    {
+      url: `https://data.jsdelivr.com/v1/packages/gh/${UPDATE_REPO}/resolved?specifier=latest`,
+      pick: (json) => json?.version,
+    },
+    {
+      url: `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`,
+      pick: (json) => json?.tag_name,
+    },
+  ];
   const DEAL_PLANNER_STORAGE_KEY = "dltracker-deal-planner-v1";
   const DEAL_PLANNER_MAX_ITEMS = 12;
   const DEAL_PLANNER_MAX_COUPONS = 8;
@@ -90,6 +108,11 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.92": [
+      "新增「自己检查新版本」：油猴的检查更新只会说「已是最新」，看不出是 CDN 缓存旧版还是真没新版；脚本现在每 6 小时自己问一次最新版本，只有真的有新版时才在右下角出一条可关闭的小提示",
+      "提示里的「更新」链接钉到具体版本（@v0.6.92 这种），不走 tag 解析、点开一定能装到那一版；装完后提示自动消失",
+      "检查走 jsDelivr 的版本接口，失败再退回 GitHub API，两条都不通就静默跳过，不影响任何现有功能",
+    ],
     "0.6.91": [
       "修「油猴无法更新」：v0.6.89/0.6.90 把 @updateURL 钉成了固定版本地址（@v0.6.90），脚本里记的更新地址永远指向它自己，检查更新只会看到同一版本，所以后面发版一概收不到",
       "更新地址改回 jsDelivr 的 @latest（跟随最新 tag），以后发版无需再改地址；刚发版时新 tag 需要几分钟被 CDN 解析到，属正常延迟",
@@ -709,6 +732,115 @@
 
     console.info(message);
     setSeenUpdateVersion(APP_VERSION);
+  }
+
+  // ---- 版本自检 -----------------------------------------------------------
+  // 油猴自己的「检查更新」不透明：updateURL 被 CDN 缓存到旧版本时，它只会说
+  // 「已是最新」，用户完全看不出是缓存问题还是真没新版。这里自己问一次最新版本，
+  // 只在真的有新版时才在右下角出一条可关闭的提示；提示里的安装链接**钉到该版本**
+  // （@vX.Y.Z 不走 tag 解析，点开一定能装到那一版）。
+  function versionTuple(value) {
+    return String(value || "")
+      .replace(/^v/i, "")
+      .trim()
+      .split(".")
+      .map((part) => {
+        const number = Number.parseInt(part, 10);
+        return Number.isFinite(number) ? number : 0;
+      });
+  }
+
+  function versionIsNewer(candidate, baseline) {
+    const left = versionTuple(candidate);
+    const right = versionTuple(baseline);
+    const length = Math.max(left.length, right.length);
+    for (let index = 0; index < length; index += 1) {
+      const a = left[index] || 0;
+      const b = right[index] || 0;
+      if (a !== b) return a > b;
+    }
+    return false;
+  }
+
+  function updateInstallUrl(version) {
+    return `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}@v${version}` +
+      "/userscript/dl-price-tracker.user.js";
+  }
+
+  function getDismissedUpdateVersion() {
+    try {
+      return String(localStorage.getItem(UPDATE_DISMISSED_VERSION_KEY) || "");
+    } catch {
+      return "";
+    }
+  }
+
+  function setDismissedUpdateVersion(version) {
+    try {
+      localStorage.setItem(UPDATE_DISMISSED_VERSION_KEY, String(version));
+    } catch {
+      // noop
+    }
+  }
+
+  function showUpdateBanner(version) {
+    if (!versionIsNewer(version, APP_VERSION)) return;
+    if (getDismissedUpdateVersion() === version) return;
+    if (document.querySelector(`.${UPDATE_BANNER_CLASSNAME}`)) return;
+    injectStyle();
+    const bar = document.createElement("div");
+    bar.className = UPDATE_BANNER_CLASSNAME;
+    const text = document.createElement("span");
+    text.textContent = `有新版本 v${version}（当前 v${APP_VERSION}）`;
+    const link = document.createElement("a");
+    link.href = updateInstallUrl(version);
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "去更新";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "关闭");
+    close.addEventListener("click", () => {
+      setDismissedUpdateVersion(version);
+      bar.remove();
+    });
+    bar.append(text, link, close);
+    document.body.appendChild(bar);
+  }
+
+  async function fetchLatestPublishedVersion() {
+    for (const source of UPDATE_LATEST_SOURCES) {
+      try {
+        const json = await gmRequestJson(source.url, REQUEST_TIMEOUT_MS);
+        const version = String(source.pick(json) || "").replace(/^v/i, "").trim();
+        if (/^\d+\.\d+\.\d+$/.test(version)) return version;
+      } catch (error) {
+        console.warn(`[${APP_NAME}] update check failed:`, source.url, error);
+      }
+    }
+    return "";
+  }
+
+  // 成功后记时间戳，失败不记：网络恢复后下次打开页面还能重试。
+  async function checkForNewVersion() {
+    let stamp = 0;
+    try {
+      stamp = Number(localStorage.getItem(UPDATE_CHECK_STORAGE_KEY) || 0);
+    } catch {
+      stamp = 0;
+    }
+    if (Number.isFinite(stamp) && Date.now() - stamp < UPDATE_CHECK_INTERVAL_MS) {
+      return;
+    }
+    const version = await fetchLatestPublishedVersion();
+    if (!version) return;
+    try {
+      localStorage.setItem(UPDATE_CHECK_STORAGE_KEY, String(Date.now()));
+    } catch {
+      // noop
+    }
+    showUpdateBanner(version);
   }
 
   function sleep(ms) {
@@ -15918,6 +16050,40 @@ a.dltracker-browse-analysis-frame {
   opacity: 0.78;
 }
 
+/* 自己有新版时的右下角提示条：只在真有新版时出现，可关闭。 */
+.${UPDATE_BANNER_CLASSNAME} {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background: #22303d;
+  color: #f2f6f9;
+  font-size: 12.5px;
+  line-height: 1.4;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.${UPDATE_BANNER_CLASSNAME} a {
+  color: #8ecdfb;
+  font-weight: 600;
+}
+
+.${UPDATE_BANNER_CLASSNAME} button {
+  border: 0;
+  background: transparent;
+  color: #b8c6d2;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
 .dltracker-purchased-loss-table-wrap tr.is-loss td.is-diff {
   color: #c0392b;
 }
@@ -17498,6 +17664,10 @@ a.dltracker-cart-deal-frame:focus-visible {
     try {
       injectStyle();
       showUpdateNoticeIfNeeded();
+      // 不 await：自检失败或慢都不该拖住页面。延后几秒，别跟页面渲染抢带宽。
+      setTimeout(() => {
+        void checkForNewVersion();
+      }, 4000);
       await cleanExpiredCache();
       await restoreLanguageDialogAfterReload({ deferRender: true });
       // 委托点击与 SPA 监听必须在 bootstrap 之前装好：初始化中途挂起或失败时，
