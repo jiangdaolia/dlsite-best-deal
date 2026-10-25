@@ -20,6 +20,13 @@ function functionSource(name) {
   return result[0];
 }
 
+// 抽取模块级常量声明（单行、多行 new RegExp(...)、多行正则字面量都能取到）。
+function constantSource(name) {
+  const result = source.match(new RegExp(`  const ${name} =[\\s\\S]*?;\\n`));
+  if (!result) throw new Error(`${name} not found`);
+  return result[0].trimEnd();
+}
+
 const sandbox = {
   URL,
   dealPlainText(value) {
@@ -644,6 +651,11 @@ test("已购清单核对区分编号数与作品家族数", () => {
     loadLanguageFamilyCache: () => ({ parents: {} }),
   };
   vm.runInNewContext(`
+    ${constantSource("WORK_EDITION_WORD")}
+    ${constantSource("WORK_TITLE_EDITION_PREFIX")}
+    ${constantSource("WORK_TITLE_TRANSLATOR_SUFFIX")}
+    ${functionSource("boughtWorkTitleKey")}
+    ${functionSource("boughtWorkGroups")}
     ${functionSource("boughtCountBreakdown")}
     globalThis.breakdownForTest = boughtCountBreakdown;
   `, diagSandbox);
@@ -655,6 +667,99 @@ test("已购清单核对区分编号数与作品家族数", () => {
   assert.deepEqual([...breakdown.inActive], ["RJ00000003"]);
   // RJ00000004 没有语言元数据，单独列出，不影响计数。
   assert.deepEqual([...breakdown.missingEntries], ["RJ00000004"]);
+});
+
+test("同一作品的原版与简中版编号只算一部作品", () => {
+  // 取自真实案例：43 条已购编号里有 4 部作品同时存在原版与【簡体中文版】两个编号。
+  const titles = {
+    RJ01011068: "【簡体中文版】あなたが私を買った理由",
+    RJ01011067: "【簡体中文版】あなたが私を買った理由",
+    RJ01010333: "あなたが私を買った理由",
+    RJ01213701: "【簡体中文版】【癒されえっち】隣のスパダリな年下クン",
+    RJ01213700: "【簡体中文版】【癒されえっち】隣のスパダリな年下クン",
+    RJ01354066: "【簡体中文版】【分からせ】椿くん",
+    RJ01249857: "【簡体中文版】【分からせ】椿くん [みんなで翻訳]",
+  };
+  const bought = Object.keys(titles);
+  const index = { bought, active: [], later: [], entries: {} };
+  const metadataCache = {
+    metadata: Object.fromEntries(Object.entries(titles).map(([id, title]) => [
+      id,
+      { raw: { title, site_id: "girls" } },
+    ])),
+  };
+  const diagSandbox = {
+    loadAccountIndex: () => index,
+    loadLanguageFamilyCache: () => ({ parents: {} }),
+  };
+  vm.runInNewContext(`
+    ${constantSource("WORK_EDITION_WORD")}
+    ${constantSource("WORK_TITLE_EDITION_PREFIX")}
+    ${constantSource("WORK_TITLE_TRANSLATOR_SUFFIX")}
+    function normalizedMetadataProduct(id, raw) {
+      return {
+        id,
+        title: String(raw?.title || id),
+        siteId: String(raw?.site_id || ""),
+      };
+    }
+    ${functionSource("boughtWorkTitleKey")}
+    ${functionSource("boughtWorkGroups")}
+    ${functionSource("boughtCountBreakdown")}
+    globalThis.breakdownForTest = boughtCountBreakdown;
+  `, diagSandbox);
+  const breakdown = diagSandbox.breakdownForTest(index, { parents: {} }, metadataCache);
+  assert.equal(breakdown.bought.length, 7);
+  // 第 1 部 3 条（原版 + 两个简中编号）、第 2 部 2 条、第 3 部 2 条，共 3 部作品。
+  assert.equal(breakdown.workCount, 3);
+  assert.equal(breakdown.duplicateWorks.length, 3);
+  const first = breakdown.works.find((group) => group.ids.includes("RJ01010333"));
+  assert.deepEqual(
+    [...first.ids],
+    ["RJ01010333", "RJ01011067", "RJ01011068"],
+  );
+});
+
+test("作品标题键忽略语言版前缀与译者后缀，但区分站点", () => {
+  const sandbox = {};
+  vm.runInNewContext(`
+    ${constantSource("WORK_EDITION_WORD")}
+    ${constantSource("WORK_TITLE_EDITION_PREFIX")}
+    ${constantSource("WORK_TITLE_TRANSLATOR_SUFFIX")}
+    ${functionSource("boughtWorkTitleKey")}
+    globalThis.keyForTest = boughtWorkTitleKey;
+  `, sandbox);
+  const key = sandbox.keyForTest;
+  assert.equal(
+    key("【簡体中文版】ある作品", "girls"),
+    key("ある作品", "girls"),
+  );
+  assert.equal(
+    key("【繁體中文版】ある作品 [みんなで翻訳]", "girls"),
+    key("ある作品", "girls"),
+  );
+  assert.equal(
+    key(" 【简体中文版】 ある作品 ", "girls"),
+    key("ある作品", "girls"),
+  );
+  // 站点不同视为不同作品（の BL 与 girls 分区互不合并）。
+  assert.notEqual(key("ある作品", "girls"), key("ある作品", "bl"));
+  // 只是标题里带【】但不是语言版标记时不能误删。
+  assert.equal(key("【癒されえっち】ある作品", "girls"), "【癒されえっち】ある作品|girls");
+  assert.equal(key("", "girls"), "");
+});
+
+test("账号面板的「已购买」按作品显示并附编号数", () => {
+  const sandbox = {};
+  vm.runInNewContext(`
+    ${functionSource("boughtCountLabel")}
+    globalThis.labelForTest = boughtCountLabel;
+  `, sandbox);
+  const label = sandbox.labelForTest;
+  assert.equal(label({ bought: new Array(43).fill("X"), workCount: 39 }), "39 部（43 条编号）");
+  assert.equal(label({ bought: ["RJ00000001", "RJ00000002"], workCount: 2 }), "2 部");
+  assert.equal(label({ bought: ["RJ00000001"] }), "1 部");
+  assert.equal(label(null), "0 部");
 });
 
 test("已购页对比按 product_id 提取编号并去重", () => {

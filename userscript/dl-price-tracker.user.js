@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.81
+// @version      0.6.82
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.81";
+  const APP_VERSION = "0.6.82";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -85,6 +85,12 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.82": [
+      "「已购买」改为按作品计数：已购接口返回的是购买过的编号，同一部作品可能同时有日本語原版和簡体/繁體中文版两个编号，页面只显示一条，所以编号数会比实际作品数多",
+      "账号面板同时给出作品数与编号数（例如「39 部（43 条编号）」），并列出是哪些作品有多个编号",
+      "「数量对不上？」逐条判定差异原因：同源探测作品页跳转目标（同一作品的改号/语言版）与 HTTP 404（作品页已被 DLsite 删除，已购页不再显示），不再靠推测",
+      "对比结果新增「原因」列与「同一作品的多个编号」清单，43 与 39 的每一处差异都能对上",
+    ],
     "0.6.81": [
       "已购买作品页新增「数量对不上？」：把本页（含翻页）实际列出的作品和已购接口清单逐条对比，直接列出页面少显示的编号、标题与站点",
       "对比沿用当前地址上的月份/类型筛选，并读出页面自称的「全 N 件」总数，用来判断是筛选、分页还是聚合口径造成的差异",
@@ -3666,7 +3672,8 @@
     if (index.later.length) {
       parts[parts.length - 1] += `（含稍后再买 ${index.later.length} 部）`;
     }
-    parts.push(`已购买 ${index.bought.length} 部`);
+    parts.push(`已购买 ${boughtCountLabel(
+      boughtCountBreakdown(index, loadLanguageFamilyCache(), loadDealCache()))}`);
     const remaining = Math.max(0, dealNumber(index.total) - dealNumber(index.indexed));
     if (!index.complete && remaining) {
       parts.push(`语言索引 ${index.indexed}/${index.total}，可稍后继续`);
@@ -8026,9 +8033,18 @@
       : `（未完成${stage ? `：中断于${stage}` : ""}）`}`;
   }
 
+  // 「已购买」对外只报作品数；编号数只在两者不等时作为附注。
+  function boughtCountLabel(breakdown) {
+    const skus = (breakdown?.bought || []).length;
+    const works = Number.isFinite(breakdown?.workCount) ? breakdown.workCount : skus;
+    return skus > works ? `${works} 部（${skus} 条编号）` : `${skus} 部`;
+  }
+
   function renderAccountInformationPanel(panel) {
     if (!panel) return;
     const index = loadAccountIndex();
+    const breakdown = boughtCountBreakdown(
+      index, loadLanguageFamilyCache(), loadDealCache());
     const reading = Boolean(
       accountReadFlowInFlight || accountIndexRefreshInFlight,
     ) || (
@@ -8041,7 +8057,7 @@
       ["优惠券", accountCouponSummaryText()],
       ["立即购买", index.active.length],
       ["稍后再买", index.later.length],
-      ["已购买", index.bought.length],
+      ["已购买", boughtCountLabel(breakdown)],
       ["语言索引", accountIndexProgressText(index, reading)],
       ["上次读取", accountIndexTimeText(index.updatedAt)],
     ];
@@ -8647,6 +8663,80 @@
     return product || null;
   }
 
+  // 同源探测单个编号的作品页最终地址：DLsite 会把「同一作品的旧编号/语言版编号」
+  // 302 到当前主编号，作品被删掉则直接 404。只发 HEAD，不下载页面内容。
+  async function probeProductIdTarget(id) {
+    const section = currentDlsiteSection();
+    const url = new URL(`/${section}/work/=/product_id/${id}.html`, location.origin);
+    const send = (method) => fetch(url, {
+      method,
+      credentials: "same-origin",
+      redirect: "follow",
+      headers: { Accept: "text/html" },
+    });
+    try {
+      let response = await send("HEAD");
+      if (response.status === 405 || response.status === 501) {
+        response = await send("GET");
+      }
+      const matched = String(response.url || "").match(/product_id\/([RBV]J\d{6,})/i);
+      return {
+        status: response.status,
+        target: matched ? matched[1].toUpperCase() : "",
+      };
+    } catch (error) {
+      return {
+        status: 0,
+        target: "",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  function purchasedDiffReasonOf(id, probe, pageSet) {
+    if (!probe) return { kind: "unknown", text: "未能探测" };
+    if (probe.target && probe.target !== id) {
+      // 用鸭子类型判断，避免跨上下文 instanceof Set 失效。
+      const onPage = Boolean(pageSet && typeof pageSet.has === "function" &&
+        pageSet.has(probe.target));
+      return {
+        kind: "alias",
+        target: probe.target,
+        text: `同一作品换号/语言版，页面显示 ${probe.target}${onPage ? "（本页已列出）" : ""}`,
+      };
+    }
+    if (probe.status === 404 || probe.status === 410) {
+      return { kind: "gone", text: "作品页已被 DLsite 删除（404），已购页不再显示" };
+    }
+    if (probe.status >= 400) {
+      return { kind: "error", text: `作品页返回 HTTP ${probe.status}` };
+    }
+    return { kind: "same", text: "作品页正常，页面把它并到了同一作品的其它条目" };
+  }
+
+  // 只探测「接口有、页面没有」的编号，最多 24 条、并发 4，点按钮才跑。
+  async function explainMissingOnPage(missingIds, pageSet) {
+    const targets = missingIds.slice(0, 24);
+    const reasons = new Map();
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < targets.length) {
+        const id = targets[cursor];
+        cursor += 1;
+        const probe = await probeProductIdTarget(id);
+        reasons.set(id, purchasedDiffReasonOf(id, probe, pageSet));
+      }
+    };
+    const lanes = Math.min(4, targets.length);
+    await Promise.all(Array.from({ length: lanes }, () => worker()));
+    return reasons;
+  }
+
+  function purchasedDiffReasonText(reason) {
+    if (!reason) return "";
+    return reason.text || "";
+  }
+
   // 纯函数，便于单测：把差集整理成可复制的文本。
   function purchasedDiffText({
     apiIds = [],
@@ -8658,12 +8748,21 @@
     pages = 0,
     apiNote = "",
     cache = null,
+    workCount = 0,
+    duplicateWorks = [],
+    reasons = null,
   }) {
     const lines = [
       "已购买作品页 vs 已购接口清单",
       `接口清单 ${apiIds.length} 条｜本页（含翻页 ${pages} 页）${pageIds.length} 部｜` +
         `差 ${apiIds.length - pageIds.length} 条`,
     ];
+    if (Number.isFinite(workCount) && workCount > 0) {
+      lines.push(`按作品归组：${apiIds.length} 条编号 = ${workCount} 部作品` +
+        (duplicateWorks.length
+          ? `（${duplicateWorks.length} 部作品有多个编号）`
+          : ""));
+    }
     if (totalText) lines.push(`页面自称总数：${totalText}`);
     if (filters.length) {
       lines.push(`页面筛选：${filters
@@ -8679,6 +8778,7 @@
         product?.title && product.title !== id ? product.title : "",
         product?.siteId ? product.siteId : "",
         Number.isFinite(product?.price) ? `${product.price}円` : "",
+        purchasedDiffReasonText(reasons?.get?.(id)),
       ].filter(Boolean);
       lines.push(`  ${id}${extra.length ? `｜${extra.join("｜")}` : ""}`);
     }
@@ -8686,12 +8786,18 @@
       lines.push("", `页面有但接口没有（${extraOnPage.length}）`);
       for (const id of extraOnPage) lines.push(`  ${id}`);
     }
+    if (duplicateWorks.length) {
+      lines.push("", `同一部作品的多个编号（${duplicateWorks.length} 部）`);
+      for (const group of duplicateWorks) {
+        lines.push(`  ${group.ids.join(" / ")}｜${group.title || "（无标题缓存）"}`);
+      }
+    }
     return lines.join("\n");
   }
 
   async function collectPurchasedDiff() {
     const index = loadAccountIndex();
-    let apiIds = boughtCountBreakdown(index, loadLanguageFamilyCache()).bought;
+    let apiIds = boughtCountBreakdown(index, loadLanguageFamilyCache(), loadDealCache()).bought;
     let apiNote = "";
     try {
       const section = currentDlsiteSection();
@@ -8716,10 +8822,28 @@
     });
     const pageSet = new Set(snapshot.ids);
     const apiSet = new Set(apiIds);
+    const cache = loadDealCache();
+    const breakdown = boughtCountBreakdown(index, loadLanguageFamilyCache(), cache);
+    const groups = boughtWorkGroups(apiIds, {
+      titleOf: (id) => purchasedDiffTitle(id, cache)?.title || "",
+      siteOf: (id) => purchasedDiffTitle(id, cache)?.siteId || "",
+      familyKeyOf: breakdown.familyKeyOf,
+    });
+    const missingOnPage = apiIds.filter((id) => !pageSet.has(id));
+    // 逐条探测差异原因（同一作品换号 / 作品已删除），只探测缺的那几条。
+    let reasons = new Map();
+    try {
+      reasons = await explainMissingOnPage(missingOnPage, pageSet);
+    } catch (error) {
+      console.warn(`[${APP_NAME}] purchased diff probe failed:`, error);
+    }
     return {
       apiIds,
       pageIds: snapshot.ids,
-      missingOnPage: apiIds.filter((id) => !pageSet.has(id)),
+      workCount: groups.count,
+      duplicateWorks: groups.duplicates,
+      reasons,
+      missingOnPage,
       extraOnPage: snapshot.ids.filter((id) => !apiSet.has(id)),
       filters: snapshot.filters,
       totalText: snapshot.totalText,
@@ -8790,11 +8914,14 @@
     summaryBox.className = "dltracker-purchased-loss-summary";
     const diff = result.apiIds.length - result.pageIds.length;
     summaryBox.append(
-      purchasedSummaryChip("接口清单", `${result.apiIds.length} 条`),
+      purchasedSummaryChip("已购接口编号", `${result.apiIds.length} 条`),
+      purchasedSummaryChip("按作品归组", `${result.workCount ?? result.apiIds.length} 部`),
       purchasedSummaryChip("本页列出的作品", `${result.pageIds.length} 部`),
       purchasedSummaryChip(
         "差额",
-        diff === 0 ? "一致" : `${diff > 0 ? "页面少" : "页面多"} ${Math.abs(diff)} 条`,
+        diff === 0
+          ? "一致"
+          : `${diff > 0 ? "页面少" : "页面多"} ${Math.abs(diff)} 条`,
         diff > 0 ? "loss" : diff < 0 ? "win" : "",
       ),
     );
@@ -8809,13 +8936,20 @@
           .join("　"),
       ));
     }
+    const reasonOf = (id) => result.reasons?.get?.(id) || null;
+    const aliasCount = result.missingOnPage
+      .filter((id) => reasonOf(id)?.kind === "alias").length;
+    const goneCount = result.missingOnPage
+      .filter((id) => reasonOf(id)?.kind === "gone").length;
+    if (aliasCount) summaryBox.appendChild(purchasedSummaryChip("同作品换号", `${aliasCount} 条`));
+    if (goneCount) summaryBox.appendChild(purchasedSummaryChip("作品页已删除", `${goneCount} 条`));
     const tableWrap = document.createElement("div");
     tableWrap.className = "dltracker-purchased-loss-table-wrap";
     if (result.missingOnPage.length) {
       const table = document.createElement("table");
       const thead = document.createElement("thead");
       const headRow = document.createElement("tr");
-      for (const label of ["#", "编号", "标题", "站点", "价格"]) {
+      for (const label of ["#", "编号", "标题", "站点", "价格", "原因"]) {
         const th = document.createElement("th");
         th.textContent = label;
         headRow.appendChild(th);
@@ -8825,13 +8959,15 @@
       result.missingOnPage.forEach((id, position) => {
         const product = purchasedDiffTitle(id);
         const tr = document.createElement("tr");
-        tr.className = "is-loss";
+        const reason = reasonOf(id);
+        tr.className = reason?.kind === "gone" ? "is-loss" : "is-loss";
         const cells = [
           String(position + 1),
           id,
           product?.title && product.title !== id ? product.title : "（无标题缓存）",
           product?.siteId || "-",
           Number.isFinite(product?.price) ? `${product.price} 円` : "-",
+          purchasedDiffReasonText(reason) || "（探测中未完成）",
         ];
         cells.forEach((text, cellIndex) => {
           const td = document.createElement("td");
@@ -8846,9 +8982,23 @@
     } else {
       const same = document.createElement("p");
       same.className = "dltracker-purchased-loss-note";
-      same.textContent = "本页列出的作品和接口清单完全一致，一条没少。" +
-        "这种情况下「38」是页面按作品/订单聚合后的显示结果，不是 43 条里的子集。";
+      same.textContent = "本页列出的作品和接口清单完全一致，一条没少。";
       tableWrap.appendChild(same);
+    }
+    const blocks = [];
+    if (result.duplicateWorks?.length) {
+      const heading = document.createElement("p");
+      heading.className = "dltracker-purchased-loss-note";
+      heading.textContent = `同一部作品的多个编号（${result.duplicateWorks.length} 部）：` +
+        "DLsite 给同一部作品的原版和它並存的其它版本各发了一个编号，" +
+        "已购接口按编号返回，已购页只列出一条，所以按编号数会偏多。";
+      blocks.push(heading);
+      for (const group of result.duplicateWorks) {
+        const line = document.createElement("p");
+        line.className = "dltracker-purchased-loss-note";
+        line.textContent = `${group.ids.join(" / ")}｜${group.title || "（无标题缓存）"}`;
+        blocks.push(line);
+      }
     }
     const notes = [];
     if (result.extraOnPage.length) {
@@ -8856,8 +9006,9 @@
         `${result.extraOnPage.join("、")}。`);
     }
     if (result.missingOnPage.length) {
-      notes.push("上面这些编号是接口里有、但当前已购买作品页没列出的；" +
-        "若是月份/类型筛选导致，切到「全部」再点一次即可对齐。");
+      notes.push("「原因」列是逐条同源探测作品页得到的：" +
+        "「同作品换号」表示 DLsite 已把这个编号 302 到当前主编号；" +
+        "「作品页已被 DLsite 删除」表示该作品连页面都没了，已购页自然列不出来。");
     }
     if (result.apiNote) notes.push(result.apiNote);
     notes.push(`对比时共读取了 ${result.pages} 页已购买作品页。`);
@@ -8876,7 +9027,7 @@
       status.textContent = copied ? "已复制" : "复制失败，可先截图";
     });
     actions.append(copyButton, status);
-    body.replaceChildren(summaryBox, tableWrap, noteNode, actions);
+    body.replaceChildren(summaryBox, tableWrap, ...blocks, noteNode, actions);
   }
 
   function enhancePurchasedWorksPage() {
@@ -9073,12 +9224,113 @@
     dialog.focus({ preventScroll: true });
   }
 
+  // DLsite 已购接口返回的是「买过的编号(SKU)」，同一部作品往往同时存在
+  // 日本語原版、簡体中文版、繁體中文版的独立编号；已购买作品页只显示其中一条。
+  // 所以「已购买 N 部」必须按作品归组，不能直接数编号。
+  const WORK_EDITION_WORD =
+    "(?:簡体中文|简体中文|繁體中文|繁体中文|中国語|中文|英語|英语|韓国語|韩国语|日本語|翻訳|翻译)(?:版)?";
+  const WORK_TITLE_EDITION_PREFIX = new RegExp(
+    `^\\s*(?:[【\\[（(]\\s*${WORK_EDITION_WORD}\\s*[】\\]）)]|${WORK_EDITION_WORD})`,
+    "u",
+  );
+  const WORK_TITLE_TRANSLATOR_SUFFIX =
+    /(?:[【\[（(]\s*みんなで翻訳\s*[】\]）)])+\s*$/;
+
+  // 纯函数，便于单测：把标题归一化成「作品键」，语言版标记与译者后缀都不参与比较。
+  function boughtWorkTitleKey(title, siteId = "") {
+    let text = String(title || "").replace(/\s+/gu, "");
+    if (!text) return "";
+    for (let guard = 0; guard < 4; guard += 1) {
+      const next = text.replace(WORK_TITLE_EDITION_PREFIX, "");
+      if (next === text) break;
+      text = next;
+    }
+    for (let guard = 0; guard < 4; guard += 1) {
+      const next = text.replace(WORK_TITLE_TRANSLATOR_SUFFIX, "");
+      if (next === text) break;
+      text = next;
+    }
+    text = text.toLowerCase();
+    if (!text) return "";
+    return `${text}|${String(siteId || "").toLowerCase()}`;
+  }
+
+  // 纯函数，便于单测：把已购编号按作品归组。
+  // 优先用标题归组（原版与译名只差一个前缀），标题缺失时退回作品家族，再用家族把
+  // 「有标题的一条」和「没标题的一条」并回同一组。
+  function boughtWorkGroups(bought, options = {}) {
+    const list = (Array.isArray(bought) ? bought : [])
+      .map((id) => String(id || "").toUpperCase())
+      .filter(Boolean);
+    const titleOf = typeof options.titleOf === "function" ? options.titleOf : () => "";
+    const siteOf = typeof options.siteOf === "function" ? options.siteOf : () => "";
+    const familyKeyOf = typeof options.familyKeyOf === "function"
+      ? options.familyKeyOf
+      : (id) => String(id || "").toUpperCase();
+    const titleKeyById = new Map();
+    const familyTitleKey = new Map();
+    for (const id of list) {
+      const key = boughtWorkTitleKey(titleOf(id), siteOf(id));
+      titleKeyById.set(id, key);
+      if (key) familyTitleKey.set(familyKeyOf(id), key);
+    }
+    const keyOf = new Map();
+    for (const id of list) {
+      const direct = titleKeyById.get(id);
+      const viaFamily = familyTitleKey.get(familyKeyOf(id));
+      keyOf.set(id, direct || viaFamily || `#${familyKeyOf(id)}`);
+    }
+    const groups = new Map();
+    for (const id of list) {
+      const key = keyOf.get(id);
+      if (!groups.has(key)) groups.set(key, { key, ids: [] });
+      groups.get(key).ids.push(id);
+    }
+    // 同一作品家族里若出现两个键（一条有标题、一条没有），并到条目多的那个键上。
+    const familyKeys = new Map();
+    for (const id of list) {
+      const family = familyKeyOf(id);
+      if (!familyKeys.has(family)) familyKeys.set(family, new Set());
+      familyKeys.get(family).add(keyOf.get(id));
+    }
+    for (const keys of familyKeys.values()) {
+      if (keys.size < 2) continue;
+      const ordered = [...keys].sort((a, b) =>
+        (groups.get(b)?.ids.length || 0) - (groups.get(a)?.ids.length || 0));
+      const target = groups.get(ordered[0]);
+      if (!target) continue;
+      for (const other of ordered.slice(1)) {
+        const merged = groups.get(other);
+        if (!merged) continue;
+        target.ids.push(...merged.ids);
+        groups.delete(other);
+      }
+    }
+    const result = [...groups.values()].map((group) => {
+      const withTitle = group.ids.find((id) => titleOf(id)) || group.ids[0];
+      return {
+        key: group.key,
+        ids: group.ids.slice().sort(),
+        title: titleOf(withTitle) || "",
+        siteId: siteOf(withTitle) || "",
+      };
+    }).sort((a, b) => (a.ids[0] < b.ids[0] ? -1 : a.ids[0] > b.ids[0] ? 1 : 0));
+    return {
+      groups: result,
+      count: result.length,
+      duplicates: result.filter((group) => group.ids.length > 1),
+      keyOf,
+    };
+  }
+
   function boughtCountBreakdown(
     index = loadAccountIndex(),
     languageCache = loadLanguageFamilyCache(),
+    metadataCache = null,
   ) {
     const entries = index?.entries || {};
     const parents = languageCache?.parents || {};
+    const metadata = (metadataCache && metadataCache.metadata) || {};
     const normalize = (list) => (Array.isArray(list) ? list : [])
       .map((id) => String(id || "").toUpperCase())
       .filter(Boolean);
@@ -9090,6 +9342,20 @@
     const familyKeyOf = (id) => String(
       entries[id]?.familyId || entries[id]?.parentId || parents[id] || id,
     ).toUpperCase() || id;
+    const productOf = (id) => {
+      const raw = metadata[id]?.raw;
+      if (!raw || typeof normalizedMetadataProduct !== "function") return null;
+      try {
+        return normalizedMetadataProduct(id, raw);
+      } catch {
+        return null;
+      }
+    };
+    const works = boughtWorkGroups(bought, {
+      titleOf: (id) => productOf(id)?.title || "",
+      siteOf: (id) => productOf(id)?.siteId || "",
+      familyKeyOf,
+    });
     const families = new Map();
     for (const id of bought) {
       const key = familyKeyOf(id);
@@ -9106,6 +9372,9 @@
       families,
       familyCount: families.size,
       multiSkuFamilies: [...families.entries()].filter(([, ids]) => ids.length > 1),
+      works: works.groups,
+      workCount: works.count,
+      duplicateWorks: works.duplicates,
       missingEntries: bought.filter((id) => !entries[id]),
     };
   }
@@ -9208,6 +9477,7 @@
       `账号索引：loaded=${Boolean(index?.loaded)} complete=${Boolean(index?.complete)} ` +
         `indexed=${dealNumber(index?.indexed, 0)}/${dealNumber(index?.total, 0)} ` +
         `未读到元数据=${breakdown.missingEntries.length}`,
+      `按作品归组=${breakdown.workCount}（${breakdown.duplicateWorks.length} 部作品有多个编号）`,
       `按作品家族去重=${breakdown.familyCount}（多编号家族 ${breakdown.multiSkuFamilies.length} 组）`,
       `站点分布：${Object.entries(siteCounts)
         .map(([site, count]) => `${site}=${count}`)
@@ -9215,6 +9485,11 @@
       `价格 0 円的条目=${freeCount}　不在当前分区（${currentSection}）的条目=${otherSite.length}${
         otherSite.length ? ` [${otherSite.join(", ")}]` : ""}`,
     ];
+    if (breakdown.duplicateWorks.length) {
+      for (const group of breakdown.duplicateWorks.slice(0, 10)) {
+        lines.push(`  · 同一作品 ${group.ids.join(", ")}：${group.title || "（无标题缓存）"}`);
+      }
+    }
     if (breakdown.multiSkuFamilies.length) {
       for (const [familyId, ids] of breakdown.multiSkuFamilies.slice(0, 10)) {
         lines.push(`  · 家族 ${familyId}: ${ids.join(", ")}`);
@@ -9285,14 +9560,17 @@
       lines.push("· 本地记录与接口不一致，本地可能是旧数据：请先「读取账号信息」再诊断。");
     } else if (missingOnPage.length) {
       lines.push(
-        `· 本页比接口少 ${missingOnPage.length} 条，说明已购买作品页自己做了筛选或分页：` +
-          "DLsite 的购买/下载历史默认只显示当月，需要在上方月份下拉里切换年月；" +
-          "DLsite Play 的 My Items 也不显示配信終了（已下架）的作品。",
+        `· 接口比本页多 ${missingOnPage.length} 条：已知两类成因——` +
+          "① 同一部作品的旧编号/语言版编号被 DLsite 302 到当前主编号，已购页只列主编号；" +
+          "② 作品页已被删除（404），已购页不再列出。点已购页上的「数量对不上？」会逐条探测确认。",
       );
     } else if (pageIds) {
       lines.push(
-        `· 本页与接口清单完全一致（${pageIds.length} 条），页面没有筛掉任何编号，` +
-          "说明「38」是按作品/订单聚合后的显示结果，而不是 43 条记录里的子集。",
+        `· 本页与接口清单完全一致（${pageIds.length} 条），页面没有筛掉任何编号；` +
+          `按作品归组后为 ${breakdown.workCount} 部` +
+          (breakdown.duplicateWorks.length
+            ? `，差的 ${breakdown.bought.length - breakdown.workCount} 条是同一部作品的多个编号。`
+            : "。"),
       );
     } else if (otherSite.length) {
       lines.push(
@@ -9302,6 +9580,11 @@
     } else if (freeCount) {
       lines.push(
         `· 有 ${freeCount} 条价格为 0 円：免费领取/活动赠送的作品会被已购接口返回，但已购页可能不计入。`,
+      );
+    } else if (breakdown.duplicateWorks.length) {
+      lines.push(
+        `· 有 ${breakdown.duplicateWorks.length} 部作品存在多个编号（原版与语言版各一个编号），` +
+          `按作品归组后为 ${breakdown.workCount} 部。`,
       );
     } else if (breakdown.multiSkuFamilies.length) {
       lines.push(
@@ -9327,8 +9610,8 @@
       throw new Error("账号信息正在读取，请等读取结束后再诊断");
     }
     const index = loadAccountIndex();
-    const breakdown = boughtCountBreakdown(index, loadLanguageFamilyCache());
     const cache = loadDealCache();
+    const breakdown = boughtCountBreakdown(index, loadLanguageFamilyCache(), cache);
     let pageIds = null;
     let pageFilters = [];
     let pageNote = "";
@@ -9377,9 +9660,9 @@
 
   function boughtDiagnosticSummaryRows(index, breakdown) {
     return [
+      ["已购买（按作品）", breakdown.workCount],
       ["已购买（按编号）", breakdown.bought.length],
-      ["按作品家族去重", breakdown.familyCount],
-      ["同作品多编号", breakdown.multiSkuFamilies.length],
+      ["同作品多编号", breakdown.duplicateWorks.length],
       ["与购物车重叠", breakdown.inActive.length + breakdown.inLater.length],
       ["无本地元数据", breakdown.missingEntries.length],
     ];
@@ -9390,6 +9673,11 @@
     const metadata = cache?.metadata || {};
     const entries = index?.entries || {};
     const pageSet = pageIds ? new Set(pageIds) : null;
+    // 按作品归组后每组几条，用来在清单里标出「同一部作品的其它编号」。
+    const workSizeById = new Map();
+    for (const group of breakdown.works || []) {
+      for (const id of group.ids) workSizeById.set(id, group.ids.length);
+    }
     const rows = breakdown.bought.map((id) => {
       const raw = metadata[id]?.raw;
       const product = raw ? normalizedMetadataProduct(id, raw) : null;
@@ -9401,7 +9689,10 @@
         siteId: product?.siteId || "",
         lang: entries[id]?.lang ? languageDisplayName(entries[id].lang) : "",
         familyKey,
-        familySize: (breakdown.families.get(familyKey) || []).length,
+        familySize: Math.max(
+          (breakdown.families.get(familyKey) || []).length,
+          workSizeById.get(id) || 1,
+        ),
         onPage: pageSet ? pageSet.has(id) : null,
       };
     });
@@ -9477,7 +9768,8 @@
     let payload = null;
     const renderRows = () => {
       const index = loadAccountIndex();
-      const breakdown = boughtCountBreakdown(index, loadLanguageFamilyCache());
+      const breakdown = boughtCountBreakdown(
+        index, loadLanguageFamilyCache(), loadDealCache());
       summary.replaceChildren();
       for (const [label, value] of boughtDiagnosticSummaryRows(index, breakdown)) {
         const chip = document.createElement("span");

@@ -240,6 +240,7 @@ test("已购页对比只取主表格的作品编号，不把推荐位算进来",
 test("已购页数量对比文本列出接口有而页面没有的编号", () => {
   const sandbox = makeSandbox(`${coreSource()}
     ${functionSource("purchasedDiffTitle")}
+    ${functionSource("purchasedDiffReasonText")}
     ${functionSource("purchasedDiffText")}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
     const purchasedLowCache = new Map();
@@ -273,6 +274,89 @@ test("已购页数量对比文本列出接口有而页面没有的编号", () =>
   assert.match(text, /接口有但页面没有（2）/);
   assert.match(text, /RJ00000002/);
   assert.match(text, /RJ00000003｜作品丙｜girls｜1980円/);
+});
+
+test("已购页数量对比标出每条的差异原因与同作品多编号", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    ${functionSource("purchasedDiffTitle")}
+    ${functionSource("purchasedDiffReasonText")}
+    ${functionSource("purchasedDiffText")}
+    const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const purchasedLowCache = new Map();
+    function normalizedMetadataProduct(id, raw) {
+      return { id, title: String(raw?.title || id), siteId: "", price: null };
+    }
+    function loadDealCache() {
+      return { metadata: {} };
+    }
+    globalThis.purchasedDiffText = purchasedDiffText;`);
+  const text = sandbox.purchasedDiffText({
+    apiIds: ["RJ01010333", "RJ01011067", "RJ01011068"],
+    pageIds: ["RJ01011067"],
+    missingOnPage: ["RJ01010333", "RJ01011068"],
+    extraOnPage: ["RJ01011067"],
+    workCount: 1,
+    duplicateWorks: [{
+      ids: ["RJ01010333", "RJ01011067", "RJ01011068"],
+      title: "あなたが私を買った理由",
+    }],
+    reasons: new Map([
+      ["RJ01011068", {
+        kind: "alias",
+        target: "RJ01011067",
+        text: "同一作品换号/语言版，页面显示 RJ01011067（本页已列出）",
+      }],
+      ["RJ01010333", {
+        kind: "gone",
+        text: "作品页已被 DLsite 删除（404），已购页不再显示",
+      }],
+    ]),
+    pages: 1,
+  });
+  // 编号数与作品数分开写，43 与 39 的差才解释得清。
+  assert.match(text, /按作品归组：3 条编号 = 1 部作品（1 部作品有多个编号）/);
+  assert.match(text, /RJ01011068｜同一作品换号\/语言版，页面显示 RJ01011067（本页已列出）/);
+  assert.match(text, /RJ01010333｜作品页已被 DLsite 删除（404）/);
+  assert.match(text, /同一部作品的多个编号（1 部）/);
+  assert.match(text, /RJ01010333 \/ RJ01011067 \/ RJ01011068｜あなたが私を買った理由/);
+  // 没有原因数据时退化成原来的输出，不出现空的原因列。
+  const plain = sandbox.purchasedDiffText({
+    apiIds: ["RJ00000001"],
+    pageIds: [],
+    missingOnPage: ["RJ00000001"],
+  });
+  assert.doesNotMatch(plain, /undefined/);
+});
+
+test("差异原因按作品页探测结果归类", () => {
+  const sandbox = {};
+  vm.runInNewContext(`
+    ${functionSource("purchasedDiffReasonOf")}
+    globalThis.reasonForTest = purchasedDiffReasonOf;
+  `, sandbox);
+  const reason = sandbox.reasonForTest;
+  const alias = reason("RJ00000001", { status: 302, target: "RJ00000002" },
+    new Set(["RJ00000002"]));
+  assert.equal(alias.kind, "alias");
+  assert.match(alias.text, /RJ00000002.*本页已列出/);
+  // 换号目标不在页面上时不能谎称「已列出」。
+  assert.doesNotMatch(
+    reason("RJ00000001", { status: 302, target: "RJ00000002" }, new Set()).text,
+    /本页已列出/,
+  );
+  assert.equal(
+    reason("RJ00000001", { status: 404, target: "" }, new Set()).kind,
+    "gone",
+  );
+  assert.equal(
+    reason("RJ00000001", { status: 200, target: "RJ00000001" }, new Set()).kind,
+    "same",
+  );
+  assert.equal(
+    reason("RJ00000001", { status: 503, target: "RJ00000001" }, new Set()).kind,
+    "error",
+  );
+  assert.equal(reason("RJ00000001", null, new Set()).kind, "unknown");
 });
 
 test("已购页工具栏提供数量对比按钮，且对比沿用当前筛选地址", () => {
