@@ -144,7 +144,7 @@ test("已购页从表格定位价格列并读出每一行的编号与实付", ()
   assert.equal(result.rows[0].href, "https://www.dlsite.com/girls/work/=/product_id/RJ01234567.html");
 });
 
-test("已购页史低标签按差额给出贵/省/持平", () => {
+test("已购页史低标签写成「史低N JPY / M RMB」", () => {
   const sandbox = makeSandbox(`${coreSource()}
     const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
     const purchasedLowCache = new Map([
@@ -152,14 +152,42 @@ test("已购页史低标签按差额给出贵/省/持平", () => {
       ["RJ00000002", { lowest: 1980 }],
       ["RJ00000003", { lowest: 1500 }],
       ["RJ00000004", { lowest: null }],
-    ]);`);
+    ]);
+    const purchasedCnyRate = () => 0.0426;`);
   const chip = (id, paid) => {
     const state = sandbox.purchasedLowChipText({ id, paid });
     return [state.text, state.tone];
   };
-  assert.deepEqual(chip("RJ00000001", 1980), ["史低 990円｜贵 990円", "loss"]);
-  assert.deepEqual(chip("RJ00000002", 990), ["史低 1,980円｜省 990円", "win"]);
-  assert.deepEqual(chip("RJ00000003", 1500), ["史低 1,500円｜持平", "even"]);
+  // 990 JPY × 0.0426 ≈ 42.17 RMB；标签里只给金额，贵/省由色调和悬浮提示表达。
+  assert.deepEqual(chip("RJ00000001", 1980), ["史低990 JPY / 42.17 RMB", "loss"]);
+  assert.deepEqual(chip("RJ00000002", 990), ["史低1980 JPY / 84.35 RMB", "win"]);
+  assert.deepEqual(chip("RJ00000003", 1500), ["史低1500 JPY / 63.90 RMB", "even"]);
   assert.deepEqual(chip("RJ00000004", 1500), ["无史低数据", "unknown"]);
   assert.deepEqual(chip("RJ00000009", 1500), ["史低读取中…", "pending"]);
+});
+
+test("已购页算不出人民币汇率时史低只显示日元", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const purchasedLowCache = new Map([["RJ00000001", { lowest: 379 }]]);`);
+  const state = sandbox.purchasedLowChipText({ id: "RJ00000001", paid: 1980 });
+  assert.equal(state.text, "史低379 JPY");
+  assert.equal(state.tone, "loss");
+  // 直接传入汇率时也按传入值换算。
+  const withRate = sandbox.purchasedLowChipText({ id: "RJ00000001", paid: 1980 }, 0.0426);
+  assert.equal(withRate.text, "史低379 JPY / 16.15 RMB");
+});
+
+test("已购页史低只在点击按钮后才读取", () => {
+  const enhance = functionSource("enhancePurchasedWorksPage");
+  // 进页面只挂按钮，绝不发起史低请求、也不往价格列写标签。
+  assert.doesNotMatch(enhance, /ensurePurchasedLowestPrices/);
+  assert.doesNotMatch(enhance, /renderPurchasedLowChip\(/);
+  assert.match(enhance, /purchasedLowStartedFor === table/);
+  // 按钮点击进入统一入口，由入口去取史低并写标签。
+  assert.match(functionSource("ensurePurchasedToolbar"), /runPurchasedLowestComparison\(\)/);
+  const run = functionSource("runPurchasedLowestComparison");
+  assert.match(run, /ensurePurchasedLowestPrices\(/);
+  assert.match(run, /renderPurchasedLowChips\(rows\)/);
+  assert.match(run, /openPurchasedLossDialog\(\)/);
 });

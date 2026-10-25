@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.79
+// @version      0.6.80
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.79";
+  const APP_VERSION = "0.6.80";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -85,6 +85,12 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.80": [
+      "已购买作品页改为「点击后才算」：进页面不再自动读取史低、不发任何请求，价格列保持原样",
+      "点「算算亏了多少」才去取史低，并逐行在价格（含税）下显示「史低379 JPY / 16.16 RMB」",
+      "史低记录命中本地缓存时点一下即出结果；读不到人民币汇率时只显示日元",
+      "翻页或改筛选后标签随旧表格一起消失，需要重新点一次按钮",
+    ],
     "0.6.79": [
       "已购买作品页「价格（含税）」列补上历史最低价，直接标出比史低贵多少、省多少",
       "价格列表头新增「算算亏了多少」按钮：逐条对比本页实付与史低，列出差额排行并汇总多花/省下的金额",
@@ -8201,8 +8207,11 @@
   const PURCHASED_LOW_BATCH_SIZE = 5;
   const PURCHASED_LOW_BATCH_PAUSE_MS = 400;
   const purchasedLowCache = new Map();
-  let purchasedLowTask = null;
-  let purchasedLowRerun = false;
+  let purchasedLowBusy = false;
+  // 记录「已经点过按钮、取过史低」的那张表。换页或改筛选后表格会被整张替换，
+  // 这里就不相等，按钮重新可点——不在用户点之前发任何请求。
+  let purchasedLowStartedFor = null;
+  let purchasedCnyRateMemo;
 
   // 从「1,980円」「￥1,980」「1,980 日元」里取金额。一格里有多个金额时取最后一个：
   // DLsite 的划线原价在前、实付在后。
@@ -8275,18 +8284,25 @@
     return purchasedLowCache.get(String(id || "").toUpperCase()) || null;
   }
 
-  function purchasedLowChipText(row) {
+  // 标签固定写成「史低379 JPY / 16.16 RMB」：日元在前，人民币按本地比例估算。
+  function purchasedLowChipText(row, cnyRate = null) {
     const cached = purchasedLowestFor(row?.id);
     if (!cached) return { text: "史低读取中…", tone: "pending" };
     const lowest = Number.isFinite(cached.lowest) ? cached.lowest : null;
     if (lowest === null) return { text: "无史低数据", tone: "unknown" };
-    const head = `史低 ${toYen(lowest)}`;
+    const rate = Number.isFinite(cnyRate)
+      ? cnyRate
+      : (typeof purchasedCnyRate === "function" ? purchasedCnyRate() : null);
+    const cny = Number.isFinite(rate) && rate > 0
+      ? ` / ${(lowest * rate).toFixed(2)} RMB`
+      : "";
+    const head = `史低${Math.round(lowest)} JPY${cny}`;
     const paid = Number.isFinite(row?.paid) ? row.paid : null;
     if (paid === null) return { text: head, tone: "info" };
     const diff = paid - lowest;
-    if (diff > 0) return { text: `${head}｜贵 ${toYen(diff)}`, tone: "loss" };
-    if (diff < 0) return { text: `${head}｜省 ${toYen(-diff)}`, tone: "win" };
-    return { text: `${head}｜持平`, tone: "even" };
+    if (diff > 0) return { text: head, tone: "loss" };
+    if (diff < 0) return { text: head, tone: "win" };
+    return { text: head, tone: "even" };
   }
 
   // 逐条对比实付与史低。lowestOf 可注入，便于测试不依赖缓存。
@@ -8345,15 +8361,18 @@
     };
   }
 
-  // 用本地已缓存的商品元数据估算人民币汇率，估不出来就只显示日元。
+  // 用本地已缓存的商品元数据估算人民币汇率，估不出来就只显示日元。结果会记住，
+  // 避免给每一行渲染标签时都重算一遍。
   function purchasedCnyRate() {
+    if (purchasedCnyRateMemo !== undefined) return purchasedCnyRateMemo;
     const metadata = loadDealCache()?.metadata || {};
     const products = Object.keys(metadata)
       .slice(0, 200)
       .map((id) => normalizedMetadataProduct(id, metadata[id]?.raw))
       .filter((product) => product.price > 0);
     const rate = currencyRateFromProducts(products);
-    return Number.isFinite(rate) && rate > 0 ? rate : null;
+    purchasedCnyRateMemo = Number.isFinite(rate) && rate > 0 ? rate : null;
+    return purchasedCnyRateMemo;
   }
 
   async function persistPurchasedLowest(item) {
@@ -8466,7 +8485,18 @@
     const state = purchasedLowChipText(row);
     chip.dataset.tone = state.tone;
     if (chip.textContent !== state.text) chip.textContent = state.text;
-    chip.title = `实付 ${Number.isFinite(row.paid) ? toYen(row.paid) : "-"}｜${state.text}`;
+    const lowest = purchasedLowestFor(row.id)?.lowest;
+    const paid = Number.isFinite(row.paid) ? row.paid : null;
+    const diff = Number.isFinite(lowest) && paid !== null ? paid - lowest : null;
+    chip.title = [
+      `实付 ${paid === null ? "-" : toYen(paid)}`,
+      `史低 ${Number.isFinite(lowest) ? toYen(lowest) : "-"}`,
+      diff === null ? "" : diff > 0 ? `贵 ${toYen(diff)}` : diff < 0 ? `省 ${toYen(-diff)}` : "持平",
+    ].filter(Boolean).join("｜");
+  }
+
+  function renderPurchasedLowChips(rows) {
+    for (const row of Array.isArray(rows) ? rows : []) renderPurchasedLowChip(row);
   }
 
   function setPurchasedToolbarStatus(text) {
@@ -8491,7 +8521,7 @@
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        openPurchasedLossDialog();
+        void runPurchasedLowestComparison();
       });
       const status = document.createElement("span");
       status.className = "dltracker-purchased-status";
@@ -8510,8 +8540,54 @@
     if (button) {
       button.disabled = !withPaid;
       button.title = withPaid
-        ? "把本页每一部的实付价和历史最低价对比，算出你多花了多少"
+        ? "点一下才去读史低：把本页每一部的实付价和历史最低价对比，算出多花了多少"
         : "这一页没解析到「价格（含税）」金额，暂时无法结算";
+    }
+  }
+
+  // 只有用户点了「算算亏了多少」才去取史低、才往价格列写标签。
+  // 没点之前这一页保持原样，不发任何史低请求。
+  async function runPurchasedLowestComparison() {
+    if (!isPurchasedWorksPage(location.href)) return;
+    if (purchasedLowBusy) return;
+    const { table, rows } = purchasedRowsFromRoot(document);
+    if (!table || !rows.length) return;
+    purchasedLowBusy = true;
+    const button = document.querySelector(
+      `.${PURCHASED_TOOLBAR_CLASSNAME} .dltracker-purchased-button`,
+    );
+    if (button) button.disabled = true;
+    try {
+      // 已经全部命中缓存（例如刚点过一次）就不必再跑进度，直接出结果。
+      if (rows.every((row) => purchasedLowestFor(row.id))) {
+        purchasedLowStartedFor = table;
+        renderPurchasedLowChips(rows);
+        setPurchasedToolbarStatus(`史低 ${rows.length}/${rows.length}`);
+      } else {
+        setPurchasedToolbarStatus(`读取史低 0/${rows.length}`);
+        await ensurePurchasedLowestPrices(rows, (done, total) => {
+          setPurchasedToolbarStatus(total ? `读取史低 ${done}/${total}` : "");
+          renderPurchasedLowChips(rows);
+        });
+        purchasedLowStartedFor = table;
+        renderPurchasedLowChips(rows);
+        const resolved = rows.filter((row) =>
+          Number.isFinite(purchasedLowestFor(row.id)?.lowest)).length;
+        setPurchasedToolbarStatus(`史低 ${resolved}/${rows.length}`);
+      }
+      openPurchasedLossDialog();
+    } catch (error) {
+      console.warn(`[${APP_NAME}] purchased lowest failed:`, error);
+      setPurchasedToolbarStatus("史低读取失败");
+    } finally {
+      purchasedLowBusy = false;
+      const current = document.querySelector(
+        `.${PURCHASED_TOOLBAR_CLASSNAME} .dltracker-purchased-button`,
+      );
+      const currentTable = purchasedRowsFromRoot(document).table;
+      if (current && currentTable) current.disabled = false;
+      // 读取过程中翻页了：表格已被替换，重新挂按钮，等用户再点。
+      if (currentTable && currentTable !== table) enhancePurchasedWorksPage();
     }
   }
 
@@ -8527,34 +8603,9 @@
       }
     }
     ensurePurchasedToolbar(table, priceIndex, rows);
-    for (const row of rows) renderPurchasedLowChip(row);
-    if (purchasedLowTask) {
-      // 上一次还在跑（多半是翻页），跑完再补这一页缺的。
-      purchasedLowRerun = true;
-      return;
-    }
-    purchasedLowRerun = false;
-    purchasedLowTask = ensurePurchasedLowestPrices(rows, (done, total) => {
-      setPurchasedToolbarStatus(total ? `史低 ${done}/${total}` : "");
-      for (const row of rows) renderPurchasedLowChip(row);
-    })
-      .then(() => {
-        for (const row of rows) renderPurchasedLowChip(row);
-        const resolved = rows.filter((row) =>
-          Number.isFinite(purchasedLowestFor(row.id)?.lowest)).length;
-        setPurchasedToolbarStatus(`史低 ${resolved}/${rows.length}`);
-      })
-      .catch((error) => {
-        console.warn(`[${APP_NAME}] purchased lowest failed:`, error);
-        setPurchasedToolbarStatus("史低读取失败");
-      })
-      .finally(() => {
-        purchasedLowTask = null;
-        if (purchasedLowRerun) {
-          purchasedLowRerun = false;
-          enhancePurchasedWorksPage();
-        }
-      });
+    // 同一张表已经点过按钮（例如 SPA 局部重绘）才把已读到的标签补回来；
+    // 没点过就什么都不加，页面保持原样。
+    if (purchasedLowStartedFor === table) renderPurchasedLowChips(rows);
   }
 
   function purchasedLossText(summary) {
@@ -8698,8 +8749,8 @@
     if (!summary.compared.length) {
       const empty = document.createElement("p");
       empty.className = "dltracker-purchased-loss-note";
-      empty.textContent = "还没读到任何史低：先等史低读完再点这个按钮；" +
-        "若一直为空，说明这一页没解析到「价格（含税）」金额。";
+      empty.textContent = "史低只在点了「算算亏了多少」之后才读取；" +
+        "若点了仍为空，说明这一页没解析到「价格（含税）」金额。";
       tableWrap.replaceChildren(empty);
     }
     const notes = [];
@@ -14599,9 +14650,10 @@ a.dltracker-browse-analysis-frame {
   display: block;
   margin-top: 2px;
   color: #44535c;
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1.35;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .dltracker-purchased-low[data-tone="pending"],
