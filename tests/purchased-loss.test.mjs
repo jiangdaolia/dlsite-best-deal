@@ -16,6 +16,13 @@ function functionSource(name) {
   return result[0];
 }
 
+// 单行 const 直接抽出来（多行常量用 functionSource 抽会被相邻函数吞进去）。
+function constantSource(name) {
+  const result = source.match(new RegExp(`^  const ${name} = .*;$`, "m"));
+  if (!result) throw new Error(`${name} not found`);
+  return result[0];
+}
+
 function makeSandbox(extraSource = "") {
   const sandbox = {
     console: { warn() {} },
@@ -29,7 +36,9 @@ function makeSandbox(extraSource = "") {
     globalThis.parseAmountInfo = parseAmountInfo;
     globalThis.purchasedLossSummary = purchasedLossSummary;
     globalThis.purchasedCellText = purchasedCellText;
-    globalThis.purchasedRowsFromRoot = purchasedRowsFromRoot;`,
+    globalThis.purchasedRowsFromRoot = purchasedRowsFromRoot;
+    globalThis.purchasedWorkTypeLabel = purchasedWorkTypeLabel;
+    globalThis.purchasedWorkTypeOf = purchasedWorkTypeOf;`,
     sandbox,
   );
   return sandbox;
@@ -38,6 +47,7 @@ function makeSandbox(extraSource = "") {
 const coreSource = () =>
   [
     'const PURCHASED_PRICE_HEADER_RE = /価格|价格|價格|料金|price/i;',
+    constantSource("PURCHASED_WORK_TYPE_LABELS"),
     functionSource("parseAmountInfo"),
     functionSource("parseYenAmount"),
     functionSource("purchasedPaidToYen"),
@@ -52,6 +62,8 @@ const coreSource = () =>
     functionSource("purchasedCurrencyHint"),
     functionSource("purchasedRowPriceCell"),
     functionSource("purchasedCellText"),
+    functionSource("purchasedWorkTypeLabel"),
+    functionSource("purchasedWorkTypeOf"),
     functionSource("purchasedRowsFromRoot"),
   ].join("\n");
 
@@ -598,20 +610,23 @@ test("文本版把未计入的行也列出来，并带上自检结果", () => {
     const purchasedLowCache = new Map();
     globalThis.purchasedLossText = purchasedLossText;`);
   const rows = [
-    { id: "RJ00000001", paid: 1455.39, currency: "CNY", paidCny: 62, paidRaw: "¥62.00" },
-    { id: "RJ00000002", paid: 990 },
-    { id: "RJ00000003", paid: null, paidRaw: "无料" },
+    { id: "RJ00000001", paid: 1455.39, currency: "CNY", paidCny: 62, paidRaw: "¥62.00", typeLabel: "音声" },
+    { id: "RJ00000002", paid: 990, typeLabel: "漫画" },
+    { id: "RJ00000003", paid: null, paidRaw: "无料", typeLabel: "游戏" },
   ];
   const summary = sandbox.purchasedLossSummary(rows, (row) => (
     row.id === "RJ00000002" ? 1980 : row.id === "RJ00000001" ? 379 : null
   ));
   const text = sandbox.purchasedLossText(summary);
   assert.match(text, /本页 3 部｜计入合计 2 部｜未计入 1 部/);
+  // 每行带类型，结算列表里能分清音声/漫画/游戏。
+  assert.match(text, /编号｜类型｜实付｜史低｜差额/);
   // 人民币原值必须写出来，否则和页面上的「¥62.00」对不上。
-  assert.match(text, /RJ00000001｜¥62\.00（≈1,455円）｜379円｜\+1,076円/);
+  assert.match(text, /RJ00000001｜音声｜¥62\.00（≈1,455円）｜379円｜\+1,076円/);
+  assert.match(text, /RJ00000002｜漫画｜990円｜1,980円｜-990円/);
   assert.match(text, /自检：明细差额之和 .*（与合计差额一致）/);
   assert.match(text, /价格未解析（未计入）：/);
-  assert.match(text, /RJ00000003｜无料/);
+  assert.match(text, /RJ00000003｜游戏｜无料/);
 });
 
 // 用户实际遇到的情况：史低标签被塞进了「支付方式」列，价格列反而是空的。
@@ -690,4 +705,73 @@ test("价格格只剩裸数字时也能认出来，且不把支付方式当金�
   assert.equal(parse("クレジットカード").amount, null);
   assert.equal(parse("2024/05/01").amount, null);
   assert.equal(parse("").amount, null);
+});
+
+test("结算列表按商品元数据标出作品类型（音声/漫画/游戏）", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
+    const purchasedLowCache = new Map();
+    function loadDealCache() {
+      return {
+        metadata: {
+          RJ00000001: { raw: { work_type: "SOU" } },
+          RJ00000002: { raw: { work_type: "MNG" } },
+          RJ00000003: { raw: { work_type: "GAM" } },
+          RJ00000004: { raw: {} },
+          RJ00000005: { raw: { work_type: "ET3" } },
+        },
+      };
+    }`);
+  const label = sandbox.purchasedWorkTypeLabel;
+  assert.equal(label("SOU"), "音声");
+  assert.equal(label("MNG"), "漫画");
+  assert.equal(label("GAM"), "游戏");
+  assert.equal(label("sou"), "音声");
+  // 不认识的代码原样显示，不吞掉信息。
+  assert.equal(label("ET3"), "ET3");
+  assert.equal(label(""), "");
+
+  const cell = (tagName, textContent) => ({ tagName, textContent });
+  const header = {
+    cells: [cell("TH", "作品名"), cell("TH", "价格（含税）")],
+    querySelector: () => null,
+  };
+  const row = (id, price) => ({
+    cells: [cell("TD", `作品${id}`), cell("TD", price)],
+    getAttribute: () => null,
+    setAttribute() {},
+    querySelector: (selector) => (selector.includes("product_id")
+      ? { getAttribute: () => `/girls/work/=/product_id/${id}.html`, textContent: id, href: "" }
+      : null),
+  });
+  const rows = [
+    header,
+    row("RJ00000001", "1,980円"),
+    row("RJ00000002", "880円"),
+    row("RJ00000003", "2,420円"),
+    row("RJ00000004", "550円"),
+    row("RJ00000005", "1,100円"),
+  ];
+  const table = {
+    rows,
+    parentElement: null,
+    querySelectorAll: (selector) => {
+      if (selector === "tr") return rows;
+      if (selector.includes("product_id/")) return rows.slice(1);
+      return [];
+    },
+  };
+  const result = sandbox.purchasedRowsFromRoot({ querySelectorAll: () => [table] });
+  // 类型来自商品元数据；没有元数据的行留空，弹窗里显示「-」。
+  assert.deepEqual(
+    [...result.rows].map((item) => item.typeLabel),
+    ["音声", "漫画", "游戏", "", "ET3"],
+  );
+  assert.deepEqual(
+    [...result.rows].map((item) => item.typeCode),
+    ["SOU", "MNG", "GAM", "", "ET3"],
+  );
 });

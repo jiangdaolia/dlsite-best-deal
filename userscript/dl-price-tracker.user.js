@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.87
+// @version      0.6.88
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -25,7 +25,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.87";
+  const APP_VERSION = "0.6.88";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -87,6 +87,11 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.88": [
+      "「算算亏了多少」明细表新增「类型」列：按 DLsite 的 work_type 标出音声/漫画/游戏/CG·插画/小说/动画/音乐/工具等，光看编号分不清买的是什么",
+      "类型来自商品元数据，缓存里没有的编号在点按钮时批量补一次（不超过 100 条，本身带 30 分钟缓存），失败只是该行显示「-」，不影响结算",
+      "不认识的类型代码原样显示（例如 ET3），不静默吞掉；文本版同步加「类型」列，未计入的行也一并标类型",
+    ],
     "0.6.87": [
       "修史低标签被塞进「支付方式」列：以前只按表头文字算价格列在第几列，数据行的列序和表头错开一格时就整体偏移，标签和按钮都挂错了列",
       "价格列改为逐行按「哪一格真的有金额」定位，表头列号只用于在多个候选之间排序；带币种的金额优先，裸数字只在整格就是一个短数字时才认",
@@ -8312,6 +8317,9 @@
   const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
   // 已购页表头里「价格」那一列的字样：日文界面是「価格（税込）」，中文界面是「价格（含税）」。
   const PURCHASED_PRICE_HEADER_RE = /価格|价格|價格|料金|price/i;
+  // DLsite 的作品类型代码（`work_type`）。已购页本身不显示类型，但「音声」「漫画」
+  // 「游戏」在结算列表里差别很大，所以按代码补一列中文简称；不认识的代码原样显示。
+  const PURCHASED_WORK_TYPE_LABELS = { SOU: "音声", MNG: "漫画", GAM: "游戏", ICG: "CG/插画", NRE: "小说", ACN: "动画", MUS: "音乐", IMT: "素材", TOL: "工具", ETC: "其他" };
   const PURCHASED_TOOLBAR_CLASSNAME = "dltracker-purchased-toolbar";
   const PURCHASED_LOSS_OVERLAY_CLASSNAME = "dltracker-purchased-loss-overlay";
   const PURCHASED_LOW_BATCH_SIZE = 5;
@@ -8558,6 +8566,7 @@
       // 老版本只写过日元金额，没有币种属性；那时页面也只会显示日元。
       if (amount !== null && !currency) currency = "JPY";
       const normalized = purchasedPaidToYen(amount, currency);
+      const workType = purchasedWorkTypeOf(id);
       rows.push({
         id,
         tr,
@@ -8566,6 +8575,8 @@
         paidCny: normalized.cny,
         paidRaw: rawText,
         currency,
+        typeCode: workType.code,
+        typeLabel: workType.label,
         title: (link.textContent || "").replace(/\s+/g, " ").trim().slice(0, 90),
         href: link.href || "",
       });
@@ -8575,6 +8586,38 @@
 
   function purchasedLowestFor(id) {
     return purchasedLowCache.get(String(id || "").toUpperCase()) || null;
+  }
+
+  function purchasedWorkTypeLabel(code) {
+    const key = String(code || "").toUpperCase();
+    if (!key) return "";
+    return PURCHASED_WORK_TYPE_LABELS[key] || key;
+  }
+
+  // 类型只能从商品元数据里拿：缓存里没有就返回空，由 ensurePurchasedWorkTypes 去补。
+  function purchasedWorkTypeOf(id, cache = null) {
+    const key = String(id || "").toUpperCase();
+    if (!key) return { code: "", label: "" };
+    const store = (cache ||
+      (typeof loadDealCache === "function" ? loadDealCache() : null))?.metadata || {};
+    const code = String(store[key]?.raw?.work_type || "").toUpperCase();
+    if (!code) return { code: "", label: "" };
+    return { code, label: purchasedWorkTypeLabel(code) };
+  }
+
+  // 弹窗要标类型：缓存里没有的编号批量补一次（走商品元数据接口，本身就带 30 分钟缓存）。
+  // 失败不影响结算，类型列显示「-」。
+  async function ensurePurchasedWorkTypes(ids) {
+    const list = [...new Set((Array.isArray(ids) ? ids : [])
+      .map((id) => String(id || "").toUpperCase())
+      .filter(Boolean))];
+    const missing = list.filter((id) => !purchasedWorkTypeOf(id).code);
+    if (!missing.length) return;
+    try {
+      await ensureProductMetadata(missing);
+    } catch (error) {
+      console.warn(`[${APP_NAME}] purchased work type failed:`, error);
+    }
   }
 
   // 标签固定写成「史低379 JPY / 16.16 RMB」：日元在前，人民币按本地比例估算。
@@ -8931,6 +8974,8 @@
           Number.isFinite(purchasedLowestFor(row.id)?.lowest)).length;
         setPurchasedToolbarStatus(`史低 ${resolved}/${rows.length}`);
       }
+      // 弹窗里要标作品类型（音声/漫画/游戏），缓存里没有的顺手补一次，再读一遍表格。
+      await ensurePurchasedWorkTypes(rows.map((row) => row.id));
       openPurchasedLossDialog();
     } catch (error) {
       console.warn(`[${APP_NAME}] purchased lowest failed:`, error);
@@ -9468,7 +9513,7 @@
       `自检：明细差额之和 ${toYen(summary.diffSum)}` +
         `（与合计差额${summary.selfCheckOk ? "一致" : "不一致"}）`,
       "",
-      "编号｜实付｜史低｜差额",
+      "编号｜类型｜实付｜史低｜差额",
     ];
     for (const row of summary.compared) {
       const paid = row.currency === "CNY" && Number.isFinite(row.paidCny)
@@ -9476,17 +9521,21 @@
         : toYen(row.paid);
       lines.push([
         row.id,
+        row.typeLabel || "-",
         paid,
         toYen(row.lowest),
         `${row.diff > 0 ? "+" : ""}${toYen(row.diff)}`,
       ].join("｜"));
     }
     if (summary.missing.length) {
-      lines.push("", `无史低（未计入）：${summary.missing.map((row) => row.id).join(", ")}`);
+      lines.push("", `无史低（未计入）：${summary.missing
+        .map((row) => `${row.id}${row.typeLabel ? `（${row.typeLabel}）` : ""}`)
+        .join(", ")}`);
     }
     if (summary.unparsed.length) {
       lines.push("", "价格未解析（未计入）：", ...summary.unparsed.map((row) =>
-        `  ${row.id}｜${String(row.paidRaw || "").slice(0, 48) || "（空）"}`));
+        `  ${row.id}${row.typeLabel ? `｜${row.typeLabel}` : ""}` +
+        `｜${String(row.paidRaw || "").slice(0, 48) || "（空）"}`));
     }
     if (diagnostic) lines.push("", "价格列解析情况：", diagnostic);
     return lines.join("\n");
@@ -9582,7 +9631,7 @@
     const table = document.createElement("table");
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
-    for (const label of ["#", "作品", "实付", "史低", "差额", "说明"]) {
+    for (const label of ["#", "作品", "类型", "实付", "史低", "差额", "说明"]) {
       const th = document.createElement("th");
       th.textContent = label;
       headRow.appendChild(th);
@@ -9614,6 +9663,7 @@
       const cells = [
         String(position + 1),
         row.title ? `${row.id} ${row.title}` : row.id,
+        row.typeLabel || "-",
         paidTextOf(row),
         options.excluded || !Number.isFinite(row.lowest) ? "-" : toYen(row.lowest),
         diffText,
@@ -9631,7 +9681,7 @@
         } else {
           td.textContent = text;
         }
-        if (cellIndex === 4) td.className = "is-diff";
+        if (cellIndex === 5) td.className = "is-diff";
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
