@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.80
+// @version      0.6.81
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.80";
+  const APP_VERSION = "0.6.81";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -85,6 +85,11 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.81": [
+      "已购买作品页新增「数量对不上？」：把本页（含翻页）实际列出的作品和已购接口清单逐条对比，直接列出页面少显示的编号、标题与站点",
+      "对比沿用当前地址上的月份/类型筛选，并读出页面自称的「全 N 件」总数，用来判断是筛选、分页还是聚合口径造成的差异",
+      "统计范围限定为主表格，推荐位里的作品不再被算进清单（之前可能让差集算错）",
+    ],
     "0.6.80": [
       "已购买作品页改为「点击后才算」：进页面不再自动读取史低、不发任何请求，价格列保持原样",
       "点「算算亏了多少」才去取史低，并逐行在价格（含税）下显示「史低379 JPY / 16.16 RMB」",
@@ -8159,31 +8164,63 @@
     return filters.slice(0, 6);
   }
 
+  // 已购买作品页上可能有推荐位、「新着」等模块，用「含作品链接最多的表格」限定范围，
+  // 避免把推荐作品也算进清单，导致差集算错。
+  function purchasedPageIds(doc) {
+    const { table, rows } = purchasedRowsFromRoot(doc);
+    if (table && rows.length) return rows.map((row) => row.id);
+    return pageProductIds(doc);
+  }
+
+  // 页面自己写的「全 38 件」这类总数，用来和脚本解析出的条数对照。
+  function purchasedPageTotalText(doc) {
+    const text = String(doc?.body?.textContent || "")
+      .replace(/[\u00a0\u3000]/g, " ")
+      .replace(/\s+/g, " ");
+    const matched = text.match(/(?:全|計|共)\s*([0-9][0-9,]*)\s*(?:件|点|作品)/);
+    return matched ? matched[0].trim() : "";
+  }
+
   // 已购买作品页禁止注入任何界面，所以改为同源读取该页 HTML 再解析，
   // 拿页面实际列出的编号与筛选条件，和已购接口清单做差集。
-  async function fetchBoughtPageSnapshot({ maxPages = 6 } = {}) {
+  // seedDoc 传入「眼前这份 DOM」时第一页不再重复请求；startUrl 用当前地址，
+  // 这样页面上已经选好的月份/类型筛选会被带进翻页对比。
+  async function fetchBoughtPageSnapshot({
+    maxPages = 6,
+    seedDoc = null,
+    startUrl = null,
+  } = {}) {
     const section = currentDlsiteSection();
-    const startUrl = new URL(`/${section}/mypage/userbuy`, location.origin);
+    const firstUrl = startUrl || new URL(`/${section}/mypage/userbuy`, location.origin).toString();
     const ids = [];
     let filters = [];
+    let totalText = "";
     let pages = 0;
     const visited = new Set();
-    const queue = [startUrl.toString()];
+    const queue = [firstUrl];
     while (queue.length && pages < maxPages) {
       const next = queue.shift();
       if (visited.has(next)) continue;
       visited.add(next);
-      let html = "";
-      try {
-        html = await fetchSameOriginText(next, "已购买作品页");
-      } catch (error) {
-        if (!pages) throw error;
-        break;
+      let doc = null;
+      if (seedDoc && !pages) {
+        doc = seedDoc;
+      } else {
+        let html = "";
+        try {
+          html = await fetchSameOriginText(next, "已购买作品页");
+        } catch (error) {
+          if (!pages) throw error;
+          break;
+        }
+        doc = new DOMParser().parseFromString(html, "text/html");
       }
       pages += 1;
-      const doc = new DOMParser().parseFromString(html, "text/html");
-      if (pages === 1) filters = pageFilterSummary(doc);
-      for (const id of pageProductIds(doc)) {
+      if (pages === 1) {
+        filters = pageFilterSummary(doc);
+        totalText = purchasedPageTotalText(doc);
+      }
+      for (const id of purchasedPageIds(doc)) {
         if (!ids.includes(id)) ids.push(id);
       }
       for (const link of doc.querySelectorAll('a[href*="userbuy"]')) {
@@ -8193,7 +8230,7 @@
         if (!visited.has(absolute) && !queue.includes(absolute)) queue.push(absolute);
       }
     }
-    return { ids, filters, pages };
+    return { ids, filters, pages, totalText };
   }
 
   // ---- 已购买作品页：史低标注 + 「亏了多少」结算 ----
@@ -8516,16 +8553,26 @@
       toolbar.className = PURCHASED_TOOLBAR_CLASSNAME;
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "dltracker-purchased-button";
+      button.className = "dltracker-purchased-button dltracker-purchased-loss-button";
       button.textContent = "算算亏了多少";
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
         void runPurchasedLowestComparison();
       });
+      const diffButton = document.createElement("button");
+      diffButton.type = "button";
+      diffButton.className = "dltracker-purchased-button dltracker-purchased-diff-button";
+      diffButton.textContent = "数量对不上？";
+      diffButton.title = "把本页（含翻页）列出的作品和 DLsite 已购接口清单逐条对比，看少了哪几部";
+      diffButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void openPurchasedDiffDialog();
+      });
       const status = document.createElement("span");
       status.className = "dltracker-purchased-status";
-      toolbar.append(button, status);
+      toolbar.append(button, diffButton, status);
       if (host) {
         host.appendChild(toolbar);
       } else if (table?.parentElement) {
@@ -8534,7 +8581,7 @@
         return;
       }
     }
-    const button = toolbar.querySelector(".dltracker-purchased-button");
+    const button = toolbar.querySelector(".dltracker-purchased-loss-button");
     const withPaid = (Array.isArray(rows) ? rows : []).filter((row) =>
       Number.isFinite(row.paid)).length;
     if (button) {
@@ -8554,7 +8601,7 @@
     if (!table || !rows.length) return;
     purchasedLowBusy = true;
     const button = document.querySelector(
-      `.${PURCHASED_TOOLBAR_CLASSNAME} .dltracker-purchased-button`,
+      `.${PURCHASED_TOOLBAR_CLASSNAME} .dltracker-purchased-loss-button`,
     );
     if (button) button.disabled = true;
     try {
@@ -8582,13 +8629,254 @@
     } finally {
       purchasedLowBusy = false;
       const current = document.querySelector(
-        `.${PURCHASED_TOOLBAR_CLASSNAME} .dltracker-purchased-button`,
+        `.${PURCHASED_TOOLBAR_CLASSNAME} .dltracker-purchased-loss-button`,
       );
       const currentTable = purchasedRowsFromRoot(document).table;
       if (current && currentTable) current.disabled = false;
       // 读取过程中翻页了：表格已被替换，重新挂按钮，等用户再点。
       if (currentTable && currentTable !== table) enhancePurchasedWorksPage();
     }
+  }
+
+  // ---- 「数量对不上？」：把已购页（含当前筛选与翻页）和已购接口清单做差集 ----
+  function purchasedDiffTitle(id, cache = null) {
+    const metadata = (cache || loadDealCache())?.metadata || {};
+    const raw = metadata[id]?.raw;
+    if (!raw) return null;
+    const product = normalizedMetadataProduct(id, raw);
+    return product || null;
+  }
+
+  // 纯函数，便于单测：把差集整理成可复制的文本。
+  function purchasedDiffText({
+    apiIds = [],
+    pageIds = [],
+    missingOnPage = [],
+    extraOnPage = [],
+    filters = [],
+    totalText = "",
+    pages = 0,
+    apiNote = "",
+    cache = null,
+  }) {
+    const lines = [
+      "已购买作品页 vs 已购接口清单",
+      `接口清单 ${apiIds.length} 条｜本页（含翻页 ${pages} 页）${pageIds.length} 部｜` +
+        `差 ${apiIds.length - pageIds.length} 条`,
+    ];
+    if (totalText) lines.push(`页面自称总数：${totalText}`);
+    if (filters.length) {
+      lines.push(`页面筛选：${filters
+        .map((filter) => `${filter.name}=${filter.selected || "?"}`)
+        .join("　")}`);
+    }
+    if (apiNote) lines.push(`备注：${apiNote}`);
+    lines.push("", `接口有但页面没有（${missingOnPage.length}）`);
+    if (!missingOnPage.length) lines.push("  （无）");
+    for (const id of missingOnPage) {
+      const product = purchasedDiffTitle(id, cache);
+      const extra = [
+        product?.title && product.title !== id ? product.title : "",
+        product?.siteId ? product.siteId : "",
+        Number.isFinite(product?.price) ? `${product.price}円` : "",
+      ].filter(Boolean);
+      lines.push(`  ${id}${extra.length ? `｜${extra.join("｜")}` : ""}`);
+    }
+    if (extraOnPage.length) {
+      lines.push("", `页面有但接口没有（${extraOnPage.length}）`);
+      for (const id of extraOnPage) lines.push(`  ${id}`);
+    }
+    return lines.join("\n");
+  }
+
+  async function collectPurchasedDiff() {
+    const index = loadAccountIndex();
+    let apiIds = boughtCountBreakdown(index, loadLanguageFamilyCache()).bought;
+    let apiNote = "";
+    try {
+      const section = currentDlsiteSection();
+      const url = new URL(`/${section}${DLSITE_BOUGHT_PRODUCTS_PATH}`, location.origin);
+      const token = dlsiteBoughtToken();
+      if (token) url.searchParams.set("_", token);
+      const payload = await fetchSameOriginJson(url, "已购清单");
+      const items = boughtDiagnosticItems(payload);
+      if (items.ids.length) {
+        apiIds = items.ids;
+      } else {
+        apiNote = "接口没有返回任何编号，下面用的是本地记录";
+      }
+    } catch (error) {
+      apiNote = `接口读取失败，改用本地记录：${
+        error instanceof Error ? error.message : String(error)}`;
+    }
+    // 用当前地址当起点，页面上已经选好的月份/类型筛选会被带进翻页对比。
+    const snapshot = await fetchBoughtPageSnapshot({
+      seedDoc: document,
+      startUrl: location.href,
+    });
+    const pageSet = new Set(snapshot.ids);
+    const apiSet = new Set(apiIds);
+    return {
+      apiIds,
+      pageIds: snapshot.ids,
+      missingOnPage: apiIds.filter((id) => !pageSet.has(id)),
+      extraOnPage: snapshot.ids.filter((id) => !apiSet.has(id)),
+      filters: snapshot.filters,
+      totalText: snapshot.totalText,
+      pages: snapshot.pages,
+      apiNote,
+    };
+  }
+
+  function purchasedSummaryChip(label, value, tone) {
+    const node = document.createElement("span");
+    if (tone) node.className = `is-${tone}`;
+    const strong = document.createElement("strong");
+    strong.textContent = `${label}：`;
+    node.append(strong, document.createTextNode(String(value)));
+    return node;
+  }
+
+  function closePurchasedDiffDialog() {
+    document.querySelector(".dltracker-purchased-diff-overlay")?.remove();
+    unlockReachDialogScroll();
+  }
+
+  async function openPurchasedDiffDialog() {
+    if (!isPurchasedWorksPage(location.href)) return;
+    closePurchasedDiffDialog();
+    const overlay = document.createElement("div");
+    overlay.className = "dltracker-reach-overlay dltracker-purchased-diff-overlay";
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) closePurchasedDiffDialog();
+    });
+    const dialog = document.createElement("section");
+    dialog.className = "dltracker-reach-dialog dltracker-purchased-loss-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.tabIndex = -1;
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closePurchasedDiffDialog();
+    });
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    title.textContent = "为什么数量对不上";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "关闭");
+    close.addEventListener("click", closePurchasedDiffDialog);
+    header.append(title, close);
+    const body = document.createElement("div");
+    body.className = "dltracker-reach-dialog-body";
+    const loading = document.createElement("p");
+    loading.className = "dltracker-purchased-loss-note";
+    loading.textContent = "正在同源读取已购买作品页（含翻页）并对比已购接口…";
+    body.appendChild(loading);
+    dialog.append(header, body);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    lockReachDialogScroll();
+    dialog.focus({ preventScroll: true });
+    let result = null;
+    try {
+      result = await collectPurchasedDiff();
+    } catch (error) {
+      loading.textContent = `对比失败：${
+        error instanceof Error ? error.message : String(error)}`;
+      return;
+    }
+    const summaryBox = document.createElement("div");
+    summaryBox.className = "dltracker-purchased-loss-summary";
+    const diff = result.apiIds.length - result.pageIds.length;
+    summaryBox.append(
+      purchasedSummaryChip("接口清单", `${result.apiIds.length} 条`),
+      purchasedSummaryChip("本页列出的作品", `${result.pageIds.length} 部`),
+      purchasedSummaryChip(
+        "差额",
+        diff === 0 ? "一致" : `${diff > 0 ? "页面少" : "页面多"} ${Math.abs(diff)} 条`,
+        diff > 0 ? "loss" : diff < 0 ? "win" : "",
+      ),
+    );
+    if (result.totalText) {
+      summaryBox.appendChild(purchasedSummaryChip("页面自称总数", result.totalText));
+    }
+    if (result.filters.length) {
+      summaryBox.appendChild(purchasedSummaryChip(
+        "页面筛选",
+        result.filters
+          .map((filter) => `${filter.name}=${filter.selected || "?"}`)
+          .join("　"),
+      ));
+    }
+    const tableWrap = document.createElement("div");
+    tableWrap.className = "dltracker-purchased-loss-table-wrap";
+    if (result.missingOnPage.length) {
+      const table = document.createElement("table");
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      for (const label of ["#", "编号", "标题", "站点", "价格"]) {
+        const th = document.createElement("th");
+        th.textContent = label;
+        headRow.appendChild(th);
+      }
+      thead.appendChild(headRow);
+      const tbody = document.createElement("tbody");
+      result.missingOnPage.forEach((id, position) => {
+        const product = purchasedDiffTitle(id);
+        const tr = document.createElement("tr");
+        tr.className = "is-loss";
+        const cells = [
+          String(position + 1),
+          id,
+          product?.title && product.title !== id ? product.title : "（无标题缓存）",
+          product?.siteId || "-",
+          Number.isFinite(product?.price) ? `${product.price} 円` : "-",
+        ];
+        cells.forEach((text, cellIndex) => {
+          const td = document.createElement("td");
+          td.textContent = text;
+          if (cellIndex === 1) td.className = "is-diff";
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.append(thead, tbody);
+      tableWrap.appendChild(table);
+    } else {
+      const same = document.createElement("p");
+      same.className = "dltracker-purchased-loss-note";
+      same.textContent = "本页列出的作品和接口清单完全一致，一条没少。" +
+        "这种情况下「38」是页面按作品/订单聚合后的显示结果，不是 43 条里的子集。";
+      tableWrap.appendChild(same);
+    }
+    const notes = [];
+    if (result.extraOnPage.length) {
+      notes.push(`页面有但接口没有 ${result.extraOnPage.length} 条：` +
+        `${result.extraOnPage.join("、")}。`);
+    }
+    if (result.missingOnPage.length) {
+      notes.push("上面这些编号是接口里有、但当前已购买作品页没列出的；" +
+        "若是月份/类型筛选导致，切到「全部」再点一次即可对齐。");
+    }
+    if (result.apiNote) notes.push(result.apiNote);
+    notes.push(`对比时共读取了 ${result.pages} 页已购买作品页。`);
+    const noteNode = document.createElement("p");
+    noteNode.className = "dltracker-purchased-loss-note";
+    noteNode.textContent = notes.join("");
+    const actions = document.createElement("div");
+    actions.className = "dltracker-purchased-loss-actions";
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "is-primary";
+    copyButton.textContent = "复制文本版";
+    const status = document.createElement("span");
+    copyButton.addEventListener("click", async () => {
+      const copied = await copyCartDiagnosticText(purchasedDiffText(result));
+      status.textContent = copied ? "已复制" : "复制失败，可先截图";
+    });
+    actions.append(copyButton, status);
+    body.replaceChildren(summaryBox, tableWrap, noteNode, actions);
   }
 
   function enhancePurchasedWorksPage() {
@@ -14612,11 +14900,17 @@ a.dltracker-browse-analysis-frame {
 
 .dltracker-purchased-toolbar {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
   margin-top: 4px;
   font-weight: 400;
   white-space: normal;
+}
+
+.dltracker-purchased-status {
+  flex-basis: 100%;
 }
 
 .dltracker-purchased-button {

@@ -191,3 +191,97 @@ test("已购页史低只在点击按钮后才读取", () => {
   assert.match(run, /renderPurchasedLowChips\(rows\)/);
   assert.match(run, /openPurchasedLossDialog\(\)/);
 });
+
+test("已购页对比只取主表格的作品编号，不把推荐位算进来", () => {
+  const sandbox = makeSandbox(`${functionSource("pageProductIds")}
+    ${functionSource("purchasedPageIds")}
+    ${functionSource("purchasedPageTotalText")}
+    ${coreSource()}
+    const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const purchasedLowCache = new Map();
+    globalThis.purchasedPageIds = purchasedPageIds;
+    globalThis.purchasedPageTotalText = purchasedPageTotalText;`);
+  const cell = (tagName, textContent) => ({ tagName, textContent });
+  const header = { cells: [cell("TH", "作品名"), cell("TH", "価格（税込）")], querySelector: () => null };
+  const row = (href, price) => ({
+    cells: [cell("TD", "作品"), cell("TD", price)],
+    getAttribute: () => null,
+    setAttribute() {},
+    querySelector: (selector) => (selector.includes("product_id") && href
+      ? { getAttribute: () => href, textContent: "作品", href }
+      : null),
+  });
+  const rows = [header, row("/girls/work/=/product_id/RJ00000001.html", "1,980円"),
+    row("/girls/work/=/product_id/RJ00000002.html", "990円")];
+  const table = {
+    rows,
+    querySelectorAll: (selector) => {
+      if (selector === "tr") return rows;
+      if (selector.includes("product_id/")) return [rows[1], rows[2]];
+      return [];
+    },
+  };
+  const recommendation = [
+    { getAttribute: () => "/girls/work/=/product_id/RJ99999999.html" },
+  ];
+  const doc = {
+    body: { textContent: "購入済み作品 全 38 件 1 2 次へ" },
+    querySelectorAll: (selector) => {
+      if (selector === "table") return [table];
+      if (selector.includes("product_id/")) return recommendation;
+      return [];
+    },
+  };
+  // 推荐位里的 RJ99999999 不能被算进清单。
+  assert.deepEqual([...sandbox.purchasedPageIds(doc)], ["RJ00000001", "RJ00000002"]);
+  assert.equal(sandbox.purchasedPageTotalText(doc), "全 38 件");
+});
+
+test("已购页数量对比文本列出接口有而页面没有的编号", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    ${functionSource("purchasedDiffTitle")}
+    ${functionSource("purchasedDiffText")}
+    const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const purchasedLowCache = new Map();
+    function normalizedMetadataProduct(id, raw) {
+      return {
+        id,
+        title: String(raw?.title || id),
+        siteId: String(raw?.site_id || ""),
+        price: Number.isFinite(Number(raw?.price)) ? Number(raw.price) : null,
+      };
+    }
+    globalThis.purchasedDiffText = purchasedDiffText;`);
+  const cache = {
+    metadata: {
+      RJ00000003: { raw: { title: "作品丙", site_id: "girls", price: 1980 } },
+    },
+  };
+  const text = sandbox.purchasedDiffText({
+    apiIds: ["RJ00000001", "RJ00000002", "RJ00000003"],
+    pageIds: ["RJ00000001"],
+    missingOnPage: ["RJ00000002", "RJ00000003"],
+    extraOnPage: [],
+    filters: [{ name: "month", selected: "2026-10", options: 13 }],
+    totalText: "全 38 件",
+    pages: 2,
+    cache,
+  });
+  assert.match(text, /接口清单 3 条｜本页（含翻页 2 页）1 部｜差 2 条/);
+  assert.match(text, /页面自称总数：全 38 件/);
+  assert.match(text, /页面筛选：month=2026-10/);
+  assert.match(text, /接口有但页面没有（2）/);
+  assert.match(text, /RJ00000002/);
+  assert.match(text, /RJ00000003｜作品丙｜girls｜1980円/);
+});
+
+test("已购页工具栏提供数量对比按钮，且对比沿用当前筛选地址", () => {
+  const toolbar = functionSource("ensurePurchasedToolbar");
+  assert.match(toolbar, /openPurchasedDiffDialog\(\)/);
+  assert.match(toolbar, /数量对不上？/);
+  const collect = functionSource("collectPurchasedDiff");
+  // 用当前地址当起点，页面已选的月份/类型筛选才会带进翻页对比。
+  assert.match(collect, /startUrl: location\.href/);
+  assert.match(collect, /seedDoc: document/);
+  assert.match(functionSource("fetchBoughtPageSnapshot"), /seedDoc && !pages/);
+});
