@@ -308,7 +308,7 @@ test("已购页数量对比标出每条的差异原因与同作品多编号", ()
       }],
       ["RJ01010333", {
         kind: "gone",
-        text: "作品页已被 DLsite 删除（404），已购页不再显示",
+        text: "销售页已下架（404）；购买记录仍在「購入履歴」里，可尝试再下载",
       }],
     ]),
     pages: 1,
@@ -316,7 +316,7 @@ test("已购页数量对比标出每条的差异原因与同作品多编号", ()
   // 编号数与作品数分开写，43 与 39 的差才解释得清。
   assert.match(text, /按作品归组：3 条编号 = 1 部作品（1 部作品有多个编号）/);
   assert.match(text, /RJ01011068｜同一作品换号\/语言版，页面显示 RJ01011067（本页已列出）/);
-  assert.match(text, /RJ01010333｜作品页已被 DLsite 删除（404）/);
+  assert.match(text, /RJ01010333｜销售页已下架（404）/);
   assert.match(text, /同一部作品的多个编号（1 部）/);
   assert.match(text, /RJ01010333 \/ RJ01011067 \/ RJ01011068｜あなたが私を買った理由/);
   // 没有原因数据时退化成原来的输出，不出现空的原因列。
@@ -357,6 +357,51 @@ test("差异原因按作品页探测结果归类", () => {
     "error",
   );
   assert.equal(reason("RJ00000001", null, new Set()).kind, "unknown");
+});
+
+test("原版销售页 404 时说明同作品仍在售，而不是说作品被删", () => {
+  const sandbox = {};
+  vm.runInNewContext(`
+    ${functionSource("purchasedDiffSiblingOf")}
+    ${functionSource("purchasedDiffReasonOf")}
+    globalThis.siblingForTest = purchasedDiffSiblingOf;
+    globalThis.reasonForTest = purchasedDiffReasonOf;
+  `, sandbox);
+  const reason = sandbox.reasonForTest;
+  const siblingOf = sandbox.siblingForTest;
+  // 原版与简中版标题只差一个前缀，去掉后键相同 → 认成同一部作品。
+  const titles = new Map([
+    ["RJ01010333", "あなたが私を買った理由|girls"],
+    ["RJ01011067", "あなたが私を買った理由|girls"],
+  ]);
+  const titleKeyOf = (id) => titles.get(id) || "";
+  assert.equal(
+    siblingOf("RJ01010333", { titleKeyOf, pageIds: ["RJ01011067"] }),
+    "RJ01011067",
+  );
+  // 页面优先于接口：告诉用户「你手上还有一个能用的编号」。
+  assert.equal(
+    siblingOf("RJ01010333", {
+      titleKeyOf,
+      pageIds: ["RJ01011067"],
+      apiIds: ["RJ01010333", "RJ01011067"],
+    }),
+    "RJ01011067",
+  );
+  assert.equal(siblingOf("RJ01010333", { titleKeyOf, pageIds: [] }), "");
+  const removed = reason("RJ01010333", { status: 404, target: "" }, new Set(), {
+    siblingOf: (id) => siblingOf(id, { titleKeyOf, pageIds: ["RJ01011067"] }),
+  });
+  assert.equal(removed.kind, "alias-removed");
+  assert.match(removed.text, /RJ01011067 仍在售/);
+  assert.match(removed.text, /购买记录不受影响/);
+  // 找不到同作品编号时也不能说「作品被删」，只提示去購入履歴再下载。
+  const gone = reason("RJ01010333", { status: 404, target: "" }, new Set(), {
+    siblingOf: () => "",
+  });
+  assert.equal(gone.kind, "gone");
+  assert.match(gone.text, /購入履歴/);
+  assert.doesNotMatch(gone.text, /删除/);
 });
 
 test("已购页工具栏提供数量对比按钮，且对比沿用当前筛选地址", () => {

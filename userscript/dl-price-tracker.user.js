@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.82
+// @version      0.6.83
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -23,7 +23,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.82";
+  const APP_VERSION = "0.6.83";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -85,6 +85,12 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.83": [
+      "差异「原因」列不再说「作品页已被 DLsite 删除」：作品页 404 时改用作品信息接口取标题，按作品键认出同一部作品当前在售的另一个编号，写成「原版销售页已下架，同一作品的 RJxxxx 仍在售/可下载（购买记录不受影响）」",
+      "只有确实找不到同作品编号时才写「销售页已下架（404）」，并提示购买记录仍在「購入履歴」、2016 年后停售作品官方仍可再下载",
+      "弹窗汇总新增「原版下架·简中版在售」分类，说明不管是哪种情况，已买的东西都不会因为页面消失而失效",
+      "用真实数据核对：8 条差异编号全部命中页面上已在列的编号（RJ01010333→RJ01011067 等 4 组）",
+    ],
     "0.6.82": [
       "「已购买」改为按作品计数：已购接口返回的是购买过的编号，同一部作品可能同时有日本語原版和簡体/繁體中文版两个编号，页面只显示一条，所以编号数会比实际作品数多",
       "账号面板同时给出作品数与编号数（例如「39 部（43 条编号）」），并列出是哪些作品有多个编号",
@@ -8712,7 +8718,28 @@
     }
   }
 
-  function purchasedDiffReasonOf(id, probe, pageSet) {
+  // 同一作品的另一个编号：标题去掉【簡体中文版】/译者后缀后的键相同，就算同一部作品。
+  // 优先在「本页列出的编号」里找，这样能直接告诉用户「你手上还有一个能用的编号」。
+  function purchasedDiffSiblingOf(id, options = {}) {
+    const titleKeyOf = typeof options.titleKeyOf === "function"
+      ? options.titleKeyOf
+      : () => "";
+    const key = titleKeyOf(id);
+    if (!key) return "";
+    const groups = [
+      Array.isArray(options.pageIds) ? options.pageIds : [],
+      Array.isArray(options.apiIds) ? options.apiIds : [],
+    ];
+    for (const group of groups) {
+      for (const other of group) {
+        if (String(other) === String(id)) continue;
+        if (titleKeyOf(other) === key) return String(other);
+      }
+    }
+    return "";
+  }
+
+  function purchasedDiffReasonOf(id, probe, pageSet, context = {}) {
     if (!probe) return { kind: "unknown", text: "未能探测" };
     if (probe.target && probe.target !== id) {
       // 用鸭子类型判断，避免跨上下文 instanceof Set 失效。
@@ -8725,7 +8752,21 @@
       };
     }
     if (probe.status === 404 || probe.status === 410) {
-      return { kind: "gone", text: "作品页已被 DLsite 删除（404），已购页不再显示" };
+      const sibling = typeof context.siblingOf === "function"
+        ? context.siblingOf(id) || ""
+        : "";
+      if (sibling) {
+        return {
+          kind: "alias-removed",
+          target: sibling,
+          text: `原版销售页已下架，同一作品的 ${sibling} 仍在售/可下载` +
+            "（购买记录不受影响）",
+        };
+      }
+      return {
+        kind: "gone",
+        text: "销售页已下架（404）；购买记录仍在「購入履歴」里，可尝试再下载",
+      };
     }
     if (probe.status >= 400) {
       return { kind: "error", text: `作品页返回 HTTP ${probe.status}` };
@@ -8734,16 +8775,42 @@
   }
 
   // 只探测「接口有、页面没有」的编号，最多 24 条、并发 4，点按钮才跑。
-  async function explainMissingOnPage(missingIds, pageSet) {
+  async function explainMissingOnPage(missingIds, pageSet, options = {}) {
     const targets = missingIds.slice(0, 24);
     const reasons = new Map();
+    if (!targets.length) return reasons;
+    // 先补一次作品元数据：作品页 404 时 info/ajax 仍然返回标题，
+    // 靠标题键就能认出「同一作品当前还在售的另一个编号」。
+    const pageIds = Array.isArray(options.pageIds) ? options.pageIds : [];
+    let metadata = options.metadata instanceof Map ? options.metadata : new Map();
+    if (!metadata.size) {
+      try {
+        metadata = await ensureProductMetadataBatches(
+          [...targets, ...pageIds],
+          options.metadataOptions || {},
+        );
+      } catch (error) {
+        console.warn(`[${APP_NAME}] purchased diff metadata failed:`, error);
+      }
+    }
+    const titleKeyOf = (id) => {
+      const product = metadata.get(id) || purchasedDiffTitle(id);
+      return product?.title
+        ? boughtWorkTitleKey(product.title, product.siteId || "")
+        : "";
+    };
+    const siblingOf = (id) => purchasedDiffSiblingOf(id, {
+      titleKeyOf,
+      pageIds,
+      apiIds: options.apiIds || [],
+    });
     let cursor = 0;
     const worker = async () => {
       while (cursor < targets.length) {
         const id = targets[cursor];
         cursor += 1;
         const probe = await probeProductIdTarget(id);
-        reasons.set(id, purchasedDiffReasonOf(id, probe, pageSet));
+        reasons.set(id, purchasedDiffReasonOf(id, probe, pageSet, { siblingOf }));
       }
     };
     const lanes = Math.min(4, targets.length);
@@ -8850,10 +8917,13 @@
       familyKeyOf: breakdown.familyKeyOf,
     });
     const missingOnPage = apiIds.filter((id) => !pageSet.has(id));
-    // 逐条探测差异原因（同一作品换号 / 作品已删除），只探测缺的那几条。
+    // 逐条探测差异原因（同作品换号 / 原版下架但简中版在售 / 彻底下架），只探测缺的那几条。
     let reasons = new Map();
     try {
-      reasons = await explainMissingOnPage(missingOnPage, pageSet);
+      reasons = await explainMissingOnPage(missingOnPage, pageSet, {
+        pageIds: snapshot.ids,
+        apiIds,
+      });
     } catch (error) {
       console.warn(`[${APP_NAME}] purchased diff probe failed:`, error);
     }
@@ -8959,10 +9029,17 @@
     const reasonOf = (id) => result.reasons?.get?.(id) || null;
     const aliasCount = result.missingOnPage
       .filter((id) => reasonOf(id)?.kind === "alias").length;
+    const removedCount = result.missingOnPage
+      .filter((id) => reasonOf(id)?.kind === "alias-removed").length;
     const goneCount = result.missingOnPage
       .filter((id) => reasonOf(id)?.kind === "gone").length;
     if (aliasCount) summaryBox.appendChild(purchasedSummaryChip("同作品换号", `${aliasCount} 条`));
-    if (goneCount) summaryBox.appendChild(purchasedSummaryChip("作品页已删除", `${goneCount} 条`));
+    if (removedCount) {
+      summaryBox.appendChild(purchasedSummaryChip("原版下架·简中版在售", `${removedCount} 条`, "win"));
+    }
+    if (goneCount) {
+      summaryBox.appendChild(purchasedSummaryChip("销售页已下架", `${goneCount} 条`, "loss"));
+    }
     const tableWrap = document.createElement("div");
     tableWrap.className = "dltracker-purchased-loss-table-wrap";
     if (result.missingOnPage.length) {
@@ -8980,7 +9057,7 @@
         const product = purchasedDiffTitle(id);
         const tr = document.createElement("tr");
         const reason = reasonOf(id);
-        tr.className = reason?.kind === "gone" ? "is-loss" : "is-loss";
+        tr.className = reason?.kind === "gone" ? "is-loss" : "is-alias";
         const cells = [
           String(position + 1),
           id,
@@ -9027,8 +9104,14 @@
     }
     if (result.missingOnPage.length) {
       notes.push("「原因」列是逐条同源探测作品页得到的：" +
-        "「同作品换号」表示 DLsite 已把这个编号 302 到当前主编号；" +
-        "「作品页已被 DLsite 删除」表示该作品连页面都没了，已购页自然列不出来。");
+        "「同作品换号」= 这个编号现在 302 到另一个主编号；" +
+        "「原版下架·简中版在售」= 原版的销售页撤了，但同一部作品的简中版还活着，" +
+        "你也已经拥有它，作品本身没有失效；" +
+        "只有「销售页已下架」才是连销售页都没了。");
+      notes.push("不管是哪一种，你买过的东西都不会因为页面消失而失效：" +
+        "购买记录一直在「マイページ → 購入履歴（ダウンロード履歴）」里，" +
+        "DLsite 官方规则是 2016 年以后停售的作品仍可再下载（社团注销账号除外）；" +
+        "DLsite Play 的「My Items」不显示停售作品，所以那边看不到不代表没了。");
     }
     if (result.apiNote) notes.push(result.apiNote);
     notes.push(`对比时共读取了 ${result.pages} 页已购买作品页。`);
