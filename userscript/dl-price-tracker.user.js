@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.89
+// @version      0.6.90
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -14,8 +14,8 @@
 // @supportURL   https://github.com/jiangdaolia/dlsite-best-deal/issues
 // 更新源走 jsDelivr 的 @latest（指向最新 tag）：raw.githubusercontent.com 在部分网络下
 // 连不上或超时，会导致脚本管理器「检查更新」永远拿不到新版本。
-// @updateURL    https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.89/userscript/dl-price-tracker.user.js
-// @downloadURL  https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.89/userscript/dl-price-tracker.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.90/userscript/dl-price-tracker.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@v0.6.90/userscript/dl-price-tracker.user.js
 // ==/UserScript==
 
 (function () {
@@ -25,7 +25,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.89";
+  const APP_VERSION = "0.6.90";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -87,6 +87,11 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.90": [
+      "「算算亏了多少」的「差额」列同时给出人民币：以前只写日元（+1,076円），和页面上的金额对不上，现在写成「+1,076円 ≈ +¥45.84」",
+      "汇总里的「多花」「省下」「合计差额」也一并折成人民币，人民币按本地商品估算的汇率折算，弹窗末尾只留「1 元 ≈ N 円」的说明",
+      "复制的文本版同步带上人民币差额，方便直接贴出来核对",
+    ],
     "0.6.89": [
       "更新地址改用显式版本 tag（@v0.6.89），不再依赖 jsDelivr 的 @latest：@latest 有约 12 小时解析缓存，刚发版时会一直检查不到新版本",
       "以后每个版本都会把 @updateURL/@downloadURL 指到自己的 tag，发出即可用；本次需要手动装一次，之后沿新地址自动更新",
@@ -8748,6 +8753,25 @@
     return purchasedCnyRateMemo;
   }
 
+  // 差额和汇总里的金额也要能直接对上页面上的人民币：折算值跟在日元后面，
+  // 形如「+1,076円 ≈ +¥45.84」。估不出汇率时只返回日元部分，不留半截括号。
+  function purchasedCnyAmountText(yen, rate = null, options = {}) {
+    if (!Number.isFinite(yen)) return "";
+    const resolved = Number.isFinite(rate)
+      ? rate
+      : (typeof purchasedCnyRate === "function" ? purchasedCnyRate() : null);
+    if (!(resolved > 0)) return "";
+    const sign = yen < 0 ? "-" : options.plus && yen > 0 ? "+" : "";
+    return `${sign}¥${(Math.abs(yen) * resolved).toFixed(2)}`;
+  }
+
+  function purchasedYenCnyText(yen, rate = null, options = {}) {
+    if (!Number.isFinite(yen)) return "-";
+    const head = `${options.plus && yen > 0 ? "+" : ""}${toYen(yen)}`;
+    const cny = purchasedCnyAmountText(yen, rate, options);
+    return cny ? `${head} ≈ ${cny}` : head;
+  }
+
   async function persistPurchasedLowest(item) {
     if (!isValidRjCode(item?.rjCode)) return;
     const now = nowIso();
@@ -9504,15 +9528,17 @@
   }
 
   function purchasedLossText(summary, diagnostic = "") {
+    const rate = typeof purchasedCnyRate === "function" ? purchasedCnyRate() : null;
+    const amount = (yen, options = {}) => purchasedYenCnyText(yen, rate, options);
     const lines = [
       "已购买作品｜实付 vs 史低",
       `本页 ${summary.rowsTotal} 部｜计入合计 ${summary.countedCount} 部` +
         `｜未计入 ${summary.missing.length + summary.unparsed.length} 部` +
         `（无史低 ${summary.missing.length}／价格未解析 ${summary.unparsed.length}）`,
       `实付合计 ${toYen(summary.totalPaid)}｜史低合计 ${toYen(summary.totalLowest)}` +
-        `｜差额 ${summary.netDiff > 0 ? "+" : ""}${toYen(summary.netDiff)}`,
-      `比史低贵 ${summary.overpaidCount} 部，多花 ${toYen(summary.overpaidTotal)}` +
-        `；比史低便宜 ${summary.cheaperCount} 部，省 ${toYen(summary.savedTotal)}` +
+        `｜差额 ${summary.netDiff === 0 ? "持平" : amount(summary.netDiff, { plus: true })}`,
+      `比史低贵 ${summary.overpaidCount} 部，多花 ${amount(summary.overpaidTotal)}` +
+        `；比史低便宜 ${summary.cheaperCount} 部，省 ${amount(summary.savedTotal)}` +
         `；持平 ${summary.evenCount} 部`,
       `自检：明细差额之和 ${toYen(summary.diffSum)}` +
         `（与合计差额${summary.selfCheckOk ? "一致" : "不一致"}）`,
@@ -9528,7 +9554,7 @@
         row.typeLabel || "-",
         paid,
         toYen(row.lowest),
-        `${row.diff > 0 ? "+" : ""}${toYen(row.diff)}`,
+        row.diff === 0 ? "持平" : amount(row.diff, { plus: true }),
       ].join("｜"));
     }
     if (summary.missing.length) {
@@ -9592,20 +9618,21 @@
       return node;
     };
     const excluded = summary.missing.length + summary.unparsed.length;
+    const amount = (yen, options = {}) => purchasedYenCnyText(yen, cnyRate, options);
     summaryBox.append(
       chip("本页", `${summary.rowsTotal} 部`),
       chip("计入合计", `${summary.countedCount} 部`),
       chip("比史低贵", `${summary.overpaidCount} 部`, "loss"),
-      chip("多花", toYen(summary.overpaidTotal), "loss"),
+      chip("多花", amount(summary.overpaidTotal), "loss"),
       chip("比史低便宜", `${summary.cheaperCount} 部`, "win"),
-      chip("省下", toYen(summary.savedTotal), "win"),
+      chip("省下", amount(summary.savedTotal), "win"),
       chip("持平", `${summary.evenCount} 部`),
       chip(
         "合计差额",
         summary.netDiff > 0
-          ? `多花 ${toYen(summary.netDiff)}`
+          ? `多花 ${amount(summary.netDiff)}`
           : summary.netDiff < 0
-            ? `省 ${toYen(-summary.netDiff)}`
+            ? `省 ${amount(-summary.netDiff)}`
             : "持平",
         summary.netDiff > 0 ? "loss" : summary.netDiff < 0 ? "win" : "",
       ),
@@ -9620,8 +9647,8 @@
     if (cnyRate) {
       const cny = document.createElement("span");
       cny.className = "is-note";
-      cny.textContent = `约合 ${(Math.abs(summary.netDiff) * cnyRate).toFixed(2)} 元` +
-        `（汇率按本地商品估算：1 元 ≈ ${(1 / cnyRate).toFixed(1)} 円）`;
+      cny.textContent = `人民币金额按本地商品估算的汇率折算：1 元 ≈ ${(1 / cnyRate).toFixed(1)} 円` +
+        "（实际扣款以支付时为准）";
       summaryBox.appendChild(cny);
     }
     if (summary.selfCheckOk === false) {
@@ -9659,11 +9686,9 @@
       else if (row.diff < 0) tr.classList.add("is-win");
       const diffText = options.excluded
         ? "未计入"
-        : row.diff > 0
-          ? `+${toYen(row.diff)}`
-          : row.diff < 0
-            ? `-${toYen(-row.diff)}`
-            : "持平";
+        : row.diff === 0
+          ? "持平"
+          : purchasedYenCnyText(row.diff, cnyRate, { plus: true });
       const cells = [
         String(position + 1),
         row.title ? `${row.id} ${row.title}` : row.id,
@@ -9682,6 +9707,17 @@
           link.rel = "noopener";
           link.textContent = text;
           td.appendChild(link);
+        } else if (cellIndex === 5 && String(text).includes(" ≈ ")) {
+          // 差额列把人民币折到第二行、淡一点：一行塞满「+1,076円 ≈ +¥45.84」
+          // 会把作品名和说明挤成一列字，分行后日元和人民币都看得清。
+          td.className = "is-diff";
+          const [yen, cny] = String(text).split(" ≈ ");
+          const small = document.createElement("small");
+          small.className = "is-cny";
+          small.textContent = `≈ ${cny}`;
+          td.append(document.createTextNode(yen), small);
+          tr.appendChild(td);
+          return;
         } else {
           td.textContent = text;
         }
@@ -15864,6 +15900,14 @@ a.dltracker-browse-analysis-frame {
 .dltracker-purchased-loss-table-wrap td.is-diff {
   white-space: nowrap;
   font-weight: 600;
+}
+
+/* 差额的人民币折算单独占一行，字号小一点，不跟日元抢宽度。 */
+.dltracker-purchased-loss-table-wrap td.is-diff small.is-cny {
+  display: block;
+  font-weight: 400;
+  font-size: 11px;
+  opacity: 0.78;
 }
 
 .dltracker-purchased-loss-table-wrap tr.is-loss td.is-diff {

@@ -53,6 +53,8 @@ const coreSource = () =>
     functionSource("purchasedPaidToYen"),
     functionSource("purchasedLowestFor"),
     functionSource("purchasedLowChipText"),
+    functionSource("purchasedCnyAmountText"),
+    functionSource("purchasedYenCnyText"),
     functionSource("purchasedLossSummary"),
     functionSource("purchasedPriceTable"),
     functionSource("purchasedHeaderCells"),
@@ -629,7 +631,43 @@ test("文本版把未计入的行也列出来，并带上自检结果", () => {
   assert.match(text, /RJ00000003｜游戏｜无料/);
 });
 
-// 用户实际遇到的情况：史低标签被塞进了「支付方式」列，价格列反而是空的。
+// 用户要求：差额也要能直接对上页面上的人民币（页面按 CNY 显示 ¥62.00）。
+test("差额同时给出人民币折算，没有汇率时只留日元", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    ${functionSource("purchasedLossText")}
+    const purchasedCnyRate = () => 0.0426;`);
+  const rows = [
+    { id: "RJ00000001", paid: 1455, typeLabel: "音声" },
+    { id: "RJ00000002", paid: 990, typeLabel: "漫画" },
+    { id: "RJ00000003", paid: 1980, typeLabel: "游戏" },
+  ];
+  const summary = sandbox.purchasedLossSummary(rows, (row) => (
+    row.id === "RJ00000003" ? 1980 : row.id === "RJ00000002" ? 1980 : 379
+  ));
+  const text = sandbox.purchasedLossText(summary);
+  // 1,076 × 0.0426 = 45.8376 → 45.84；-990 × 0.0426 = -42.174 → -42.17。
+  assert.match(text, /\+1,076円 ≈ \+¥45\.84/);
+  assert.match(text, /-990円 ≈ -¥42\.17/);
+  // 差额为 0 时不写「0円 ≈ ¥0.00」，直接说持平。
+  assert.match(text, /RJ00000003｜游戏｜1,980円｜1,980円｜持平/);
+  // 合计差额 = 1,076 - 990 = 86。
+  assert.match(text, /差额 \+86円 ≈ \+¥3\.66/);
+  assert.match(text, /多花 1,076円 ≈ ¥45\.84/);
+  assert.match(text, /省 990円 ≈ ¥42\.17/);
+
+  // 估不出汇率（本地还没有带 CNY 价格的商品）时退回纯日元，不留半截符号。
+  const bare = makeSandbox(`${coreSource()}
+    ${functionSource("purchasedLossText")}
+    const purchasedCnyRate = () => null;`);
+  const bareSummary = bare.purchasedLossSummary(rows, (row) => (
+    row.id === "RJ00000003" ? 1980 : row.id === "RJ00000002" ? 1980 : 379
+  ));
+  const bareText = bare.purchasedLossText(bareSummary);
+  assert.match(bareText, /｜\+1,076円\n/);
+  assert.doesNotMatch(bareText, /¥/);
+});
+
+
 // 根因是列号只按表头文字猜，而数据行的列序和表头不一致（错开一格）。
 test("数据行列序和表头不一致时，史低标签仍落在含金额的价格格", () => {
   const sandbox = makeSandbox(`${coreSource()}
