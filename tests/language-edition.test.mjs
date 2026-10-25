@@ -837,7 +837,7 @@ test("已购页对比按 product_id 提取编号并去重", () => {
   // 已购页对比由脚本同源读取页面，不在该页面注入任何界面。
   assert.match(
     functionSource("buildBoughtCountDiagnostic"),
-    /fetchBoughtPageSnapshot\(\)[\s\S]*?pageIds/,
+    /fetchBoughtPageSnapshot\(\{[\s\S]*?pageIds = snapshot\.ids/,
   );
   assert.doesNotMatch(
     functionSource("buildBoughtCountDiagnostic"),

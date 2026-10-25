@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.95
+// @version      0.6.96
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -31,7 +31,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.95";
+  const APP_VERSION = "0.6.96";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -110,6 +110,13 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.96": [
+      "点「算算亏了多少」时会先把购买历史展开到全部：反复点原站的「もっと見る」直到点不出新行，再结算，不再只算眼前显示的那几条",
+      "展开时会在工具栏显示进度（第几次、已经多少条），展开完再开始读史低；点了没新行就立刻收手，不会无限点",
+      "展开用的是「先挡住默认跳转再点」的方式，链到下一页的链接不会把整页带走；最多点 30 次、60 秒",
+      "「已购清单核对」和读取账号信息时如果就在已购买作品页，也会先展开再读；远程读到的页面若还需要展开，会提示「页面需展开才能读全」",
+      "翻页上限从 6 页放宽到 12 页，条目多的账号不会在翻页阶段被截断",
+    ],
     "0.6.95": [
       "读取账号信息时，会先同源读一次「已购买作品页」（含翻页），只针对页面上真正列出的作品读取：接口里多出来的跨分区、已下架、被 302 到主编号的旧编号不再进读取队列，也不计入「已购买」数量",
       "账号信息里的「已购买」现在和页面上看到的条数一致；多出来的条目单独标成「页面未列 N 条」，并附上页面自己写的「全 N 件」和已购页读取状态",
@@ -3552,6 +3559,11 @@
           pageSnapshot = await fetchBoughtPageSnapshot({
             seedDoc: onPurchasedPage ? document : null,
             startUrl: onPurchasedPage ? location.href : null,
+            onExpandProgress: (clicks, rows) => {
+              setAccountReadRuntime({
+                detail: `展开购买历史（第 ${clicks} 次，${rows} 条）`,
+              });
+            },
           });
         } catch (error) {
           pageNote = `已购买作品页读取失败：${
@@ -3563,6 +3575,8 @@
       const pageSet = new Set(pageIds);
       if (!pageIds.length && !pageNote) {
         pageNote = "已购买作品页没有解析到作品编号";
+      } else if (pageIds.length && pageSnapshot.expandBlocked) {
+        pageNote = "已购页需要展开才能读全，请到已购买作品页上再读一次";
       } else if (pageIds.length && pageSnapshot.complete === false) {
         pageNote = `只读到 ${pageSnapshot.pages} 页，页面未读全`;
       }
@@ -8496,14 +8510,125 @@
     return matched ? matched[0].trim() : "";
   }
 
+  // ---- 「购买历史展开到全部」----
+  // 已购买作品页默认只显示最近一批，底部还有「もっと見る」这类加载更多控件；
+  // 不展开就去读，结算和清单都只覆盖眼前这几行（用户要求：展开到全部后再读取）。
+  const PURCHASED_MORE_TEXT_RE = /もっと(?:見|み)る|もっと(?:見|み)たい|さらに(?:表示|見る|読み込む)|すべて(?:を)?(?:表示|見る)|全て(?:を)?(?:表示|見る)|続きを(?:見|読)む|読み込む|show\s*more|load\s*more|view\s*more|展开更多|查看更多|显示更多|加载更多|全部展开/i;
+  const PURCHASED_EXPAND_MAX_CLICKS = 30;
+  const PURCHASED_EXPAND_STEP_TIMEOUT_MS = 6000;
+  const PURCHASED_EXPAND_TOTAL_TIMEOUT_MS = 60000;
+
+  // 页面上「加载更多」的那一个控件。文本要短、指向本页或本页参数，
+  // 否则容易误点导航里的「もっと見る」（作品推荐位也有同名链接）。
+  function purchasedMoreControl(doc = document) {
+    if (!doc?.querySelectorAll) return null;
+    for (const node of doc.querySelectorAll("a, button")) {
+      if (node.closest?.(`.${PURCHASED_TOOLBAR_CLASSNAME}`)) continue;
+      const text = String(node.textContent || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 24) continue;
+      if (!PURCHASED_MORE_TEXT_RE.test(text)) continue;
+      const href = String(node.getAttribute?.("href") || "");
+      if (href && !/^(?:#|javascript:)/i.test(href) &&
+        !/userbuy|mypage|page=/i.test(href)) continue;
+      if (node.hasAttribute?.("disabled") ||
+        node.getAttribute?.("aria-disabled") === "true") continue;
+      return node;
+    }
+    return null;
+  }
+
+  function purchasedVisibleRowCount(doc) {
+    if (!doc?.querySelectorAll) return 0;
+    const table = purchasedPriceTable(doc);
+    if (table) return table.querySelectorAll('a[href*="product_id/"]').length;
+    return doc.querySelectorAll('a[href*="product_id/"]').length;
+  }
+
+  async function waitForPurchasedRows(doc, target, timeoutMs) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (purchasedVisibleRowCount(doc) >= target) return true;
+      await sleep(200);
+    }
+    return purchasedVisibleRowCount(doc) >= target;
+  }
+
+  // 反复点「もっと見る」直到点不出新行或超时。
+  // 只点原站自己的控件，不注入任何界面；点了没长出新行的立刻收手，避免死循环。
+  async function expandPurchasedListFully(doc = document, options = {}) {
+    const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+    const maxClicks = Number.isFinite(options.maxClicks)
+      ? Math.max(0, options.maxClicks)
+      : PURCHASED_EXPAND_MAX_CLICKS;
+    const totalTimeoutMs = Number.isFinite(options.totalTimeoutMs)
+      ? options.totalTimeoutMs
+      : PURCHASED_EXPAND_TOTAL_TIMEOUT_MS;
+    let rows = purchasedVisibleRowCount(doc);
+    const result = { clicks: 0, rows, stopped: "" };
+    if (!doc?.querySelectorAll) {
+      result.stopped = "no-document";
+      return result;
+    }
+    const deadline = Date.now() + totalTimeoutMs;
+    while (result.clicks < maxClicks) {
+      const control = purchasedMoreControl(doc);
+      if (!control) break;
+      const before = rows;
+      try {
+        // 用「先 preventDefault 再派发」的方式点：如果这个是链到下一页的 <a>，
+        // 导航会被挡掉（否则点一下整页就跳走了），原站自己的 click 监听照常跑。
+        const view = doc.defaultView ||
+          (typeof window !== "undefined" ? window : null);
+        const EventCtor = view?.MouseEvent ||
+          (typeof MouseEvent === "function" ? MouseEvent : null);
+        if (EventCtor) {
+          const event = new EventCtor("click", {
+            bubbles: true,
+            cancelable: true,
+            view,
+          });
+          event.preventDefault();
+          control.dispatchEvent(event);
+        } else {
+          control.click();
+        }
+      } catch (error) {
+        console.warn(`[${APP_NAME}] purchased more click failed:`, error);
+        result.stopped = "click-failed";
+        break;
+      }
+      result.clicks += 1;
+      const waitMs = Math.min(
+        PURCHASED_EXPAND_STEP_TIMEOUT_MS,
+        Math.max(500, deadline - Date.now()),
+      );
+      await waitForPurchasedRows(doc, before + 1, waitMs);
+      rows = purchasedVisibleRowCount(doc);
+      result.rows = rows;
+      if (onProgress) onProgress(result.clicks, rows);
+      if (rows <= before) {
+        result.stopped = "no-growth";
+        break;
+      }
+      if (Date.now() >= deadline) {
+        result.stopped = "timeout";
+        break;
+      }
+    }
+    if (!result.stopped && result.clicks >= maxClicks) result.stopped = "max-clicks";
+    return result;
+  }
+
   // 已购买作品页禁止注入任何界面，所以改为同源读取该页 HTML 再解析，
   // 拿页面实际列出的编号与筛选条件，和已购接口清单做差集。
-  // seedDoc 传入「眼前这份 DOM」时第一页不再重复请求；startUrl 用当前地址，
-  // 这样页面上已经选好的月份/类型筛选会被带进翻页对比。
+  // seedDoc 传入「眼前这份 DOM」时第一页不再重复请求（并先在真实页面上把列表展开到全部）；
+  // startUrl 用当前地址，这样页面上已经选好的月份/类型筛选会被带进翻页对比。
   async function fetchBoughtPageSnapshot({
-    maxPages = 6,
+    maxPages = 12,
     seedDoc = null,
     startUrl = null,
+    expand = true,
+    onExpandProgress = null,
   } = {}) {
     const section = currentDlsiteSection();
     const firstUrl = startUrl || new URL(`/${section}/mypage/userbuy`, location.origin).toString();
@@ -8511,6 +8636,10 @@
     let filters = [];
     let totalText = "";
     let pages = 0;
+    let expanded = { clicks: 0, rows: 0, stopped: "" };
+    // 远程抓来的 HTML 里如果还挂着「もっと見る」按钮（纯 JS、没有对应链接），
+    // 说明这一页本来就只显示了一部分，翻页也补不回来，要告诉调用方。
+    let expandBlocked = false;
     const visited = new Set();
     const queue = [firstUrl];
     while (queue.length && pages < maxPages) {
@@ -8520,6 +8649,17 @@
       let doc = null;
       if (seedDoc && !pages) {
         doc = seedDoc;
+        // 用户要求「购买历史要展开到全部后读取」：眼前这页只显示了一部分，
+        // 先把原站的「もっと見る」点到消失，再解析，否则结算/清单只覆盖前几条。
+        if (expand) {
+          try {
+            expanded = await expandPurchasedListFully(doc, {
+              onProgress: onExpandProgress,
+            });
+          } catch (error) {
+            console.warn(`[${APP_NAME}] purchased expand failed:`, error);
+          }
+        }
       } else {
         let html = "";
         try {
@@ -8529,6 +8669,7 @@
           break;
         }
         doc = new DOMParser().parseFromString(html, "text/html");
+        if (purchasedMoreControl(doc)) expandBlocked = true;
       }
       pages += 1;
       if (pages === 1) {
@@ -8547,7 +8688,15 @@
     }
     // 队列还有没读的页说明 maxPages 被截断了，数量会比页面真实条数少，
     // 调用方要据此提示「未读全」，不能当成页面全量用。
-    return { ids, filters, pages, totalText, complete: queue.length === 0 };
+    return {
+      ids,
+      filters,
+      pages,
+      totalText,
+      complete: queue.length === 0,
+      expanded,
+      expandBlocked,
+    };
   }
 
   // ---- 已购买作品页：史低标注 + 「亏了多少」结算 ----
@@ -9209,18 +9358,32 @@
       if (Date.now() - purchasedLowBusySince < PURCHASED_LOW_BUSY_TIMEOUT_MS) return;
       purchasedLowBusy = false;
     }
-    const { table, rows } = purchasedRowsFromRoot(document);
-    if (!table || !rows.length) {
-      setPurchasedToolbarStatus("没读到作品行，刷新页面后再点");
-      return;
-    }
     purchasedLowBusy = true;
     purchasedLowBusySince = Date.now();
     const button = document.querySelector(
       `.${PURCHASED_TOOLBAR_CLASSNAME} .dltracker-purchased-loss-button`,
     );
     if (button) button.disabled = true;
+    let table = null;
     try {
+      // 用户要求「购买历史要展开到全部后读取」：这一页默认只列出最近一批，
+      // 先点原站的「もっと見る」到点不出新行为止，否则结算只覆盖眼前几行。
+      setPurchasedToolbarStatus("展开购买历史…");
+      const expanded = await expandPurchasedListFully(document, {
+        onProgress: (clicks, rows) => {
+          setPurchasedToolbarStatus(`展开购买历史（第 ${clicks} 次，${rows} 条）`);
+        },
+      });
+      const parsed = purchasedRowsFromRoot(document);
+      table = parsed.table;
+      const rows = parsed.rows;
+      if (expanded.clicks) {
+        setPurchasedToolbarStatus(`已展开 ${rows.length} 条`);
+      }
+      if (!table || !rows.length) {
+        setPurchasedToolbarStatus("没读到作品行，刷新页面后再点");
+        return;
+      }
       // 已经全部命中缓存（例如刚点过一次）就不必再跑进度，直接出结果。
       if (rows.every((row) => purchasedLowestFor(row.id))) {
         purchasedLowStartedFor = table;
@@ -10488,11 +10651,21 @@
       );
     } else if (isDlsiteMemberLoggedIn()) {
       try {
-        const snapshot = await fetchBoughtPageSnapshot();
+        // 就在已购买作品页时复用眼前 DOM 并展开到全部，否则远程抓（翻页 + 提示需展开）。
+        const onPurchasedPage = isPurchasedWorksPage(location.href) && !location.search;
+        const snapshot = await fetchBoughtPageSnapshot({
+          seedDoc: onPurchasedPage ? document : null,
+          startUrl: onPurchasedPage ? location.href : null,
+        });
         if (snapshot.ids.length) {
           pageIds = snapshot.ids;
           pageFilters = snapshot.filters;
           if (snapshot.pages > 1) pageNote = `共 ${snapshot.pages} 页`;
+          if (snapshot.expanded?.clicks) {
+            pageNote = `${pageNote ? `${pageNote}；` : ""}已展开 ${snapshot.expanded.clicks} 次` +
+              `→ ${snapshot.expanded.rows} 条`;
+          }
+          if (snapshot.expandBlocked) pageNote = `${pageNote ? `${pageNote}；` : ""}页面需展开才能读全`;
         } else {
           pageNote = "已购买作品页没有解析到作品编号（可能未登录或页面结构变化）";
         }
