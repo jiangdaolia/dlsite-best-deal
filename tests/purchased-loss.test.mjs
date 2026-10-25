@@ -37,6 +37,7 @@ function makeSandbox(extraSource = "") {
 
 const coreSource = () =>
   [
+    'const PURCHASED_PRICE_HEADER_RE = /価格|价格|價格|料金|price/i;',
     functionSource("parseAmountInfo"),
     functionSource("parseYenAmount"),
     functionSource("purchasedPaidToYen"),
@@ -44,7 +45,12 @@ const coreSource = () =>
     functionSource("purchasedLowChipText"),
     functionSource("purchasedLossSummary"),
     functionSource("purchasedPriceTable"),
+    functionSource("purchasedHeaderCells"),
     functionSource("purchasedPriceColumnIndex"),
+    functionSource("purchasedPriceHeaderCell"),
+    functionSource("purchasedAmountFromText"),
+    functionSource("purchasedCurrencyHint"),
+    functionSource("purchasedRowPriceCell"),
     functionSource("purchasedCellText"),
     functionSource("purchasedRowsFromRoot"),
   ].join("\n");
@@ -606,4 +612,82 @@ test("文本版把未计入的行也列出来，并带上自检结果", () => {
   assert.match(text, /自检：明细差额之和 .*（与合计差额一致）/);
   assert.match(text, /价格未解析（未计入）：/);
   assert.match(text, /RJ00000003｜无料/);
+});
+
+// 用户实际遇到的情况：史低标签被塞进了「支付方式」列，价格列反而是空的。
+// 根因是列号只按表头文字猜，而数据行的列序和表头不一致（错开一格）。
+test("数据行列序和表头不一致时，史低标签仍落在含金额的价格格", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
+    const purchasedLowCache = new Map();
+    const purchasedCnyRate = () => 0.05;`);
+  const cell = (tagName, textContent) => ({ tagName, textContent });
+  // 表头把「价格」写在「支付方式」前面，数据行却是支付方式在前、价格在后。
+  const header = {
+    cells: [cell("TH", "作品名"), cell("TH", "价格（含税）"), cell("TH", "支付方式")],
+    querySelector: () => null,
+  };
+  const row = (href, title, payment, price) => ({
+    cells: [cell("TD", title), cell("TD", payment), cell("TD", price)],
+    getAttribute: () => null,
+    setAttribute() {},
+    querySelector: (selector) => (selector.includes("product_id") && href
+      ? { getAttribute: () => href, textContent: title, href: `https://www.dlsite.com${href}` }
+      : null),
+  });
+  const rows = [
+    header,
+    row("/girls/work/=/product_id/RJ00000001.html", "作品甲", "クレジットカード", "¥62.00"),
+    row("/girls/work/=/product_id/RJ00000002.html", "作品乙", "PayPay", "¥52.60"),
+  ];
+  const table = {
+    rows,
+    parentElement: null,
+    querySelectorAll: (selector) => {
+      if (selector === "tr") return rows;
+      if (selector.includes("product_id/")) return [rows[1], rows[2]];
+      return [];
+    },
+  };
+  const result = sandbox.purchasedRowsFromRoot({ querySelectorAll: () => [table] });
+  // 金额只出现在第 3 列，列号必须跟着金额走，而不是跟着表头文字。
+  assert.equal(result.priceIndex, 2);
+  assert.deepEqual([...result.rows].map((item) => item.cell.textContent), ["¥62.00", "¥52.60"]);
+  assert.deepEqual([...result.rows].map((item) => item.paidRaw), ["¥62.00", "¥52.60"]);
+  // 人民币折算成日元后才有可比性：62 / 0.05 = 1240。
+  assert.deepEqual([...result.rows].map((item) => Math.round(item.paid)), [1240, 1052]);
+});
+
+test("工具栏按钮挂在表头「价格」那一格，不会落在别的列", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    globalThis.headerCell = purchasedPriceHeaderCell;`);
+  const cell = (tagName, textContent) => ({ tagName, textContent });
+  const priceCell = cell("TH", "价格（含税）");
+  const table = {
+    rows: [{ cells: [cell("TH", "作品名"), cell("TH", "支付方式"), priceCell] }],
+  };
+  // 列号是从别处算出来的（这里故意给 1），也要按表头文字挂到价格列。
+  assert.equal(sandbox.headerCell(table, 1), priceCell);
+  assert.equal(sandbox.headerCell(table, -1), priceCell);
+  // 表头没有「价格」字样时才退回列号。
+  const bare = { rows: [{ cells: [cell("TH", "作品名"), cell("TH", "金額")] }] };
+  assert.equal(sandbox.headerCell(bare, 1)?.textContent, "金額");
+});
+
+test("价格格只剩裸数字时也能认出来，且不把支付方式当金额", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    globalThis.amountFromText = purchasedAmountFromText;`);
+  const parse = sandbox.amountFromText;
+  // 没有币种符号时按写法判断：整数当日元，两位小数当人民币。
+  assert.deepEqual([parse("1,980").amount, parse("1,980").currency], [1980, "JPY"]);
+  assert.deepEqual([parse("62.00").amount, parse("62.00").currency], [62, "CNY"]);
+  // 页面已经指定货币时以页面为准。
+  assert.deepEqual([parse("62.00", "JPY").amount, parse("62.00", "JPY").currency], [62, "JPY"]);
+  // 支付方式、日期这类文本不能被当成金额。
+  assert.equal(parse("クレジットカード").amount, null);
+  assert.equal(parse("2024/05/01").amount, null);
+  assert.equal(parse("").amount, null);
 });

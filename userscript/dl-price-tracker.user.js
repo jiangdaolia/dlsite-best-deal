@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.86
+// @version      0.6.87
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -25,7 +25,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.86";
+  const APP_VERSION = "0.6.87";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -87,6 +87,12 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.87": [
+      "修史低标签被塞进「支付方式」列：以前只按表头文字算价格列在第几列，数据行的列序和表头错开一格时就整体偏移，标签和按钮都挂错了列",
+      "价格列改为逐行按「哪一格真的有金额」定位，表头列号只用于在多个候选之间排序；带币种的金额优先，裸数字只在整格就是一个短数字时才认",
+      "「算算亏了多少」按钮也按表头里的「価格/价格/價格」那一格挂；已经挂错列的工具栏会被自动搬回价格列",
+      "价格列原文诊断块增加表头各列标题与整行各列原文，列序再错位也能一眼看出金额落在第几列",
+    ],
     "0.6.86": [
       "修「表格里的数和最后算的合计对不上」：实付与史低现在都先取整成整数円再逐行相减、逐行累加，表格「差额」列加起来一定等于合计差额",
       "修二次解析被污染：史低标签注入价格格后，「史低379 JPY」会被当成实付金额，导致该行差额变 0；现在把价格原文记在行属性上，解析只读原文",
@@ -8304,6 +8310,8 @@
   // 二次解析（弹窗、重复点击）必须从这份原文取数，否则「史低379 JPY」会被当成实付。
   const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
   const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
+  // 已购页表头里「价格」那一列的字样：日文界面是「価格（税込）」，中文界面是「价格（含税）」。
+  const PURCHASED_PRICE_HEADER_RE = /価格|价格|價格|料金|price/i;
   const PURCHASED_TOOLBAR_CLASSNAME = "dltracker-purchased-toolbar";
   const PURCHASED_LOSS_OVERLAY_CLASSNAME = "dltracker-purchased-loss-overlay";
   const PURCHASED_LOW_BATCH_SIZE = 5;
@@ -8368,13 +8376,56 @@
     return best;
   }
 
-  function purchasedPriceColumnIndex(table) {
+  // 表头行不一定是第一行（上面可能还有筛选/合计行），取第一张有 TH 的行。
+  function purchasedHeaderCells(table) {
     const rows = [...(table?.rows || [])];
     const header = rows.find((row) =>
-      [...(row.cells || [])].some((cell) => cell.tagName === "TH"));
-    if (!header) return -1;
-    return [...header.cells].findIndex((cell) =>
-      /価格|价格|價格|price/i.test(cell.textContent || ""));
+      [...(row.cells || [])].some((cell) =>
+        String(cell?.tagName || "").toUpperCase() === "TH")) || rows[0] || null;
+    return header ? [...(header.cells || [])] : [];
+  }
+
+  // 列号只作为「参考」：已购页的数据行首列有时带 colspan/rowspan，
+  // 列序会和表头错开一格，光靠表头文字会把史低标签塞进「支付方式」列。
+  // 所以这里先用表头取候选，再用「这一列有多少行真能解析出金额」复核。
+  function purchasedPriceColumnIndex(table) {
+    const headerCells = purchasedHeaderCells(table);
+    const labelIndex = headerCells.findIndex((cell) =>
+      PURCHASED_PRICE_HEADER_RE.test(cell.textContent || ""));
+    const counts = new Map();
+    for (const row of [...(table?.rows || [])]) {
+      if (!row.querySelector?.('a[href*="product_id/"]')) continue;
+      [...(row.cells || [])].forEach((cell, index) => {
+        if (parseAmountInfo(purchasedCellText(cell)).amount === null) return;
+        counts.set(index, (counts.get(index) || 0) + 1);
+      });
+    }
+    let bestIndex = -1;
+    let bestCount = 0;
+    for (const [index, count] of counts) {
+      if (count > bestCount) {
+        bestIndex = index;
+        bestCount = count;
+      }
+    }
+    if (labelIndex >= 0 && (counts.get(labelIndex) || 0) > 0) {
+      // 表头指的列确实有金额，但若另一列金额覆盖得更全（表头错位一格），以覆盖全的为准。
+      if (bestIndex >= 0 && bestCount > (counts.get(labelIndex) || 0)) return bestIndex;
+      return labelIndex;
+    }
+    if (bestIndex >= 0) return bestIndex;
+    return labelIndex;
+  }
+
+  // 按钮要挂在「价格（含税）」那一列表头上，所以先按表头文字找，
+  // 找不到再退回统计出来的列号。
+  function purchasedPriceHeaderCell(table, priceIndex = -1) {
+    const cells = purchasedHeaderCells(table);
+    const byLabel = cells.find((cell) =>
+      PURCHASED_PRICE_HEADER_RE.test(cell.textContent || ""));
+    if (byLabel) return byLabel;
+    if (priceIndex >= 0 && cells[priceIndex]) return cells[priceIndex];
+    return null;
   }
 
   // 已购页在中文界面下按人民币显示；史低永远是日元，所以这里统一折算成日元再比较，
@@ -8412,10 +8463,75 @@
       .trim();
   }
 
+  // 有些语言/货币组合下价格格只剩「1,980」「62.00」这种不带币种的数字。
+  // 这种写法只在「整格就是一个金额」时才认，避免把数量、日期当成价格。
+  function purchasedAmountFromText(value, hint = "") {
+    const info = parseAmountInfo(value);
+    if (Number.isFinite(info.amount)) return info;
+    const text = String(value ?? "").replace(/[\u00a0\u3000]/g, " ").trim();
+    const matched = text.match(/^[¥￥]?\s*([0-9][0-9,，]*(?:\.[0-9]+)?)\s*(?:元|円|日元|JPY|CNY)?$/i);
+    if (!matched) return { amount: null, currency: "", raw: "" };
+    const amount = Number(matched[1].replace(/[,，]/g, ""));
+    if (!Number.isFinite(amount)) return { amount: null, currency: "", raw: "" };
+    let currency = "";
+    if (/元/.test(text)) currency = "CNY";
+    else if (/円|日元|JPY/i.test(text)) currency = "JPY";
+    else if (/CNY/i.test(text)) currency = "CNY";
+    else if (hint) currency = hint;
+    // 只有裸数字时按小数位猜：两位小数更像人民币，整数更像日元。
+    else currency = /\./.test(matched[1]) ? "CNY" : "JPY";
+    return { amount, currency, raw: text };
+  }
+
+  // 页面当前用哪种货币结算（中文界面的已购页是 currency=CNY）。
+  // 只用来给「裸数字」兜底，拿不到就按日元处理。
+  function purchasedCurrencyHint() {
+    try {
+      if (typeof location !== "undefined" && location?.search) {
+        const value = new URLSearchParams(location.search).get("currency");
+        if (value) return String(value).toUpperCase();
+      }
+    } catch (error) {
+      console.warn(`[${APP_NAME}] currency hint failed:`, error);
+    }
+    return "";
+  }
+
+  // 逐行定位「价格（含税）」那一格：以「这一格里真的有金额」为准，
+  // 表头列号只在多个候选之间决定优先级。这样即使数据行列序和表头错开一格，
+  // 史低标签也不会再被塞进「支付方式」列。
+  function purchasedRowPriceCell(tr, priceIndex = -1, hint = "") {
+    const cells = [...(tr?.cells || [])];
+    if (!cells.length) return null;
+    const picked = [];
+    cells.forEach((cell, index) => {
+      const text = purchasedCellText(cell);
+      // 带币种的金额最可信；裸数字容易和数量、日期混淆，只认「整格就是一个短数字」。
+      if (Number.isFinite(parseAmountInfo(text).amount)) {
+        picked.push({ cell, index, level: 2 });
+        return;
+      }
+      if (text.length > 12) return;
+      if (Number.isFinite(purchasedAmountFromText(text, hint).amount)) {
+        picked.push({ cell, index, level: 1 });
+      }
+    });
+    if (!picked.length) {
+      return priceIndex >= 0 ? cells[priceIndex] || null : null;
+    }
+    const atPrice = picked.find((item) => item.index === priceIndex);
+    const trusted = picked.filter((item) => item.level === 2);
+    // 表头指的那一格只有在「本来是金额」或「整行都没有带币种的金额」时才优先。
+    if (atPrice && (atPrice.level === 2 || !trusted.length)) return atPrice.cell;
+    if (trusted.length) return trusted[trusted.length - 1].cell;
+    return picked[picked.length - 1].cell;
+  }
+
   function purchasedRowsFromRoot(root = document) {
     const table = purchasedPriceTable(root);
     if (!table) return { table: null, priceIndex: -1, rows: [] };
     const priceIndex = purchasedPriceColumnIndex(table);
+    const hint = purchasedCurrencyHint();
     const rows = [];
     for (const tr of table.querySelectorAll("tr")) {
       const link = tr.querySelector('a[href*="product_id/"]');
@@ -8424,19 +8540,20 @@
       if (!matched) continue;
       const id = matched[1].toUpperCase();
       if (rows.some((row) => row.id === id)) continue;
-      const cell = priceIndex >= 0 ? tr.cells?.[priceIndex] || null : null;
+      const cell = purchasedRowPriceCell(tr, priceIndex, hint);
       // 注入史低后单元格文本会被污染，所以优先用第一次解析时记下的原文。
       const storedRaw = tr.getAttribute(PURCHASED_PAID_RAW_ATTRIBUTE);
       const rawText = storedRaw !== null && storedRaw !== undefined
         ? String(storedRaw).replace(/\s+/g, " ").trim()
         : purchasedCellText(cell);
       const stored = tr.getAttribute(PURCHASED_PAID_ATTRIBUTE);
+      const parsedAmount = purchasedAmountFromText(rawText, hint);
       let amount = stored !== null && stored !== ""
         ? Number(stored)
-        : parseAmountInfo(rawText).amount;
+        : parsedAmount.amount;
       let currency = stored !== null && stored !== ""
         ? (tr.getAttribute(PURCHASED_PAID_CURRENCY_ATTRIBUTE) || "")
-        : parseAmountInfo(rawText).currency;
+        : parsedAmount.currency;
       if (!Number.isFinite(amount)) amount = null;
       // 老版本只写过日元金额，没有币种属性；那时页面也只会显示日元。
       if (amount !== null && !currency) currency = "JPY";
@@ -8720,11 +8837,13 @@
   }
 
   function ensurePurchasedToolbar(table, priceIndex, rows) {
+    const host = purchasedPriceHeaderCell(table, priceIndex);
     let toolbar = document.querySelector(`.${PURCHASED_TOOLBAR_CLASSNAME}`);
+    if (toolbar && host && toolbar.parentElement !== host) {
+      // 旧版本在列序错位时把工具栏挂到了「支付方式」列，这里搬回价格列。
+      host.appendChild(toolbar);
+    }
     if (!toolbar) {
-      const header = [...(table?.rows || [])].find((row) =>
-        [...(row.cells || [])].some((cell) => cell.tagName === "TH"));
-      const host = priceIndex >= 0 ? header?.cells?.[priceIndex] || null : null;
       toolbar = document.createElement("div");
       toolbar.className = PURCHASED_TOOLBAR_CLASSNAME;
       const button = document.createElement("button");
@@ -9305,19 +9424,33 @@
   }
 
   // 价格列解析不到金额时，把表头与几行单元格原文摊出来：用户复制这一块就能定位格式。
-  function purchasedPriceDiagnosticText(rows, priceIndex = -1) {
+  function purchasedPriceDiagnosticText(rows, priceIndex = -1, table = null) {
     const list = Array.isArray(rows) ? rows : [];
+    const headerCells = table ? purchasedHeaderCells(table) : [];
     const lines = [
       priceIndex >= 0
         ? `价格列：第 ${priceIndex + 1} 列`
         : "没定位到「价格」列（表头里没有 価格/价格/價格/price 字样）",
       `本页作品行：${list.length}`,
     ];
+    if (headerCells.length) {
+      lines.push(`表头：${headerCells
+        .map((cell, index) => `${index + 1}.${
+          String(cell?.textContent || "").replace(/\s+/g, " ").trim().slice(0, 14) || "-"}`)
+        .join(" ｜ ")}`);
+    }
     const samples = list.slice(0, 5).map((row) => {
       const text = String(row?.paidRaw || "").slice(0, 48);
       return `${row?.id || "?"}｜${text || "（空）"}${row?.currency ? `｜${row.currency}` : ""}`;
     });
     if (samples.length) lines.push("价格列原文：", ...samples.map((line) => `  ${line}`));
+    // 列序和表头错开时，从整行原文里能一眼看出金额到底落在第几列。
+    const wide = list.slice(0, 2).map((row) => {
+      const cells = [...(row?.tr?.cells || [])].map((cell, index) =>
+        `${index + 1}:${purchasedCellText(cell).slice(0, 18) || "-"}`);
+      return `${row?.id || "?"}｜${cells.join(" ｜ ")}`;
+    });
+    if (wide.length) lines.push("整行各列原文：", ...wide.map((line) => `  ${line}`));
     return lines.join("\n");
   }
 
@@ -9366,9 +9499,9 @@
 
   function openPurchasedLossDialog() {
     closePurchasedLossDialog();
-    const { rows, priceIndex } = purchasedRowsFromRoot(document);
+    const { table: pageTable, rows, priceIndex } = purchasedRowsFromRoot(document);
     const summary = purchasedLossSummary(rows);
-    const diagnostic = purchasedPriceDiagnosticText(rows, priceIndex);
+    const diagnostic = purchasedPriceDiagnosticText(rows, priceIndex, pageTable);
     const cnyRate = purchasedCnyRate();
     const overlay = document.createElement("div");
     overlay.className = `dltracker-reach-overlay ${PURCHASED_LOSS_OVERLAY_CLASSNAME}`;
