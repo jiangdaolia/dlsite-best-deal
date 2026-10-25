@@ -10,6 +10,8 @@
 
 桌面端可使用 Tampermonkey、Violentmonkey 等用户脚本管理器；Via 等支持 `.user.js` 的手机浏览器可直接打开安装链接。脚本包含 `@updateURL` 与 `@downloadURL`，实际更新行为由脚本管理器决定。
 
+每个版本都会在 [Releases](https://github.com/jiangdaolia/dlsite-best-deal/releases) 打 tag 并附上 `dl-price-tracker.user.js` 附件；脚本管理器没自动更新时，打开对应 Release 的附件链接重装一次即可，不会产生重复脚本。
+
 日常使用只需安装主脚本 `userscript/dl-price-tracker.user.js`。`userscript/dlsite-coupon-reader.user.js` 是诊断工具，与主脚本同时启用会在购物车页产生重复读取和重复展示。
 
 ## 主要功能
