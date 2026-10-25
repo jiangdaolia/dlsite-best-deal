@@ -6,7 +6,7 @@
 
 ## 安装
 
-**[安装 DLsite 优惠助手 + 史低](https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/56eb42eb7348315ed58282eeb7777148cf16e023/userscript/dl-price-tracker.user.js)**
+**[安装 DLsite 优惠助手 + 史低](https://raw.githubusercontent.com/jiangdaolia/dlsite-best-deal/214491ec9ebe035afb006969266243e990d94e94/userscript/dl-price-tracker.user.js)**
 
 桌面端可使用 Tampermonkey、Violentmonkey 等用户脚本管理器；Via 等支持 `.user.js` 的手机浏览器可直接打开安装链接。脚本包含 `@updateURL` 与 `@downloadURL`，实际更新行为由脚本管理器决定。
 
@@ -22,6 +22,7 @@
 - `优惠券和平台活动`按钮可分别选择一种平台活动和一种优惠券；同时选择时按适用作品交集筛选，两项都不选时显示全部。
 - 比较同一作品的不同语言版本，显示各版本理论最低价，并提醒已购买、已在购物车或稍后再买的同语言/其他语言版本。
 - `账号信息`与购物车页的`读取账号信息`悬浮按钮可读取优惠券、购物车和已购清单，差分更新本地语言家族索引，并在读完后重算当前页优惠金额；账号数据只在点击时读取，页面不会自动发起账号请求。
+- 已购买作品页在`价格（含税）`列补上每部的历史最低价，并在该列表头提供`算算亏了多少`：逐条对比实付与史低，算出比史低贵了多少、一共多花多少。
 
 ## 使用要点
 
