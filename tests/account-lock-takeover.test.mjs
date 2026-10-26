@@ -19,8 +19,8 @@ function functionSource(name) {
 
 const LOCK_KEY = "dltracker-account-index-lock-v1";
 
-function createTab({ tabId, store, clock, rand }) {
-  const localStorage = {
+function makeLocalStorage(store) {
+  return {
     getItem(key) {
       return store.has(key) ? store.get(key) : null;
     },
@@ -31,6 +31,10 @@ function createTab({ tabId, store, clock, rand }) {
       store.delete(key);
     },
   };
+}
+
+function createTab({ tabId, store, clock, rand }) {
+  const localStorage = makeLocalStorage(store);
   const sandbox = {
     localStorage,
     nowMs: () => clock.value,
@@ -195,6 +199,140 @@ test("旧页面迟到写入：赢家仍视为持锁，并在下次续约盖回",
   clock.value += 1000;
   assert.equal(tabB.renewAccountIndexLock(claimB), true);
   assert.equal(readLock(store).owner, "tab-b");
+});
+
+// 崩溃（渲染进程被系统强杀）与「正常关闭」的区别：没有 pagehide、没有释放、
+// 也没有 storage 事件。接管必须完全不依赖上一页还活着。
+test("另一页崩溃：不续约也不释放，本页照样能接管和续约", () => {
+  const store = new Map();
+  const clock = { value: 6_000_000 };
+  const deadTab = createTab({ tabId: "tab-dead", store, clock, rand: () => 0.2 });
+  deadTab.setClaim(deadTab.acquireAccountIndexLock());
+  assert.equal(readLock(store).owner, "tab-dead");
+
+  // 此后崩溃页再没有任何动作：不续约、不释放、不发事件。
+  const liveTab = createTab({ tabId: "tab-live", store, clock, rand: () => 0.7 });
+  clock.value += 3_000;
+  const claimLive = liveTab.acquireAccountIndexLock({ takeover: true });
+  assert.ok(claimLive, "崩溃页没释放的活跃租约不应挡住接管");
+  liveTab.setClaim(claimLive);
+  assert.equal(readLock(store).owner, "tab-live");
+  clock.value += 5_000;
+  assert.equal(liveTab.renewAccountIndexLock(claimLive), true);
+
+  // 租约自然过期后，新页面连 takeover 都不用。
+  clock.value += 120_000;
+  const freshTab = createTab({ tabId: "tab-fresh", store, clock, rand: () => 0.9 });
+  const claimFresh = freshTab.acquireAccountIndexLock();
+  assert.ok(claimFresh, "崩溃页的租约过期后应能直接获取");
+  freshTab.setClaim(claimFresh);
+  assert.equal(readLock(store).owner, "tab-fresh");
+});
+
+function createWatchTab({ tabId, store, clock }) {
+  const timers = [];
+  const state = { refreshes: 0 };
+  let seq = 0;
+  const sandbox = {
+    localStorage: makeLocalStorage(store),
+    nowMs: () => clock.value,
+    setTimeout(fn, delay) {
+      seq += 1;
+      timers.push({ id: seq, fn, delay });
+      return seq;
+    },
+    clearTimeout(id) {
+      const index = timers.findIndex((item) => item.id === id);
+      if (index >= 0) timers.splice(index, 1);
+    },
+    refreshAccountInformationPanels() {
+      state.refreshes += 1;
+    },
+    dealNumber(value, fallback = 0) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    },
+  };
+  vm.runInNewContext(
+    `
+    const ACCOUNT_INDEX_LOCK_STORAGE_KEY = ${JSON.stringify(LOCK_KEY)};
+    let accountIndexTabId = ${JSON.stringify(tabId)};
+    let accountLockExpiryWatchTimer = null;
+    Date.now = () => nowMs();
+    ${functionSource("loadAccountIndexLock")}
+    ${functionSource("accountIndexLockIsActive")}
+    ${functionSource("accountIndexForeignReadActive")}
+    ${functionSource("watchAccountLockExpiry")}
+    globalThis.watchApi = {
+      watch: watchAccountLockExpiry,
+      pending: () => accountLockExpiryWatchTimer,
+    };
+    `,
+    sandbox,
+  );
+  return {
+    watch: sandbox.watchApi.watch,
+    timers,
+    state,
+    peek: () => sandbox.watchApi.pending(),
+    fire() {
+      const timer = timers.shift();
+      if (!timer) throw new Error("没有待触发的定时器");
+      timer.fn();
+      return timer;
+    },
+  };
+}
+
+test("崩溃页留下的租约：到期自动重绘，对方续约则继续等待", () => {
+  const store = new Map();
+  const clock = { value: 7_000_000 };
+  const expiresAt = clock.value + 5_000;
+  store.set(LOCK_KEY, JSON.stringify({
+    owner: "tab-dead",
+    token: "dead",
+    takenAt: clock.value - 1_000,
+    expiresAt,
+  }));
+  const watcher = createWatchTab({ tabId: "tab-live", store, clock });
+  assert.equal(watcher.peek(), null, "还没重绘过，不应有定时器");
+
+  watcher.watch();
+  assert.equal(watcher.timers.length, 1);
+  assert.ok(watcher.timers[0].delay >= 5_000, "应等到租约过期再唤醒");
+  assert.equal(watcher.state.refreshes, 0);
+
+  // 到期那一刻锁已经无效 → 重绘成可读取，且不再循环。
+  clock.value = expiresAt + 1;
+  watcher.fire();
+  assert.equal(watcher.state.refreshes, 1);
+  assert.equal(watcher.timers.length, 0);
+  assert.equal(watcher.peek(), null);
+
+  // 对方还活着、又续了一次约：不重绘，只等下一次过期。
+  store.set(LOCK_KEY, JSON.stringify({
+    owner: "tab-dead",
+    token: "dead",
+    takenAt: clock.value,
+    expiresAt: clock.value + 60_000,
+  }));
+  watcher.watch();
+  assert.equal(watcher.timers.length, 1);
+  clock.value += 5_000;
+  store.set(LOCK_KEY, JSON.stringify({
+    owner: "tab-dead",
+    token: "dead",
+    takenAt: clock.value - 5_000,
+    expiresAt: clock.value + 60_000,
+  }));
+  watcher.fire();
+  assert.equal(watcher.state.refreshes, 1, "对方仍在读时不重绘");
+  assert.equal(watcher.timers.length, 1, "应继续等待下一次过期");
+
+  // 没有外来租约时什么都不安排。
+  store.delete(LOCK_KEY);
+  watcher.watch();
+  assert.equal(watcher.timers.length, 0);
 });
 
 test("账号请求登记表：同轮全部中止，旧轮不污染新轮", () => {

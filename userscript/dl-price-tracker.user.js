@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.99
+// @version      0.6.100
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -31,7 +31,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.99";
+  const APP_VERSION = "0.6.100";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -111,6 +111,10 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.100": [
+      "另一个 DLsite 页面崩溃或被强杀、既不释放租约也不发跨页事件时，本页点「接管读取」照样能接到手：接管是单方面的，不看对方是否还活着",
+      "对面页面留下的租约到期时自动重绘界面，「另一页面正在读取」不会因为对方不响应而一直挂着",
+    ],
     "0.6.99": [
       "另一个 DLsite 页面正在读取账号信息时，本页按钮会变成「接管读取」，点一下直接由本页接手，不用再等一分钟租约过期",
       "接管会立刻中断原页面正在进行的账号请求（购物车、已购清单、已购页翻页），原页面以中性提示「本页读取已被另一页面接管」收尾，不再显示红色报错",
@@ -733,6 +737,7 @@
   let accountIndexRuntimeError = "";
   let accountSessionEpoch = 0;
   let accountLockClaim = null;
+  let accountLockExpiryWatchTimer = null;
   let lastAccountLockOwner = "";
   const accountRequestControllers = new Set();
   let accountReadFlowInFlight = null;
@@ -3377,6 +3382,29 @@
 
   function accountIndexForeignReadActive(lock = loadAccountIndexLock()) {
     return accountIndexLockIsActive(lock) && lock.owner !== accountIndexTabId;
+  }
+
+  // 接管是单方面的：上一个页面是死是活都不影响本页拿锁。反过来，如果它已经
+  // 崩溃/被系统强杀，就永远不会释放锁也不再发 storage 事件，界面上那句
+  // 「另一页面正在读取」会一直挂着。所以在租约自然过期的那一刻补一次重绘。
+  function watchAccountLockExpiry() {
+    if (accountLockExpiryWatchTimer) {
+      clearTimeout(accountLockExpiryWatchTimer);
+      accountLockExpiryWatchTimer = null;
+    }
+    const lock = loadAccountIndexLock();
+    if (!accountIndexForeignReadActive(lock)) return;
+    const delay = Math.max(250, dealNumber(lock.expiresAt, 0) - Date.now() + 150);
+    accountLockExpiryWatchTimer = setTimeout(() => {
+      accountLockExpiryWatchTimer = null;
+      // 对方还活着、只是又续了一次约：接着等它下一次过期，不重绘。
+      if (accountIndexForeignReadActive()) {
+        watchAccountLockExpiry();
+        return;
+      }
+      // 锁没了：崩溃页留下的「读取中」是假象，改回可读取状态。
+      refreshAccountInformationPanels();
+    }, delay);
   }
 
   // takenAt 大者新；同毫秒比 token。两端算法一致，结论唯一。
@@ -8702,6 +8730,8 @@
     document.querySelectorAll(".dltracker-account-info-panel")
       .forEach(renderAccountInformationPanel);
     refreshAccountReadFabs();
+    // 对面那页崩溃时不会有释放事件，靠租约到期唤醒一次重绘。
+    watchAccountLockExpiry();
   }
 
   // 「已购买 N 部」诊断：把本地记录、作品家族归并结果和 DLsite 已购接口
