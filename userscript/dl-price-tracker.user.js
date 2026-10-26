@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.98
+// @version      0.6.99
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -31,7 +31,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.98";
+  const APP_VERSION = "0.6.99";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -102,6 +102,7 @@
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
   const ACCOUNT_INDEX_REQUEST_VERSION = 12;
   const ACCOUNT_INDEX_LOCK_TTL_MS = 60 * 1000;
+  const ACCOUNT_READ_PREEMPTED_TEXT = "本页读取已被另一页面接管";
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
   const DLSITE_BOUGHT_PRODUCTS_PATH = "/load/bought/product";
   const PRODUCT_CODE_REGEX = /\b([RBV]J\d{6,})\b/i;
@@ -110,6 +111,12 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.99": [
+      "另一个 DLsite 页面正在读取账号信息时，本页按钮会变成「接管读取」，点一下直接由本页接手，不用再等一分钟租约过期",
+      "接管会立刻中断原页面正在进行的账号请求（购物车、已购清单、已购页翻页），原页面以中性提示「本页读取已被另一页面接管」收尾，不再显示红色报错",
+      "多页面同时接管以最新一次点击为准：锁记录带时间戳与令牌，旧页面无法把自己写回去",
+      "冷却只对本页连点生效；存在其他页面读取时，接管会跳过冷却，避免被对方的 lastManualAt 挡住",
+    ],
     "0.6.98": [
       "「切到全部」光改下拉不生效、还得再点一次「表示」——脚本现在直接算出这次提交的地址并同源抓一遍，等于替你点了那次「表示」，不再依赖页面上有没有「全期間」链接",
       "加了一条不依赖页面结构的兜底：页面列出的条数明显少于已购接口（不足六成且至少差 5 条）时，一律按接口全量统计并读取，绝不会再因为页面被筛成 3 条就把「已购买」显示成 3 部",
@@ -724,6 +731,10 @@
   let accountIndexRefreshInFlight = null;
   let accountIndexRuntimeFingerprint = "";
   let accountIndexRuntimeError = "";
+  let accountSessionEpoch = 0;
+  let accountLockClaim = null;
+  let lastAccountLockOwner = "";
+  const accountRequestControllers = new Set();
   let accountReadFlowInFlight = null;
   let accountReadStopRequested = false;
   let accountReadFabDismissed = false;
@@ -2714,14 +2725,50 @@
     return session === "account" ? accountIndexSessionStopped : dealSessionStopped;
   }
 
-  function stopRequestSession(session, reason) {
+  // 账号会话的在途请求登记：被别的页面接管时要能立刻断开，而不是等到下一个续约点。
+  function trackAccountRequest(controller, epoch = accountSessionEpoch) {
+    if (!controller) return null;
+    const record = { controller, epoch };
+    accountRequestControllers.add(record);
+    return record;
+  }
+
+  function untrackAccountRequest(record) {
+    if (record) accountRequestControllers.delete(record);
+  }
+
+  // epoch 传 null 表示不管哪一轮全部中止。
+  function abortAccountRequests(epoch = accountSessionEpoch) {
+    let aborted = 0;
+    for (const record of [...accountRequestControllers]) {
+      if (epoch !== null && record.epoch !== epoch) continue;
+      accountRequestControllers.delete(record);
+      try {
+        record.controller.abort();
+        aborted += 1;
+      } catch { /* noop */ }
+    }
+    return aborted;
+  }
+
+  function stopRequestSession(session, reason, { epoch = accountSessionEpoch } = {}) {
     if (session !== "account") {
       stopDealRequests(reason);
       return;
     }
+    // 已被接管或已被新一轮取代的旧请求，迟到的失败不得改写当前会话状态。
+    if (epoch !== accountSessionEpoch) return;
     accountIndexSessionStopped = true;
     accountIndexSessionStopReason = String(reason || "检测到风控信号");
+    abortAccountRequests(epoch);
     console.warn(`[${APP_NAME}] account index requests stopped: ${reason}`);
+  }
+
+  function beginAccountSession() {
+    abortAccountRequests(null);
+    accountSessionEpoch += 1;
+    accountIndexSessionStopped = false;
+    accountIndexSessionStopReason = "";
   }
 
   function showDealToast(message, isError = false, durationMs = 5000) {
@@ -2753,6 +2800,10 @@
     const controller = typeof AbortController === "function"
       ? new AbortController()
       : null;
+    const sessionEpoch = requestSession === "account" ? accountSessionEpoch : null;
+    const tracked = requestSession === "account"
+      ? trackAccountRequest(controller, sessionEpoch)
+      : null;
     let abortTimer = null;
     // 单一截止点同时覆盖连接与响应体读取：挂死的请求最多等待 timeout 后放弃。
     const deadline = new Promise((_, reject) => {
@@ -2777,19 +2828,24 @@
       text = await Promise.race([body, deadline]);
     } catch (error) {
       const reason = `${label}请求失败：${error instanceof Error ? error.message : String(error)}`;
-      if (requestSession === "account") stopRequestSession("account", reason);
+      if (requestSession === "account") {
+        stopRequestSession("account", reason, { epoch: sessionEpoch });
+      }
       throw new Error(reason);
     } finally {
       clearTimeout(abortTimer);
+      untrackAccountRequest(tracked);
     }
     if (response.status === 403 || response.status === 429) {
-      stopRequestSession(requestSession, `${label} HTTP ${response.status}`);
+      stopRequestSession(requestSession, `${label} HTTP ${response.status}`, {
+        epoch: sessionEpoch,
+      });
       throw new Error(`${label}返回 HTTP ${response.status}`);
     }
     if (!response.ok) throw new Error(`${label}返回 HTTP ${response.status}`);
     if (/captcha|reCAPTCHA|認証|验证|アクセスが集中/i.test(text) &&
       /^\s*</.test(text)) {
-      stopRequestSession(requestSession, `${label}返回验证页`);
+      stopRequestSession(requestSession, `${label}返回验证页`, { epoch: sessionEpoch });
       throw new Error(`${label}返回了验证页`);
     }
     return text;
@@ -3301,7 +3357,15 @@
       if (!parsed || typeof parsed !== "object") return null;
       const owner = String(parsed.owner || "");
       const expiresAt = dealNumber(parsed.expiresAt, 0);
-      return owner && expiresAt ? { owner, expiresAt } : null;
+      if (!owner || !expiresAt) return null;
+      // 老版本记录没有 takenAt/token：takenAt 记 0，等于「比任何新声明都旧」，
+      // 因此新版页面接管时总能压过它，不需要迁移存储键。
+      return {
+        owner,
+        expiresAt,
+        takenAt: dealNumber(parsed.takenAt, 0),
+        token: String(parsed.token || owner),
+      };
     } catch {
       return null;
     }
@@ -3311,40 +3375,85 @@
     return Boolean(lock?.owner && dealNumber(lock.expiresAt, 0) > Date.now());
   }
 
-  function acquireAccountIndexLock() {
+  function accountIndexForeignReadActive(lock = loadAccountIndexLock()) {
+    return accountIndexLockIsActive(lock) && lock.owner !== accountIndexTabId;
+  }
+
+  // takenAt 大者新；同毫秒比 token。两端算法一致，结论唯一。
+  function accountLockRecordIsNewer(lock, claim) {
+    if (!lock || !claim) return false;
+    if (lock.owner === accountIndexTabId && lock.token === claim.token) return false;
+    if (lock.takenAt !== claim.takenAt) return lock.takenAt > claim.takenAt;
+    return String(lock.token) > String(claim.token);
+  }
+
+  // 「我还握着锁」= 存储里没有比我这一轮更新的记录。
+  // 别的页面迟到的更旧写入不算被抢，我仍应继续写索引并在下次续约时盖回来。
+  function accountIndexLockHeldBy(claim = accountLockClaim) {
+    return Boolean(claim) && !accountLockRecordIsNewer(loadAccountIndexLock(), claim);
+  }
+
+  function beginAccountLockClaim() {
+    const takenAt = Date.now();
+    return {
+      token: `${accountIndexTabId}-${takenAt.toString(36)}-${
+        Math.random().toString(36).slice(2, 8)}`,
+      takenAt,
+    };
+  }
+
+  function writeAccountIndexLock(claim) {
+    try {
+      localStorage.setItem(ACCOUNT_INDEX_LOCK_STORAGE_KEY, JSON.stringify({
+        owner: accountIndexTabId,
+        token: claim.token,
+        takenAt: claim.takenAt,
+        expiresAt: Date.now() + ACCOUNT_INDEX_LOCK_TTL_MS,
+      }));
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  // 写后回读：读回是自己的 token 才算成功；读回更新的记录立刻认输；
+  // 读回更旧记录（对方迟到的写入）再写一次把它盖回来，最多两次。
+  function commitAccountIndexLock(claim) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (!writeAccountIndexLock(claim)) return false;
+      const after = loadAccountIndexLock();
+      if (after?.owner === accountIndexTabId && after.token === claim.token) return true;
+      if (accountLockRecordIsNewer(after, claim)) return false;
+    }
+    return accountIndexLockHeldBy(claim);
+  }
+
+  function acquireAccountIndexLock({ takeover = false } = {}) {
+    const claim = beginAccountLockClaim();
     const current = loadAccountIndexLock();
-    if (accountIndexLockIsActive(current) && current.owner !== accountIndexTabId) {
-      return false;
+    if (accountIndexForeignReadActive(current)) {
+      if (!takeover) return null;
+      // 接管也要守「新的赢」：别页声明比本次点击还新时让给它。
+      if (accountLockRecordIsNewer(current, claim)) return null;
     }
-    try {
-      localStorage.setItem(ACCOUNT_INDEX_LOCK_STORAGE_KEY, JSON.stringify({
-        owner: accountIndexTabId,
-        expiresAt: Date.now() + ACCOUNT_INDEX_LOCK_TTL_MS,
-      }));
-    } catch {
-      return false;
-    }
-    return loadAccountIndexLock()?.owner === accountIndexTabId;
+    return commitAccountIndexLock(claim) ? claim : null;
   }
 
-  function renewAccountIndexLock() {
-    if (loadAccountIndexLock()?.owner !== accountIndexTabId) return false;
-    try {
-      localStorage.setItem(ACCOUNT_INDEX_LOCK_STORAGE_KEY, JSON.stringify({
-        owner: accountIndexTabId,
-        expiresAt: Date.now() + ACCOUNT_INDEX_LOCK_TTL_MS,
-      }));
-      return loadAccountIndexLock()?.owner === accountIndexTabId;
-    } catch {
-      return false;
-    }
+  function renewAccountIndexLock(claim = accountLockClaim) {
+    // 本页已经开了新一轮，旧的一轮立刻失效。
+    if (!claim || accountLockClaim !== claim) return false;
+    // 别的页面有更新的声明 → 认输，绝不把 takenAt 往前顶。
+    if (accountLockRecordIsNewer(loadAccountIndexLock(), claim)) return false;
+    return commitAccountIndexLock(claim);
   }
 
-  function releaseAccountIndexLock() {
+  function releaseAccountIndexLock(claim = accountLockClaim) {
     try {
-      if (loadAccountIndexLock()?.owner === accountIndexTabId) {
-        localStorage.removeItem(ACCOUNT_INDEX_LOCK_STORAGE_KEY);
-      }
+      const current = loadAccountIndexLock();
+      if (!current || current.owner !== accountIndexTabId) return;
+      if (claim && current.token !== claim.token &&
+        accountLockRecordIsNewer(current, claim)) return;
+      localStorage.removeItem(ACCOUNT_INDEX_LOCK_STORAGE_KEY);
     } catch { /* noop */ }
   }
 
@@ -3406,6 +3515,8 @@
     const controller = typeof AbortController === "function"
       ? new AbortController()
       : null;
+    const sessionEpoch = accountSessionEpoch;
+    const tracked = trackAccountRequest(controller, sessionEpoch);
     let abortTimer = null;
     const deadline = new Promise((_, reject) => {
       abortTimer = setTimeout(() => {
@@ -3433,24 +3544,29 @@
       text = await Promise.race([body, deadline]);
     } catch (error) {
       const reason = `${label}请求失败：${error instanceof Error ? error.message : String(error)}`;
-      stopRequestSession("account", reason);
+      stopRequestSession("account", reason, { epoch: sessionEpoch });
       throw new Error(reason);
     } finally {
       clearTimeout(abortTimer);
+      untrackAccountRequest(tracked);
     }
     if (response.status === 403 || response.status === 429) {
-      stopRequestSession("account", `${label} HTTP ${response.status}`);
+      stopRequestSession("account", `${label} HTTP ${response.status}`, {
+        epoch: sessionEpoch,
+      });
       throw new Error(`${label}返回 HTTP ${response.status}`);
     }
     if (!response.ok) throw new Error(`${label}返回 HTTP ${response.status}`);
     if (/captcha|reCAPTCHA|認証|验证|アクセスが集中/i.test(text) && /^\s*</.test(text)) {
-      stopRequestSession("account", `${label}返回验证页`);
+      stopRequestSession("account", `${label}返回验证页`, { epoch: sessionEpoch });
       throw new Error(`${label}返回了验证页`);
     }
     try {
       return JSON.parse(text);
     } catch {
-      if (/^\s*</.test(text)) stopRequestSession("account", `${label}返回网页`);
+      if (/^\s*</.test(text)) {
+        stopRequestSession("account", `${label}返回网页`, { epoch: sessionEpoch });
+      }
       throw new Error(`${label}没有返回 JSON`);
     }
   }
@@ -3486,28 +3602,44 @@
   }
 
   async function refreshAccountIndex({ manual = false } = {}) {
-    if (accountIndexRefreshInFlight) return accountIndexRefreshInFlight;
+    // 只有「本轮仍握着锁」才复用现有 promise：被接管后旧的一轮必须让位，
+    // 否则本页点了「接管读取」只会拿到那个已经作废的 promise。
+    if (accountIndexRefreshInFlight && accountIndexLockHeldBy(accountLockClaim)) {
+      return accountIndexRefreshInFlight;
+    }
     const previous = loadAccountIndex();
-    if (manual && Date.now() - dealNumber(previous.lastManualAt) < ACCOUNT_REFRESH_COOLDOWN_MS) {
+    const foreignReading = accountIndexForeignReadActive();
+    // 另一个页面刚写过 lastManualAt，冷却会先挡住接管；有外来锁时手动读取跳过冷却。
+    // 同页连点仍受 60 秒冷却约束。
+    if (manual && !foreignReading &&
+      Date.now() - dealNumber(previous.lastManualAt) < ACCOUNT_REFRESH_COOLDOWN_MS) {
       const seconds = Math.max(1, Math.ceil(
-        (ACCOUNT_REFRESH_COOLDOWN_MS - (Date.now() - previous.lastManualAt)) / 1000,
+        (ACCOUNT_REFRESH_COOLDOWN_MS - (Date.now() - dealNumber(previous.lastManualAt))) / 1000,
       ));
       throw new Error(`请等待 ${seconds} 秒后再读取`);
     }
-    if (!acquireAccountIndexLock()) {
+    const claim = acquireAccountIndexLock({ takeover: manual && foreignReading });
+    if (!claim) {
+      // 只剩「另一个页面刚发出了更新的声明」这一种真实冲突。
       if (manual) throw new Error("另一个 DLsite 页面正在读取账号索引");
       refreshAccountInformationPanels();
       return loadAccountIndex();
     }
+    accountLockClaim = claim;
     // 只重置账号索引自己的会话，不改变优惠券或当页分析的熔断状态。
-    accountIndexSessionStopped = false;
-    accountIndexSessionStopReason = "";
+    beginAccountSession();
     accountIndexRuntimeError = "";
     const manualStartedAt = manual ? Date.now() : dealNumber(previous.lastManualAt);
-    const persistAccountIndex = (index) => saveAccountIndex(index, {
-      throwOnFailure: true,
-    });
-    accountIndexRefreshInFlight = (async () => {
+    const persistAccountIndex = (index) => {
+      // 被别的页面接管后绝不覆盖新页面写入的索引。
+      if (!accountIndexLockHeldBy(claim)) {
+        const error = new Error(ACCOUNT_READ_PREEMPTED_TEXT);
+        error.code = "account-preempted";
+        throw error;
+      }
+      return saveAccountIndex(index, { throwOnFailure: true });
+    };
+    const flow = (async () => {
       persistAccountIndex({
         ...previous,
         lastManualAt: manualStartedAt,
@@ -3520,12 +3652,12 @@
       });
       if (!isDlsiteMemberLoggedIn()) return clearAccountIndex();
       const section = currentDlsiteSection();
-      if (!renewAccountIndexLock()) return loadAccountIndex();
+      if (!renewAccountIndexLock(claim)) return loadAccountIndex();
       const status = await fetchSameOriginJson(
         `/${section}${DLSITE_MEMBER_STATUS_PATH}`,
         "账号购物车信息",
       );
-      if (!renewAccountIndexLock()) return loadAccountIndex();
+      if (!renewAccountIndexLock(claim)) return loadAccountIndex();
       const token = dlsiteBoughtToken();
       const rawFingerprint = String(
         token || status?.customer_id || status?.login_id || "",
@@ -3551,7 +3683,7 @@
       const boughtUrl = new URL(`/${section}${DLSITE_BOUGHT_PRODUCTS_PATH}`, location.origin);
       if (token) boughtUrl.searchParams.set("_", token);
       const boughtPayload = await fetchSameOriginJson(boughtUrl, "已购清单");
-      if (!renewAccountIndexLock()) return loadAccountIndex();
+      if (!renewAccountIndexLock(claim)) return loadAccountIndex();
       const cartIds = cartIdsFromMemberStatus(status);
       const bought = boughtIdsFromPayload(boughtPayload);
       // 用户要求「读取账号信息只针对已购买页面里有的作品」：同源读一次已购买作品页
@@ -3577,6 +3709,7 @@
           pageSnapshot = await fetchBoughtPageSnapshot({
             seedDoc: onPurchasedPage ? document : null,
             startUrl: onPurchasedPage ? location.href : purchasedPageBaseUrl(),
+            requestSession: "account",
             onExpandProgress: (clicks, rows) => {
               setAccountReadRuntime({
                 detail: `展开购买历史（第 ${clicks} 次，${rows} 条）`,
@@ -3587,7 +3720,7 @@
           pageNote = `已购买作品页读取失败：${
             error instanceof Error ? error.message : String(error)}`;
         }
-        if (!renewAccountIndexLock()) return loadAccountIndex();
+        if (!renewAccountIndexLock(claim)) return loadAccountIndex();
       }
       let pageIds = [...new Set(pageSnapshot.ids || [])];
       // 兜底口径：页面列出的条数明显少于接口（不足六成且至少差 5 条）时，
@@ -3690,7 +3823,7 @@
       refreshAccountInformationPanels();
       for (let start = 0; start < pendingIds.length; start += ACCOUNT_METADATA_BATCH_SIZE) {
         const batchIds = pendingIds.slice(start, start + ACCOUNT_METADATA_BATCH_SIZE);
-        if (!renewAccountIndexLock()) return loadAccountIndex();
+        if (!renewAccountIndexLock(claim)) return loadAccountIndex();
         persistAccountIndex({
           ...loadAccountIndex(),
           indexing: true,
@@ -3702,7 +3835,7 @@
         const metadata = await ensureProductMetadata(batchIds, {
           requestSession: "account",
         });
-        if (!renewAccountIndexLock()) return loadAccountIndex();
+        if (!renewAccountIndexLock(claim)) return loadAccountIndex();
         for (const id of batchIds) {
           const product = metadata.get(id);
           if (product) {
@@ -3733,7 +3866,7 @@
                 };
                 if (!accountIndexSessionStopped) failedIds.push(id);
               }
-              if (!renewAccountIndexLock()) return loadAccountIndex();
+              if (!renewAccountIndexLock(claim)) return loadAccountIndex();
             } else if (productNeedsLanguageFamilyLookup(product)) {
               persistAccountIndex({
                 ...loadAccountIndex(),
@@ -3751,7 +3884,7 @@
                 console.warn(`[${APP_NAME}] account language family failed for ${id}:`, error);
                 failedIds.push(id);
               }
-              if (!renewAccountIndexLock()) return loadAccountIndex();
+              if (!renewAccountIndexLock(claim)) return loadAccountIndex();
             }
             entries[id] = accountEntryFromProduct(id, product, family, resolved);
             if (accountIndexSessionStopped) break;
@@ -3778,7 +3911,7 @@
               entries[id] = accountEntryFromProduct(id, { id });
               failedIds.push(id);
             }
-            if (!renewAccountIndexLock()) return loadAccountIndex();
+            if (!renewAccountIndexLock(claim)) return loadAccountIndex();
           }
         }
         persistAccountIndex({
@@ -3814,7 +3947,7 @@
         }
         if (start + ACCOUNT_METADATA_BATCH_SIZE < pendingIds.length) {
           await sleep(ACCOUNT_METADATA_BATCH_PAUSE_MS);
-          if (!renewAccountIndexLock()) return loadAccountIndex();
+          if (!renewAccountIndexLock(claim)) return loadAccountIndex();
         }
       }
       const next = {
@@ -3844,8 +3977,11 @@
       persistAccountIndex(next);
       return next;
     })().catch((error) => {
+      // 已被别的页面接管 / 已被本页新一轮取代：静默退出，不写暂停态也不报红。
+      if (accountIndexRefreshInFlight !== flow) return loadAccountIndex();
+      if (error?.code === "account-preempted") throw error;
       accountIndexRuntimeError = error instanceof Error ? error.message : String(error);
-      if (loadAccountIndexLock()?.owner === accountIndexTabId) {
+      if (accountIndexLockHeldBy(claim)) {
         const current = loadAccountIndex();
         saveAccountIndex({
           ...current,
@@ -3859,12 +3995,13 @@
       }
       throw error;
     }).finally(() => {
-      releaseAccountIndexLock();
-      accountIndexRefreshInFlight = null;
+      releaseAccountIndexLock(claim);
+      if (accountIndexRefreshInFlight === flow) accountIndexRefreshInFlight = null;
       refreshAccountInformationPanels();
     });
+    accountIndexRefreshInFlight = flow;
     refreshAccountInformationPanels();
-    return accountIndexRefreshInFlight;
+    return flow;
   }
 
   async function ensureInitialAccountIndex() {
@@ -3906,6 +4043,8 @@
   function updateAccountIndexCart(activeIds, laterIds) {
     const index = loadAccountIndex();
     if (!index.loaded) return index;
+    // 别的页面正在读时不要用本页 DOM 覆盖购物车分区：那一轮结束会写回权威值。
+    if (index.indexing && accountIndexForeignReadActive()) return index;
     const active = [...new Set((activeIds || []).map((id) => String(id).toUpperCase()))];
     const later = [...new Set((laterIds || []).map((id) => String(id).toUpperCase()))];
     const next = saveAccountIndex({ ...index, active, later, updatedAt: Date.now() });
@@ -3922,6 +4061,32 @@
   function requestAccountReadStop() {
     accountReadStopRequested = true;
     stopRequestSession("account", "已手动停止");
+  }
+
+  // 被别的页面接管：立刻停账号会话 + 中止在飞请求，然后静默收尾（不报红）。
+  function preemptAccountRead(message = ACCOUNT_READ_PREEMPTED_TEXT) {
+    if (!accountIndexRefreshInFlight && !accountReadFlowInFlight) return;
+    const staleEpoch = accountSessionEpoch;
+    accountReadStopRequested = true;
+    accountIndexSessionStopped = true;
+    accountIndexSessionStopReason = message;
+    // 硬中断，不等下一个续约点。
+    abortAccountRequests(null);
+    // 旧一轮的迟到失败全部作废，不能污染新一轮。
+    accountSessionEpoch = staleEpoch + 1;
+    // 断开句柄：本页可以立刻再点「接管读取」抢回来。
+    accountIndexRefreshInFlight = null;
+    accountReadFlowInFlight = null;
+    setAccountReadRuntime({
+      running: false,
+      phase: "",
+      detail: "",
+      recalcFraction: 0,
+      error: "",
+      summary: message,
+    });
+    showDealToast(message, false, 6000);
+    refreshAccountInformationPanels();
   }
 
   function createAccountReadStopButton() {
@@ -4244,7 +4409,7 @@
       summary: "",
       error: "",
     });
-    accountReadFlowInFlight = (async () => {
+    const flow = (async () => {
       let index = loadAccountIndex();
       let couponCount = null;
       let failure = null;
@@ -4269,6 +4434,8 @@
           failure = error;
         }
       }
+      // 已被别的页面接管：不重算、不覆盖接管提示，直接静默收尾。
+      if (accountReadFlowInFlight !== flow) return loadAccountIndex();
       // 无论读取完成还是被中断，已取到的优惠券与清单都立即生效并参与重算。
       setAccountReadRuntime({
         phase: "recalc",
@@ -4280,7 +4447,20 @@
       } catch (error) {
         console.warn(`[${APP_NAME}] post-read recalc failed:`, error);
       }
+      // 重算期间也可能被接管：不要再把接管提示覆盖成「读取完成」。
+      if (accountReadFlowInFlight !== flow) return loadAccountIndex();
       if (failure) {
+        if (failure?.code === "account-preempted") {
+          setAccountReadRuntime({
+            running: false,
+            phase: "",
+            detail: "",
+            recalcFraction: 0,
+            error: "",
+            summary: ACCOUNT_READ_PREEMPTED_TEXT,
+          });
+          return loadAccountIndex();
+        }
         setAccountReadRuntime({
           running: false,
           phase: "",
@@ -4303,11 +4483,14 @@
       showDealToast(summary, false, 7000);
       return index;
     })().finally(() => {
-      accountReadFlowInFlight = null;
-      accountReadStopRequested = false;
+      if (accountReadFlowInFlight === flow) {
+        accountReadFlowInFlight = null;
+        accountReadStopRequested = false;
+      }
       refreshAccountInformationPanels();
     });
-    return accountReadFlowInFlight;
+    accountReadFlowInFlight = flow;
+    return flow;
   }
 
   function ensureAccountReadFab() {
@@ -4329,8 +4512,8 @@
     const localReading = Boolean(
       accountReadFlowInFlight || accountIndexRefreshInFlight,
     );
-    const reading = localReading ||
-      (Boolean(index.indexing) && accountIndexLockIsActive());
+    const foreignReading = !localReading && accountIndexForeignReadActive();
+    const reading = localReading || foreignReading;
     const cooldown = !reading &&
       Date.now() - dealNumber(index.lastManualAt) < ACCOUNT_REFRESH_COOLDOWN_MS;
     const button = document.createElement("button");
@@ -4340,10 +4523,14 @@
     if (!loggedIn) {
       button.disabled = true;
       button.title = "未登录 DLsite，无法读取账号信息";
-    } else if (reading) {
+    } else if (localReading) {
       const progress = index.total ? ` ${index.indexed}/${index.total}` : "";
       button.textContent = `读取中${progress}…`;
       button.disabled = true;
+    } else if (foreignReading) {
+      // 一键接管：另一个页面正在读时保持可点，点一下由本页抢占。
+      button.textContent = "接管读取";
+      button.title = "另一页面正在读取账号信息，点击后由本页接管";
     } else if (cooldown) {
       const remaining = Math.max(1, Math.ceil(
         (ACCOUNT_REFRESH_COOLDOWN_MS - dealNumber(index.lastManualAt)) / 1000,
@@ -8383,11 +8570,11 @@
     const index = loadAccountIndex();
     const breakdown = pageScopedBoughtBreakdown(
       index, loadLanguageFamilyCache(), loadDealCache());
-    const reading = Boolean(
+    const localReading = Boolean(
       accountReadFlowInFlight || accountIndexRefreshInFlight,
-    ) || (
-      Boolean(index.indexing) && accountIndexLockIsActive()
     );
+    const foreignReading = !localReading && accountIndexForeignReadActive();
+    const reading = localReading || foreignReading;
     panel.className = "dltracker-account-info-panel";
     const summary = document.createElement("div");
     summary.className = "dltracker-account-info-summary";
@@ -8422,9 +8609,14 @@
     let values;
     if (!isDlsiteMemberLoggedIn()) {
       values = [["状态", "未登录"]];
-    } else if (reading) {
+    } else if (localReading) {
       values = [
         ["状态", index.loaded ? "正在重新读取…" : "正在读取购物车和已购清单…"],
+        ...(index.loaded ? loadedValues : []),
+      ];
+    } else if (foreignReading) {
+      values = [
+        ["状态", "另一页面正在读取（可点「接管读取」接手）"],
         ...(index.loaded ? loadedValues : []),
       ];
     } else if (accountIndexRuntimeError || index.pausedReason) {
@@ -8448,13 +8640,19 @@
     action.type = "button";
     action.className = "dltracker-account-refresh";
     const incomplete = index.loaded && !index.complete;
-    action.textContent = reading
+    action.textContent = localReading
       ? `读取中 ${index.indexed}/${index.total || "?"}`
-      : incomplete
-        ? "继续读取账号信息（优惠券、购物车、已购清单）"
-        : "读取账号信息（优惠券、购物车、已购清单）";
+      : foreignReading
+        ? "接管读取"
+        : incomplete
+          ? "继续读取账号信息（优惠券、购物车、已购清单）"
+          : "读取账号信息（优惠券、购物车、已购清单）";
+    if (foreignReading) {
+      action.title = "另一页面正在读取账号信息，点击后由本页接管";
+    }
     const cooldown = Date.now() - dealNumber(index.lastManualAt) < ACCOUNT_REFRESH_COOLDOWN_MS;
-    action.disabled = reading || cooldown || !isDlsiteMemberLoggedIn();
+    action.disabled = localReading || (!foreignReading && cooldown) ||
+      !isDlsiteMemberLoggedIn();
     if (cooldown && !reading) {
       const remaining = ACCOUNT_REFRESH_COOLDOWN_MS -
         (Date.now() - dealNumber(index.lastManualAt));
@@ -8698,7 +8896,7 @@
 
   // 切到「全部」后真正抓到的那一页：先按表单提交地址抓，再退「全期間」链接。
   // 抓到还带着月份筛选就换下一个候选，全都失败就返回 null 交给调用方兜底。
-  async function followAllPeriodPage(doc, pageUrl, visited = null) {
+  async function followAllPeriodPage(doc, pageUrl, visited = null, requestSession = "deal") {
     const candidates = [purchasedAllPeriodFormUrl(doc), purchasedAllPeriodUrl(doc, pageUrl)]
       .filter(Boolean);
     for (const candidate of candidates) {
@@ -8706,7 +8904,7 @@
       if (visited?.has?.(candidate)) continue;
       let html = "";
       try {
-        html = await fetchSameOriginText(candidate, "已购买作品页");
+        html = await fetchSameOriginText(candidate, "已购买作品页", { requestSession });
       } catch (error) {
         continue;
       }
@@ -8765,6 +8963,7 @@
   // 只点原站自己的控件，不注入任何界面；点了没长出新行的立刻收手，避免死循环。
   async function expandPurchasedListFully(doc = document, options = {}) {
     const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+    const shouldStop = typeof options.shouldStop === "function" ? options.shouldStop : null;
     const maxClicks = Number.isFinite(options.maxClicks)
       ? Math.max(0, options.maxClicks)
       : PURCHASED_EXPAND_MAX_CLICKS;
@@ -8779,6 +8978,10 @@
     }
     const deadline = Date.now() + totalTimeoutMs;
     while (result.clicks < maxClicks) {
+      if (shouldStop?.()) {
+        result.stopped = "stopped";
+        break;
+      }
       const control = purchasedMoreControl(doc);
       if (!control) break;
       const before = rows;
@@ -8814,6 +9017,10 @@
       rows = purchasedVisibleRowCount(doc);
       result.rows = rows;
       if (onProgress) onProgress(result.clicks, rows);
+      if (shouldStop?.()) {
+        result.stopped = "stopped";
+        break;
+      }
       if (rows <= before) {
         result.stopped = "no-growth";
         break;
@@ -8838,7 +9045,9 @@
     expand = true,
     onExpandProgress = null,
     followAllPeriod = true,
+    requestSession = "deal",
   } = {}) {
+    const shouldStop = () => requestSessionStopped(requestSession);
     const section = currentDlsiteSection();
     const firstUrl = startUrl || new URL(`/${section}/mypage/userbuy`, location.origin).toString();
     const ids = [];
@@ -8858,6 +9067,7 @@
     const visited = new Set();
     const queue = [firstUrl];
     while (queue.length && pages < maxPages) {
+      if (shouldStop()) break;
       const next = queue.shift();
       if (visited.has(next)) continue;
       visited.add(next);
@@ -8871,6 +9081,7 @@
           try {
             expanded = await expandPurchasedListFully(doc, {
               onProgress: onExpandProgress,
+              shouldStop,
             });
           } catch (error) {
             console.warn(`[${APP_NAME}] purchased expand failed:`, error);
@@ -8879,7 +9090,7 @@
       } else {
         let html = "";
         try {
-          html = await fetchSameOriginText(next, "已购买作品页");
+          html = await fetchSameOriginText(next, "已购买作品页", { requestSession });
         } catch (error) {
           if (!pages) throw error;
           break;
@@ -8893,7 +9104,7 @@
         // 页面还停在某个月（下拉选着月份，或地址本身就是 /year/…/month/…）：
         // 切换成「全部」还得再点一次「表示」才生效，所以这里直接把那次提交算出来抓一遍。
         if (followAllPeriod && (periodLabel || purchasedUrlHasPeriodFilter(pageUrl))) {
-          const switched = await followAllPeriodPage(doc, pageUrl, visited);
+          const switched = await followAllPeriodPage(doc, pageUrl, visited, requestSession);
           if (switched) {
             const switchedLabel = purchasedPeriodFilterLabel(switched.doc);
             if (!switchedLabel) {
@@ -11768,6 +11979,8 @@
   function mutateAccountCartId(id, nextArea) {
     const index = loadAccountIndex();
     if (!index.loaded) return;
+    // 别的页面正在读时不要用本页旧状态覆盖购物车分区。
+    if (index.indexing && accountIndexForeignReadActive()) return;
     const target = String(id || "").toUpperCase();
     const active = index.active.filter((value) => String(value).toUpperCase() !== target);
     const later = index.later.filter((value) => String(value).toUpperCase() !== target);
@@ -18166,7 +18379,7 @@ a.dltracker-cart-deal-frame:focus-visible {
 
     window.addEventListener("popstate", () => onUrlChange());
     window.addEventListener("pageshow", restoreBrowseStateOnPageShow);
-    window.addEventListener("pagehide", releaseAccountIndexLock);
+    window.addEventListener("pagehide", () => releaseAccountIndexLock());
     window.addEventListener("storage", (event) => {
       if (event.key === ACCOUNT_INDEX_STORAGE_KEY) {
         const index = loadAccountIndex();
@@ -18194,8 +18407,22 @@ a.dltracker-cart-deal-frame:focus-visible {
         }
         return;
       }
-      if (event.key === ACCOUNT_INDEX_LOCK_STORAGE_KEY && !event.newValue) {
-        refreshAccountInformationPanels();
+      if (event.key === ACCOUNT_INDEX_LOCK_STORAGE_KEY) {
+        const lock = loadAccountIndexLock();
+        const owner = lock?.owner || "";
+        if (accountIndexForeignReadActive(lock) &&
+          accountLockRecordIsNewer(lock, accountLockClaim) &&
+          accountIndexRefreshInFlight) {
+          // 另一个页面带着更新的声明抢走了锁：本页立刻硬中断，不等下一个续约点。
+          lastAccountLockOwner = owner;
+          preemptAccountRead();
+          return;
+        }
+        // 只有「换主人 / 锁被释放」才重绘；对方每次续约（只改 expiresAt）不重绘，避免刷屏。
+        if (owner !== lastAccountLockOwner) {
+          lastAccountLockOwner = owner;
+          refreshAccountInformationPanels();
+        }
       }
     });
     setInterval(() => onUrlChange(), 500);

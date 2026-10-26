@@ -175,6 +175,8 @@ function makeSnapshotSandbox(pagesByUrl) {
     function purchasedPageTotalText(doc) { return doc.totalText || ""; }
     function purchasedPageIds(doc) { return doc.ids || []; }
     function expandPurchasedListFully() { return { clicks: 0, rows: 0, stopped: "" }; }
+    // 账号会话熔断在本测试里不参与：默认不停止。
+    function requestSessionStopped() { return false; }
     // 用「URL 当查表键」代替真正的 HTML 解析，测试只关心取了哪一页。
     class DOMParser { parseFromString(key) { return globalThis.pagesByUrl[key]; } }
     globalThis.fetched = [];

@@ -504,7 +504,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /读取暂停：\$\{index\.pausedReason\}/);
   assert.match(source, /else if \(!accountIndexSessionStopped\) \{[\s\S]*?failedIds\.push\(id\)/);
   assert.match(source, /ensureProductMetadata\(batchIds, \{\s*requestSession: "account"/);
-  assert.match(source, /stopRequestSession\("account", `\$\{label\} HTTP \$\{response\.status\}`\)/);
+  assert.match(source, /stopRequestSession\("account", `\$\{label\} HTTP \$\{response\.status\}`/);
   assert.match(source, /account index requests stopped/);
   assert.doesNotMatch(functionSource("fetchSameOriginJson"), /dealSessionStopped/);
   assert.doesNotMatch(functionSource("refreshAccountIndex"), /dealSessionStopped/);
@@ -514,7 +514,15 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   );
   assert.match(
     functionSource("refreshAccountIndex"),
-    /if \(!acquireAccountIndexLock\(\)\)[\s\S]*?另一个 DLsite 页面正在读取账号索引/,
+    /const foreignReading = accountIndexForeignReadActive\(\)/,
+  );
+  assert.match(
+    functionSource("refreshAccountIndex"),
+    /acquireAccountIndexLock\(\{ takeover: manual && foreignReading \}\)/,
+  );
+  assert.match(
+    functionSource("refreshAccountIndex"),
+    /manual && !foreignReading[\s\S]*?请等待 \$\{seconds\} 秒后再读取/,
   );
   assert.match(
     functionSource("refreshAccountIndex"),
@@ -522,7 +530,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   );
   assert.match(
     functionSource("refreshAccountIndex"),
-    /\.finally\(\(\) => \{\s*releaseAccountIndexLock\(\)/,
+    /\.finally\(\(\) => \{\s*releaseAccountIndexLock\(claim\)/,
   );
   assert.match(source, /retryAccountIndexWriteAfterMetadataPrune\(serialized\)/);
   assert.match(source, /saveAccountIndex\(index, \{\s*throwOnFailure: true/);
@@ -541,7 +549,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /读取中\$\{stage \? `：\$\{stage\}` : ""\}/);
   assert.match(source, /未完成\$\{stage \? `：中断于\$\{stage\}` : ""\}/);
   assert.match(source, /\["语言索引", accountIndexProgressText\(index, reading\)\]/);
-  assert.match(source, /window\.addEventListener\("pagehide", releaseAccountIndexLock\)/);
+  assert.match(source, /window\.addEventListener\("pagehide", \(\) => releaseAccountIndexLock\(\)\)/);
   assert.match(source, /event\.key === ACCOUNT_INDEX_STORAGE_KEY[\s\S]*?refreshAccountInformationPanels\(\)/);
   assert.match(
     source,
@@ -565,6 +573,47 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.doesNotMatch(source, /\.dltracker-language-entry-cart\.is-desktop-button\s*\{\s*width:\s*100%/);
   assert.match(source, /\.dltracker-language-entry-cart\.is-mobile-text \.dltracker-language-entry-button,[\s\S]*?border: 0;[\s\S]*?background: transparent;/);
   assert.match(source, /读取账号信息（优惠券、购物车、已购清单）/);
+  // 手动读取可一键接管另一页面：最新声明获胜，旧页面被立即中断。
+  assert.match(source, /ACCOUNT_READ_PREEMPTED_TEXT = "本页读取已被另一页面接管"/);
+  assert.match(functionSource("renewAccountIndexLock"), /accountLockRecordIsNewer/);
+  assert.match(functionSource("renewAccountIndexLock"), /accountLockClaim !== claim/);
+  assert.doesNotMatch(functionSource("renewAccountIndexLock"), /takenAt: Date\.now\(\)/);
+  assert.match(functionSource("acquireAccountIndexLock"), /\{ takeover = false \} = \{\}/);
+  assert.match(
+    functionSource("preemptAccountRead"),
+    /abortAccountRequests\(null\)/,
+  );
+  assert.match(
+    functionSource("preemptAccountRead"),
+    /accountSessionEpoch = staleEpoch \+ 1/,
+  );
+  assert.match(functionSource("trackAccountRequest"), /accountRequestControllers\.add/);
+  assert.match(functionSource("abortAccountRequests"), /controller\.abort\(\)/);
+  assert.match(
+    functionSource("fetchSameOriginJson"),
+    /trackAccountRequest\(controller, sessionEpoch\)/,
+  );
+  assert.match(
+    functionSource("fetchSameOriginText"),
+    /trackAccountRequest\(controller, sessionEpoch\)/,
+  );
+  assert.match(functionSource("fetchBoughtPageSnapshot"), /requestSession = "deal"/);
+  assert.match(functionSource("fetchBoughtPageSnapshot"), /if \(shouldStop\(\)\) break/);
+  assert.match(
+    source,
+    /startUrl: onPurchasedPage \? location\.href : purchasedPageBaseUrl\(\),\s*requestSession: "account"/,
+  );
+  assert.doesNotMatch(source, /followAllPeriod: false,\s*requestSession/);
+  assert.match(functionSource("renderAccountReadFab"), /button\.textContent = "接管读取"/);
+  assert.match(functionSource("renderAccountInformationPanel"), /"接管读取"/);
+  assert.match(
+    source,
+    /event\.key === ACCOUNT_INDEX_LOCK_STORAGE_KEY[\s\S]*?preemptAccountRead\(\)/,
+  );
+  assert.match(
+    functionSource("updateAccountIndexCart"),
+    /accountIndexForeignReadActive\(\)/,
+  );
 });
 
 test("账号读取完全手动：悬浮按钮、差分更新、可中断续接与读后重算", () => {
