@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.100
+// @version      0.6.101
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -31,7 +31,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.100";
+  const APP_VERSION = "0.6.101";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -111,6 +111,11 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.101": [
+      "手机端（maniax-touch 等 xxx-touch）的「購入履歴」页现在也有「算算亏了多少」：以前只认桌面版的 <table> 价格表头，手机版是每部作品一张卡片、根本没有表格，按钮因此从未出现",
+      "手机版按卡片解析：作品编号取自作品链接，实付金额拼 work_price_base + work_price_suffix，作品类型取自卡片上的 icon_MNG/icon_SOU 等图标，结算与弹窗和桌面版完全一致",
+      "手机端工具栏挂在作品列表上方；标签仍写在每一部的价格处，翻页/重绘后会自动补回",
+    ],
     "0.6.100": [
       "另一个 DLsite 页面崩溃或被强杀、既不释放租约也不发跨页事件时，本页点「接管读取」照样能接到手：接管是单方面的，不看对方是否还活着",
       "对面页面留下的租约到期时自动重绘界面，「另一页面正在读取」不会因为对方不响应而一直挂着",
@@ -8769,8 +8774,9 @@
   // 已购买作品页上可能有推荐位、「新着」等模块，用「含作品链接最多的表格」限定范围，
   // 避免把推荐作品也算进清单，导致差集算错。
   function purchasedPageIds(doc) {
-    const { table, rows } = purchasedRowsFromRoot(doc);
-    if (table && rows.length) return rows.map((row) => row.id);
+    // 表格和手机卡片都会给出按作品去重的行，直接用；都没有才退回全文档扫描。
+    const { rows } = purchasedRowsFromRoot(doc);
+    if (rows.length) return rows.map((row) => row.id);
     return pageProductIds(doc);
   }
 
@@ -8977,6 +8983,12 @@
     if (!doc?.querySelectorAll) return 0;
     const table = purchasedPriceTable(doc);
     if (table) return table.querySelectorAll('a[href*="product_id/"]').length;
+    // 手机端按卡片计数：每条作品只有一个 <li>，不能数它里面的两个链接。
+    const list = purchasedMobileList(doc);
+    if (list) {
+      return [...list.querySelectorAll("li")]
+        .filter((li) => li.querySelector?.('a[href*="product_id/"]')).length;
+    }
     return doc.querySelectorAll('a[href*="product_id/"]').length;
   }
 
@@ -9406,9 +9418,126 @@
     return picked[picked.length - 1].cell;
   }
 
+  // ---- 手机端（xxx-touch）已购买作品页 ----
+  // 手机版没有 <table>，每条购买记录是一个卡片：
+  //   li > dl > dt.work_thumb / dd.work_name / dd.work_price / dd.work_genre / dd.work_date
+  // 先找出包含作品链接最多的 ul.work_list，再按卡片结构逐条解析；
+  // 解析出来的行与桌面表格完全相同，后面的结算、史低、弹窗全部复用。
+  function purchasedMobileList(root = document) {
+    let best = null;
+    let bestCount = 0;
+    const nodes = root?.querySelectorAll?.(".buy_work_list ul, ul.work_list") || [];
+    for (const list of nodes) {
+      const count = list.querySelectorAll('a[href*="product_id/"]').length;
+      if (count > bestCount) {
+        best = list;
+        bestCount = count;
+      }
+    }
+    return best;
+  }
+
+  // 金额拆成 <span class="work_price_base">379</span><span class="work_price_suffix"> JPY</span>，
+  // 后面还跟着「/ 全额点数」。只拼前两段，避免把支付方式当成金额。
+  function purchasedMobilePriceText(li) {
+    const base = li?.querySelector?.(".work_price_base");
+    if (base) {
+      const suffix = li.querySelector(".work_price_suffix");
+      return `${base.textContent || ""} ${suffix?.textContent || ""}`
+        .replace(/[\u00a0\u3000]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+    const box = li?.querySelector?.(".work_price");
+    if (!box) return "";
+    const method = box.querySelector?.(".payment_method");
+    const text = String(box.textContent || "");
+    return (method?.textContent ? text.split(method.textContent).join(" ") : text)
+      .replace(/[\u00a0\u3000]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  // 卡片自带类型图标（<span class="icon_MNG" title="漫画">），用作品类型码表翻译成中文。
+  // icon_GEN（全年龄）这类年龄分级不在码表里，会被自动跳过。
+  function purchasedMobileWorkType(li) {
+    for (const span of li?.querySelectorAll?.(".work_genre span") || []) {
+      const code = String(span?.className || "").match(/icon_([A-Za-z0-9]+)/)?.[1]?.toUpperCase();
+      if (code && Object.prototype.hasOwnProperty.call(PURCHASED_WORK_TYPE_LABELS, code)) {
+        return { code, label: PURCHASED_WORK_TYPE_LABELS[code] };
+      }
+    }
+    return { code: "", label: "" };
+  }
+
+  function purchasedMobileRows(root = document) {
+    const list = purchasedMobileList(root);
+    if (!list) return { list: null, rows: [] };
+    const hint = purchasedCurrencyHint();
+    const rows = [];
+    for (const li of list.querySelectorAll("li")) {
+      const link = li.querySelector?.('a[href*="product_id/"]');
+      if (!link) continue;
+      const matched = String(link.getAttribute("href") || "").match(/([RBV]J\d{6,})/i);
+      if (!matched) continue;
+      const id = matched[1].toUpperCase();
+      if (rows.some((row) => row.id === id)) continue;
+      const cell = li.querySelector(".work_price");
+      // 注入史低标签后卡片文本会被污染，所以优先用第一次解析时记下的原文。
+      const storedRaw = li.getAttribute(PURCHASED_PAID_RAW_ATTRIBUTE);
+      const rawText = storedRaw !== null && storedRaw !== undefined
+        ? String(storedRaw).replace(/\s+/g, " ").trim()
+        : purchasedMobilePriceText(li);
+      const stored = li.getAttribute(PURCHASED_PAID_ATTRIBUTE);
+      const parsedAmount = purchasedAmountFromText(rawText, hint);
+      let amount = stored !== null && stored !== ""
+        ? Number(stored)
+        : parsedAmount.amount;
+      let currency = stored !== null && stored !== ""
+        ? (li.getAttribute(PURCHASED_PAID_CURRENCY_ATTRIBUTE) || "")
+        : parsedAmount.currency;
+      if (!Number.isFinite(amount)) amount = null;
+      if (amount !== null && !currency) currency = "JPY";
+      const normalized = purchasedPaidToYen(amount, currency);
+      // 元数据缓存里有类型就用它，没有就用卡片上的图标兜底（手机版本来就会显示）。
+      const cachedType = purchasedWorkTypeOf(id);
+      const type = cachedType.code ? cachedType : purchasedMobileWorkType(li);
+      const titleNode = li.querySelector(".work_name a, .work_name");
+      rows.push({
+        id,
+        tr: li,
+        cell,
+        paid: normalized.yen,
+        paidCny: normalized.cny,
+        paidRaw: rawText,
+        currency,
+        typeCode: type.code,
+        typeLabel: type.label,
+        title: (titleNode?.textContent || link.textContent || "")
+          .replace(/\s+/g, " ").trim().slice(0, 90),
+        href: link.href || link.getAttribute("href") || "",
+      });
+    }
+    return { list, rows };
+  }
+
   function purchasedRowsFromRoot(root = document) {
     const table = purchasedPriceTable(root);
-    if (!table) return { table: null, priceIndex: -1, rows: [] };
+    if (!table) {
+      // 手机端没有表格：退回卡片解析，key 用列表元素做「同一份列表」的身份。
+      const mobile = purchasedMobileRows(root);
+      if (mobile.list) {
+        return {
+          table: null,
+          list: mobile.list,
+          key: mobile.list,
+          priceIndex: -1,
+          rows: mobile.rows,
+          mode: "list",
+        };
+      }
+      return { table: null, list: null, key: null, priceIndex: -1, rows: [], mode: "" };
+    }
     const priceIndex = purchasedPriceColumnIndex(table);
     const hint = purchasedCurrencyHint();
     const rows = [];
@@ -9452,7 +9581,7 @@
         href: link.href || "",
       });
     }
-    return { table, priceIndex, rows };
+    return { table, list: null, key: table, priceIndex, rows, mode: "table" };
   }
 
   function purchasedLowestFor(id) {
@@ -9769,12 +9898,16 @@
     if (status && status.textContent !== text) status.textContent = text;
   }
 
-  function ensurePurchasedToolbar(table, priceIndex, rows) {
+  function ensurePurchasedToolbar(table, priceIndex, rows, list = null) {
     const host = purchasedPriceHeaderCell(table, priceIndex);
     let toolbar = document.querySelector(`.${PURCHASED_TOOLBAR_CLASSNAME}`);
     if (toolbar && host && toolbar.parentElement !== host) {
       // 旧版本在列序错位时把工具栏挂到了「支付方式」列，这里搬回价格列。
       host.appendChild(toolbar);
+    } else if (toolbar && !host && list?.parentElement &&
+      (toolbar.parentElement !== list.parentElement || toolbar.nextElementSibling !== list)) {
+      // 手机端没有表头：工具栏固定挂在作品列表 ul.work_list 的前面。
+      list.parentElement.insertBefore(toolbar, list);
     }
     if (!toolbar) {
       toolbar = document.createElement("div");
@@ -9806,6 +9939,9 @@
       toolbar.append(button, diffButton, status);
       if (host) {
         host.appendChild(toolbar);
+      } else if (list?.parentElement) {
+        // 手机端没有表头，挂在作品列表上方。
+        list.parentElement.insertBefore(toolbar, list);
       } else if (table?.parentElement) {
         table.parentElement.insertBefore(toolbar, table);
       } else {
@@ -9852,7 +9988,8 @@
         },
       });
       const parsed = purchasedRowsFromRoot(document);
-      table = parsed.table;
+      // 桌面端用表格、手机端用列表元素做「同一份列表」的身份标记。
+      table = parsed.key;
       const rows = parsed.rows;
       if (expanded.clicks) {
         setPurchasedToolbarStatus(`已展开 ${rows.length} 条`);
@@ -9864,7 +10001,7 @@
           `本页有筛选，只结算这 ${rows.length} 条（看全部请清掉筛选）`,
         );
       }
-      if (!table || !rows.length) {
+      if (!rows.length) {
         setPurchasedToolbarStatus("没读到作品行，刷新页面后再点");
         return;
       }
@@ -9896,7 +10033,7 @@
       const current = document.querySelector(
         `.${PURCHASED_TOOLBAR_CLASSNAME} .dltracker-purchased-loss-button`,
       );
-      const currentTable = purchasedRowsFromRoot(document).table;
+      const currentTable = purchasedRowsFromRoot(document).key;
       // 无论表格有没有被换掉，按钮都要回到可点状态，否则一次异常就永久卡死。
       if (current) current.disabled = false;
       // 读取过程中翻页了：表格已被替换，重新挂按钮，等用户再点。
@@ -10363,8 +10500,9 @@
   function enhancePurchasedWorksPage() {
     if (!isPurchasedWorksPage(location.href)) return;
     injectStyle();
-    const { table, priceIndex, rows } = purchasedRowsFromRoot(document);
-    if (!table || !rows.length) return;
+    const { table, list, key, priceIndex, rows } = purchasedRowsFromRoot(document);
+    // 桌面端是表格、手机端是卡片列表，两者只要解析出作品行就都算数。
+    if (!rows.length) return;
     for (const row of rows) {
       row.tr.setAttribute(PURCHASED_ROW_ATTRIBUTE, "1");
       // 原文先存一份：之后往这个单元格里注入史低标签，文本就不干净了。
@@ -10375,10 +10513,10 @@
         row.tr.setAttribute(PURCHASED_PAID_CURRENCY_ATTRIBUTE, "JPY");
       }
     }
-    ensurePurchasedToolbar(table, priceIndex, rows);
-    // 同一张表已经点过按钮（例如 SPA 局部重绘）才把已读到的标签补回来；
+    ensurePurchasedToolbar(table, priceIndex, rows, list);
+    // 同一张表/同一份列表已经点过按钮（例如 SPA 局部重绘）才把标签补回来；
     // 没点过就什么都不加，页面保持原样。
-    if (purchasedLowStartedFor === table) renderPurchasedLowChips(rows);
+    if (purchasedLowStartedFor === key) renderPurchasedLowChips(rows);
   }
 
   // 价格列解析不到金额时，把表头与几行单元格原文摊出来：用户复制这一块就能定位格式。
@@ -16761,6 +16899,13 @@ a.dltracker-browse-analysis-frame {
   margin-top: 4px;
   font-weight: 400;
   white-space: normal;
+}
+
+/* 手机端（xxx-touch）已购页没有价格表头，工具栏挂在作品列表 ul.work_list 前面 */
+.buy_work_list > .dltracker-purchased-toolbar {
+  box-sizing: border-box;
+  margin: 6px 0 8px;
+  padding: 0 8px;
 }
 
 .dltracker-purchased-status {

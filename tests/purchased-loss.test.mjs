@@ -66,6 +66,10 @@ const coreSource = () =>
     functionSource("purchasedCellText"),
     functionSource("purchasedWorkTypeLabel"),
     functionSource("purchasedWorkTypeOf"),
+    functionSource("purchasedMobileList"),
+    functionSource("purchasedMobilePriceText"),
+    functionSource("purchasedMobileWorkType"),
+    functionSource("purchasedMobileRows"),
     functionSource("purchasedRowsFromRoot"),
   ].join("\n");
 
@@ -279,7 +283,7 @@ test("已购页史低只在点击按钮后才读取", () => {
   // 进页面只挂按钮，绝不发起史低请求、也不往价格列写标签。
   assert.doesNotMatch(enhance, /ensurePurchasedLowestPrices/);
   assert.doesNotMatch(enhance, /renderPurchasedLowChip\(/);
-  assert.match(enhance, /purchasedLowStartedFor === table/);
+  assert.match(enhance, /purchasedLowStartedFor === key/);
   // 按钮点击进入统一入口，由入口去取史低并写标签。
   assert.match(functionSource("ensurePurchasedToolbar"), /runPurchasedLowestComparison\(\)/);
   const run = functionSource("runPurchasedLowestComparison");
@@ -815,4 +819,80 @@ test("结算列表按商品元数据标出作品类型（音声/漫画/游戏）
     [...result.rows].map((item) => item.typeCode),
     ["SOU", "MNG", "GAM", "", "ET3"],
   );
+});
+
+test("手机端已购买页没有表格时，按作品卡片解析编号、实付与类型", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    const PURCHASED_PAID_ATTRIBUTE = "data-dltracker-purchased-paid";
+    const PURCHASED_PAID_CURRENCY_ATTRIBUTE = "data-dltracker-purchased-currency";
+    const PURCHASED_PAID_RAW_ATTRIBUTE = "data-dltracker-purchased-raw";
+    const PURCHASED_LOW_CLASSNAME = "dltracker-purchased-low";
+    const purchasedLowCache = new Map();`);
+  // 手机版（xxx-touch）没有 <table>：每条记录是 li > dl > dd.work_*。
+  const span = (className, textContent) => ({ className, textContent });
+  const link = (href, title) => ({ getAttribute: () => href, textContent: title, href });
+  const item = (id, title, base, suffix, genre) => {
+    const priceCell = { textContent: `${base} ${suffix}` };
+    const workName = { textContent: title };
+    return {
+      getAttribute: () => null,
+      setAttribute() {},
+      querySelector: (selector) => {
+        if (selector.includes("product_id/")) {
+          return link(`/comic-touch/work/=/product_id/${id}.html`, title);
+        }
+        if (selector === ".work_price") return priceCell;
+        if (selector === ".work_price_base") return { textContent: base };
+        if (selector === ".work_price_suffix") return { textContent: suffix };
+        if (selector === ".work_name a, .work_name") return workName;
+        return null;
+      },
+      querySelectorAll: (selector) => (selector === ".work_genre span"
+        ? genre.map(([code, label]) => span(`icon_${code}`, label))
+        : []),
+    };
+  };
+  const items = [
+    item("BJ01849160", "漫画甲", "379", "JPY", [["GEN", "全年龄"], ["MNG", "漫画"]]),
+    item("BJ365179", "漫画乙", "341", "JPY", [["GEN", "全年龄"], ["MNG", "漫画"]]),
+  ];
+  const list = {
+    parentElement: null,
+    querySelectorAll: (selector) => {
+      if (selector === "li") return items;
+      if (selector.includes("product_id/")) {
+        return items.map((it) => it.querySelector('a[href*="product_id/"]'));
+      }
+      return [];
+    },
+  };
+  const root = {
+    querySelectorAll: (selector) => {
+      if (selector === "table") return [];
+      if (selector === ".buy_work_list ul, ul.work_list") return [list];
+      return [];
+    },
+  };
+  const result = sandbox.purchasedRowsFromRoot(root);
+  // 没有表格时走卡片解析，返回的仍是可结算的 rows。
+  assert.equal(result.mode, "list");
+  assert.equal(result.table, null);
+  assert.deepEqual([...result.rows].map((row) => row.id), ["BJ01849160", "BJ365179"]);
+  // 金额拆在 work_price_base / work_price_suffix 两段，拼起来还要是「379 JPY」。
+  assert.deepEqual([...result.rows].map((row) => row.paid), [379, 341]);
+  assert.deepEqual([...result.rows].map((row) => row.paidRaw), ["379 JPY", "341 JPY"]);
+  // 类型从卡片图标取：icon_MNG → 漫画，icon_GEN（年龄分级）被跳过。
+  assert.deepEqual([...result.rows].map((row) => row.typeLabel), ["漫画", "漫画"]);
+  assert.equal(result.rows[0].title, "漫画甲");
+});
+
+test("手机端已购页不依赖表格也能挂出结算按钮", () => {
+  const enhance = functionSource("enhancePurchasedWorksPage");
+  // 旧写法是 if (!table || !rows.length) return，手机端没有表格就直接退出。
+  assert.doesNotMatch(enhance, /if \(!table \|\| !rows\.length\) return/);
+  assert.match(enhance, /if \(!rows\.length\) return/);
+  assert.match(enhance, /ensurePurchasedToolbar\(table, priceIndex, rows, list\)/);
+  const toolbar = functionSource("ensurePurchasedToolbar");
+  // 没有价格表头时，工具栏挂在作品列表 ul.work_list 前面。
+  assert.match(toolbar, /list\.parentElement\.insertBefore\(toolbar, list\)/);
 });

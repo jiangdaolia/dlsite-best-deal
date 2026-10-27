@@ -34,6 +34,7 @@ function makeSandbox(extra = "") {
     ${constantSource("PURCHASED_EXPAND_TOTAL_TIMEOUT_MS")}
     ${constantSource("PURCHASED_TOOLBAR_CLASSNAME")}
     ${functionSource("purchasedPriceTable")}
+    ${functionSource("purchasedMobileList")}
     ${functionSource("purchasedMoreControl")}
     ${functionSource("purchasedVisibleRowCount")}
     ${functionSource("waitForPurchasedRows")}
