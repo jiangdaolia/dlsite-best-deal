@@ -119,6 +119,7 @@ test("浏览排序控件已在原生排序区后方时不重复插入自身", ()
 
 test("浏览排序在本地存储写入失败时仍保留当页选择", () => {
   const sandbox = {
+    location: { href: "https://www.dlsite.com/girls/search/=/keyword/RJ" },
     localStorage: {
       getItem: () => null,
       setItem: () => {
@@ -133,6 +134,7 @@ test("浏览排序在本地存储写入失败时仍保留当页选择", () => {
     const BUY_LATER_SORT_MODE_PLATFORM_EXPIRY = "platform-expiry";
     const BROWSE_SORT_MODE_STORAGE_KEY = "browse-sort";
     let browseSortModeRuntime = null;
+    ${functionSource("isFavoritePage")}
     ${functionSource("normalizeBrowseSortMode")}
     ${functionSource("getBrowseSortMode")}
     ${functionSource("setBrowseSortMode")}

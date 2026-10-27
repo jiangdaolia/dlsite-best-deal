@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.102
+// @version      0.6.103
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -31,7 +31,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.102";
+  const APP_VERSION = "0.6.103";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -59,6 +59,7 @@
   const BUY_LATER_SORT_MODE_PRICE = "price";
   const BUY_LATER_SORT_MODE_PLATFORM_EXPIRY = "platform-expiry";
   const BROWSE_SORT_MODE_STORAGE_KEY = "dltracker-browse-sort-mode";
+  const BROWSE_SORT_MODE_FAVORITE_STORAGE_KEY = "dltracker-browse-sort-mode-favorite";
   const BROWSE_FILTER_STORAGE_KEY = "dltracker-browse-bundle-filter";
   const BROWSE_ACTIVITY_FILTER_STORAGE_KEY = "dltracker-browse-activity-filter";
   const BROWSE_COUPON_FILTER_STORAGE_KEY = "dltracker-browse-coupon-filter";
@@ -111,6 +112,10 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.103": [
+      "收藏夹页（mypage/wishlist）现在和搜索/分类/排行页一样支持史低优惠计算、优惠助手（优惠券与平台活动筛选）、排序与隐藏已购买/隐藏购物车：收藏夹卡片并入统一浏览分析管线，不再单独渲染",
+      "收藏夹默认保持 DLsite 原顺序，排序控件照常提供、手动选择后才重排你的精选列表，且排序选择单独记录、不影响其他列表页",
+    ],
     "0.6.102": [
       "修手机端「算算亏了多少」弹窗里冒出「算算亏了多少」「数量对不上？」两个按钮：弹窗自己的明细表也有作品链接，被当成了页面价格表，工具栏于是挂进了弹窗表头",
       "解析已购页时现在会跳过脚本自己弹窗里的表格、作品链接与列表，只认 DLsite 页面上真正的价格表/作品列表",
@@ -1537,57 +1542,6 @@
     return [];
   }
 
-  function findWishlistPriceHost(card) {
-    const selectors = [
-      "div.primary dl dd.work_price_wrap",
-      "dd.work_price_wrap",
-      ".work_price_wrap",
-      '[class*="price"]',
-      "dd",
-      "dl",
-    ];
-
-    for (const selector of selectors) {
-      const node = card.querySelector(selector);
-      if (node) return node;
-    }
-
-    const productLink = card.querySelector('a[href*="product_id/"]');
-    if (productLink) {
-      const fallbackHost = document.createElement("div");
-      fallbackHost.className = "dltracker-inline-host";
-      productLink.insertAdjacentElement("afterend", fallbackHost);
-      return fallbackHost;
-    }
-
-    return card;
-  }
-
-  function ensureWishlistRenderHost(card, priceHost) {
-    if (priceHost) {
-      const legacyCard = priceHost.querySelector(`.${UI_CLASSNAME}`);
-      if (legacyCard) legacyCard.remove();
-    }
-
-    const existed = card.querySelector(".dltracker-wishlist-host");
-    if (existed) return existed;
-
-    const host = document.createElement("div");
-    host.className = "dltracker-wishlist-host";
-
-    if (
-      priceHost &&
-      priceHost !== card &&
-      priceHost.parentElement &&
-      card.contains(priceHost)
-    ) {
-      priceHost.insertAdjacentElement("afterend", host);
-    } else {
-      card.appendChild(host);
-    }
-
-    return host;
-  }
 
   function findFavoritePanelAnchor() {
     const wishlistRoot = firstElementBySelectors(
@@ -5686,6 +5640,10 @@
       "#search_result_list",
       "form#works .n_work_list_container",
       ".n_work_list_container",
+      "#wishlist_work",
+      '[id*="wishlist_work"]',
+      '[id*="wishlist"]',
+      ".wishlist_work",
     ];
     const candidates = selectors.flatMap((selector) =>
       [...document.querySelectorAll(selector)]);
@@ -5767,6 +5725,20 @@
       // 直接从购物车条目补采，避免某一区因外层 class 不同而漏掉。
       for (const item of getCartItems()) {
         addCard(item.closest("li.cart_list_item, li.n_work_list_item") || item);
+      }
+    }
+    if (isFavoritePage(location.href)) {
+      // 收藏夹卡片并入统一浏览管线：复用 getWishlistCards 的卡片定位，
+      // 与搜索/分类/排行页共用 史低/本次可到/趋势、优惠助手筛选、排序与隐藏。
+      // 收藏夹卡片不一定带 data-workno，且外层可能是 div，故显式并入而非依赖通用兜底。
+      for (const node of getWishlistCards()) {
+        const id = productIdFromNode(node);
+        if (!id) continue;
+        if (cards.some((entry) =>
+          entry.node === node ||
+          entry.node.contains(node) ||
+          node.contains(entry.node))) continue;
+        cards.push({ id, node, cartItem: false, cartRecommendation: false });
       }
     }
     return cards;
@@ -5906,6 +5878,16 @@
 
   function getBrowseSortMode() {
     if (browseSortModeRuntime !== null) return browseSortModeRuntime;
+    if (isFavoritePage(location?.href || "")) {
+      // 收藏夹是用户精选列表，默认保持 DLsite 原顺序；排序可手动开启。
+      try {
+        const favoriteStored = localStorage.getItem(BROWSE_SORT_MODE_FAVORITE_STORAGE_KEY);
+        if (favoriteStored) return normalizeBrowseSortMode(favoriteStored);
+      } catch {
+        // noop
+      }
+      return BROWSE_SORT_MODE_NATIVE;
+    }
     try {
       const value = localStorage.getItem(BROWSE_SORT_MODE_STORAGE_KEY);
       return normalizeBrowseSortMode(value);
@@ -5921,6 +5903,10 @@
     browseSortModeRuntime = normalized;
     try {
       localStorage.setItem(BROWSE_SORT_MODE_STORAGE_KEY, normalized);
+      // 收藏夹的排序选择单独记录，避免影响其他列表页的默认排序。
+      if (isFavoritePage(location?.href || "")) {
+        localStorage.setItem(BROWSE_SORT_MODE_FAVORITE_STORAGE_KEY, normalized);
+      }
     } catch {
       // noop
     }
@@ -15692,33 +15678,6 @@
     }
   }
 
-  async function enhanceWishlistCards() {
-    const cards = getWishlistCards();
-    if (!cards.length) return;
-
-    for (const card of cards) {
-      const priceHost = findWishlistPriceHost(card);
-      if (!priceHost) continue;
-      const renderHost = ensureWishlistRenderHost(card, priceHost);
-      if (renderHost.querySelector(`.${UI_CLASSNAME}`)) continue;
-
-      const link = card.querySelector('a[href*="product_id/"]');
-      const href = link?.getAttribute("href") || "";
-      const matched = href.match(/product_id\/([RB]J\d{6,})/i);
-      if (!matched) continue;
-
-      const rjCode = matched[1].toUpperCase();
-      const title = link?.textContent?.trim() || rjCode;
-
-      renderLoadingCard(renderHost);
-
-      void buildOrUpdateRecord({
-        rjCode,
-        title,
-        forceFetch: false,
-      }).then((record) => renderPriceCard(record, renderHost));
-    }
-  }
 
   async function enhanceCartItems() {
     document.querySelector(".dltracker-deal-planner")?.remove();
@@ -15980,12 +15939,14 @@
       await enhanceProductPage();
     }
     if (isFavoritePage(url)) {
+      // 收藏夹卡片改走统一浏览分析管线（enhanceGenericBrowseCards），
+      // 与搜索/分类/排行页共用 史低/本次可到/趋势、优惠助手筛选、排序与隐藏，
+      // 不再单独渲染，避免重复 UI。
       if (ENABLE_WISHLIST_ACTION_PANEL) {
         injectFavoriteImportBox();
       } else {
         removeFavoriteImportBox();
       }
-      await enhanceWishlistCards();
     }
     let cartHistoryTask = null;
     if (isCartPage(url)) {
