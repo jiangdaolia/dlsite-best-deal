@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.101
+// @version      0.6.102
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -31,7 +31,7 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.101";
+  const APP_VERSION = "0.6.102";
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -111,6 +111,11 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.102": [
+      "修手机端「算算亏了多少」弹窗里冒出「算算亏了多少」「数量对不上？」两个按钮：弹窗自己的明细表也有作品链接，被当成了页面价格表，工具栏于是挂进了弹窗表头",
+      "解析已购页时现在会跳过脚本自己弹窗里的表格、作品链接与列表，只认 DLsite 页面上真正的价格表/作品列表",
+      "弹窗打开期间不再重挂工具栏：此时页面的 DOM 变动（懒加载、广告位）与已购列表无关，不必跟着重算",
+    ],
     "0.6.101": [
       "手机端（maniax-touch 等 xxx-touch）的「購入履歴」页现在也有「算算亏了多少」：以前只认桌面版的 <table> 价格表头，手机版是每部作品一张卡片、根本没有表格，按钮因此从未出现",
       "手机版按卡片解析：作品编号取自作品链接，实付金额拼 work_price_base + work_price_suffix，作品类型取自卡片上的 icon_MNG/icon_SOU 等图标，结算与弹窗和桌面版完全一致",
@@ -8989,7 +8994,9 @@
       return [...list.querySelectorAll("li")]
         .filter((li) => li.querySelector?.('a[href*="product_id/"]')).length;
     }
-    return doc.querySelectorAll('a[href*="product_id/"]').length;
+    // 弹窗里的作品链接同样要排除，否则「展开购买历史」会以为一直在加新行。
+    return [...doc.querySelectorAll('a[href*="product_id/"]')]
+      .filter((link) => !link.closest?.(".dltracker-reach-overlay")).length;
   }
 
   async function waitForPurchasedRows(doc, target, timeoutMs) {
@@ -9258,6 +9265,9 @@
     let best = null;
     let bestCount = 0;
     for (const table of root?.querySelectorAll?.("table") || []) {
+      // 脚本自己弹出的窗口里也有带作品链接的表格（「算算亏了多少」的明细表）。
+      // 手机端整页只有这张表，不排除的话就会被当成页面价格表，工具栏反被搬进弹窗里。
+      if (table.closest?.(".dltracker-reach-overlay")) continue;
       const count = table.querySelectorAll('a[href*="product_id/"]').length;
       if (count > bestCount) {
         best = table;
@@ -9428,6 +9438,8 @@
     let bestCount = 0;
     const nodes = root?.querySelectorAll?.(".buy_work_list ul, ul.work_list") || [];
     for (const list of nodes) {
+      // 同理：弹窗里若出现作品列表，也不能当成已购列表。
+      if (list.closest?.(".dltracker-reach-overlay")) continue;
       const count = list.querySelectorAll('a[href*="product_id/"]').length;
       if (count > bestCount) {
         best = list;
@@ -10499,6 +10511,9 @@
 
   function enhancePurchasedWorksPage() {
     if (!isPurchasedWorksPage(location.href)) return;
+    // 弹窗开着时页面上的 DOM 变动与已购列表无关（弹窗自己也会引起变动）。
+    // 这时重挂工具栏没有意义，手机端还容易把按钮挂到弹窗里，直接跳过。
+    if (document.querySelector(`.${PURCHASED_LOSS_OVERLAY_CLASSNAME}`)) return;
     injectStyle();
     const { table, list, key, priceIndex, rows } = purchasedRowsFromRoot(document);
     // 桌面端是表格、手机端是卡片列表，两者只要解析出作品行就都算数。

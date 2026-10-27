@@ -895,4 +895,35 @@ test("手机端已购页不依赖表格也能挂出结算按钮", () => {
   const toolbar = functionSource("ensurePurchasedToolbar");
   // 没有价格表头时，工具栏挂在作品列表 ul.work_list 前面。
   assert.match(toolbar, /list\.parentElement\.insertBefore\(toolbar, list\)/);
+  // 弹窗开着时不重挂工具栏，否则按钮会被挂到弹窗里。
+  assert.match(enhance, /PURCHASED_LOSS_OVERLAY_CLASSNAME/);
+});
+
+test("解析已购页时跳过脚本自己弹窗里的表格与列表", () => {
+  const sandbox = makeSandbox(`${coreSource()}
+    globalThis.purchasedPriceTable = purchasedPriceTable;
+    globalThis.purchasedMobileList = purchasedMobileList;`);
+  const dialogNode = () => ({
+    querySelectorAll: () => [{}, {}, {}, {}, {}],
+    closest: (selector) => (selector === ".dltracker-reach-overlay" ? {} : null),
+  });
+  const pageTable = { querySelectorAll: () => [{}, {}], closest: () => null };
+  // 弹窗里的明细表行数比页面多，旧逻辑会挑中它，把工具栏搬进弹窗。
+  const tableRoot = {
+    querySelectorAll: (selector) => (selector === "table" ? [pageTable, dialogNode()] : []),
+  };
+  assert.equal(sandbox.purchasedPriceTable(tableRoot), pageTable);
+  // 只剩弹窗表格时，就当页面没有价格表（手机端才会退回卡片解析）。
+  assert.equal(
+    sandbox.purchasedPriceTable({ querySelectorAll: () => [dialogNode()] }),
+    null,
+  );
+  // 列表解析同理：弹窗里的作品列表不能被当成已购列表。
+  const pageList = { querySelectorAll: () => [{}, {}], closest: () => null };
+  const listRoot = {
+    querySelectorAll: (selector) => (selector === ".buy_work_list ul, ul.work_list"
+      ? [dialogNode(), pageList]
+      : []),
+  };
+  assert.equal(sandbox.purchasedMobileList(listRoot), pageList);
 });
