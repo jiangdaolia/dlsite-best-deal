@@ -5459,7 +5459,7 @@
   }
 
   function campaignPageIsClosed(html) {
-    return /キャンペーン終了|キャンペーンは終了|このキャンペーンは終了/i.test(
+    return /キャンペーン(?:は)?終了|このキャンペーンは終了|終了しました|期間終了|販売終了|campaign (?:is )?closed|campaign ended/i.test(
       String(html || ""),
     );
   }
@@ -5527,7 +5527,10 @@
   function bulkRuleIsActive(rule, now = Date.now()) {
     if (!rule || rule.unavailable) return false;
     const expiresAt = Number(rule.expiresAt);
-    return !rule.expiresAt || !Number.isFinite(expiresAt) || expiresAt > now;
+    // 无法解析到结束时间的页面，不能当作“永久有效”。宁可漏报正在进行的活动，
+    // 也不要把已结束的活动误判为进行中（旧活动页残留折扣文案时尤其危险）。
+    if (!Number.isFinite(expiresAt)) return false;
+    return expiresAt > now;
   }
 
   function bulkRuleRefreshAfter(rule) {
@@ -5561,12 +5564,15 @@
         new URL(dealCampaignPath(product, key), location.origin),
         "多件活动页",
       );
-      const parsed = bulkRuleFromHtml(html, key);
       const fetchedAt = Date.now();
-      if (!parsed) {
-        // 结束页与结构未知页都写负缓存：前者 24 小时，后者短期退避，
+      const closed = campaignPageIsClosed(html);
+      const parsed = bulkRuleFromHtml(html, key);
+      // 结束页即使还能解析出折扣文案（历史页面残留），也必须判为不可用。
+      // closed 检查之前只在 !parsed 分支里跑，导致“已结束但页面仍渲染折扣”的活动
+      // 被误判为进行中——这正是“活动早结束却一直显示”的根因。
+      if (!parsed || closed) {
+        // 结束页与结构未知页都写负缓存：结束页 24 小时，结构未知页短期退避，
         // 避免同一活动页在每次重算时被反复请求。
-        const closed = campaignPageIsClosed(html);
         const ttlMs = closed
           ? BULK_RULE_REFRESH_INTERVAL_MS
           : BULK_RULE_RETRY_INTERVAL_MS;
