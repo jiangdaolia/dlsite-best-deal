@@ -2,6 +2,8 @@
 
 为 DLsite 补充史低、理论优惠价、购物车门槛、优惠券/平台活动筛选，以及多语言版本比较的用户脚本。
 
+点击列表、收藏、详情或购物车的`史低`，可查看过去一年打折天数、近期打折间隔和折扣记录；数据不足时会明确提示，历史数据缓存 24 小时。
+
 本项目直接基于 [syoius/dlTracker4TamperMonkey](https://github.com/syoius/dlTracker4TamperMonkey) 修改和扩展；该项目又基于 [Cassandra-fox/dlTracker](https://github.com/Cassandra-fox/dlTracker) 改写。史低和公开价格走势数据来自 [DLwatcher](https://dlwatcher.com/)。项目继续采用 MIT 许可证并保留原作者署名。
 
 ## 安装

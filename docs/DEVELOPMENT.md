@@ -20,6 +20,7 @@ tests/
   cart-coupon-marker.test.mjs    # 购物车券匹配与门槛
   coupon-reader-a.test.mjs       # 响应解析、脱敏与风控
   deal-insight.test.mjs          # 优惠归一化、本次可到与缓存
+  sale-history.test.mjs          # 打折记录、轮次间隔、按需缓存与跨标签锁
   deal-optimizer.test.mjs        # 单笔报价与拼单候选
   language-edition.test.mjs      # 语言家族、账号索引与单件操作
 docs/

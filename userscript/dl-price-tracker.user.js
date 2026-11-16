@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.104
+// @version      0.6.105
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -31,7 +31,8 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.103";
+  const APP_VERSION = "0.6.105";
+  const saleHistoryRequests = new Map();
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -112,6 +113,10 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.105": [
+      "点击列表、收藏、详情和购物车的史低，查看年度打折天数、近期打折间隔与折扣记录",
+      "历史数据复用史低接口并缓存24小时；样本不足不推算频率，不预测下次打折日期",
+    ],
     "0.6.103": [
       "收藏夹页（mypage/wishlist）现在和搜索/分类/排行页一样支持史低优惠计算、优惠助手（优惠券与平台活动筛选）、排序与隐藏已购买/隐藏购物车：收藏夹卡片并入统一浏览分析管线，不再单独渲染",
       "收藏夹默认保持 DLsite 原顺序，排序控件照常提供、手动选择后才重排你的精选列表，且排序选择单独记录、不影响其他列表页",
@@ -8341,6 +8346,231 @@
     );
   }
 
+  function saleHistoryDate(value) {
+    if (typeof value !== "string" || !value.trim()) return null;
+    const time = Date.parse(value);
+    return Number.isFinite(time) ? new Date(time).toISOString() : null;
+  }
+
+  function extractSaleHistory(json, rjCode, fetchedAt = Date.now()) {
+    // 不将语言原版等备用编号的历史算到当前 SKU 上。
+    if (json?.productId !== rjCode) return null;
+    const annualDays = json.discountDaysOfLastYear;
+    const logs = [];
+    for (const item of Array.isArray(json.recentSalePriceLog) ? json.recentSalePriceLog : []) {
+      const start = saleHistoryDate(item?.start);
+      const end = saleHistoryDate(item?.end);
+      const price = item?.priceInfo?.price;
+      const regularPrice = item?.priceInfo?.regularPrice;
+      if (!start || !end || start > end || !Number.isFinite(price) ||
+          !Number.isFinite(regularPrice) || price < 0 || !(regularPrice > price)) continue;
+      const nextRegular = saleHistoryDate(item.nextRegulerPriceDate || item.nextRegularPriceDate);
+      logs.push({
+        start, end, price, regularPrice,
+        nextRegular: nextRegular && nextRegular >= end ? nextRegular : null,
+      });
+    }
+    const uniqueLogs = [...new Map(logs.map((log) =>
+      [`${log.start}/${log.end}/${log.price}/${log.regularPrice}`, log])).values()];
+    return {
+      version: 1,
+      rjCode,
+      fetchedAt,
+      title: typeof json.productName === "string" ? json.productName : rjCode,
+      lowestPrice: Number.isFinite(json.lowestPrice?.priceInfo?.price)
+        ? json.lowestPrice.priceInfo.price : null,
+      lowestRegularPrice: Number.isFinite(json.lowestPrice?.priceInfo?.regularPrice)
+        ? json.lowestPrice.priceInfo.regularPrice : null,
+      releaseDate: saleHistoryDate(json.releaseDate),
+      annualDays: Number.isInteger(annualDays) && annualDays >= 0 && annualDays <= 366
+        ? annualDays : null,
+      logs: uniqueLogs.sort((a, b) => a.start.localeCompare(b.start)),
+    };
+  }
+
+  function summarizeSaleHistory(history, now = Date.now()) {
+    const logs = history?.logs || [];
+    const rounds = [];
+    for (const log of logs) {
+      const previous = rounds[rounds.length - 1];
+      // 恢复原价之前的力度变化、重叠区间属于同一轮。
+      if (previous && (log.start <= previous.end ||
+          (previous.nextRegular && log.start < previous.nextRegular))) {
+        previous.end = previous.end > log.end ? previous.end : log.end;
+        previous.nextRegular = log.nextRegular;
+      } else {
+        rounds.push({ ...log });
+      }
+    }
+    const intervals = [];
+    for (let index = 1; index < rounds.length; index += 1) {
+      const before = rounds[index - 1];
+      const after = rounds[index];
+      if (before.nextRegular && before.nextRegular <= after.start) {
+        intervals.push((Date.parse(after.start) - Date.parse(before.start)) / 86400000);
+      }
+    }
+    intervals.sort((a, b) => a - b);
+    const middle = Math.floor(intervals.length / 2);
+    const median = intervals.length < 2 ? null : intervals.length % 2
+      ? intervals[middle] : (intervals[middle - 1] + intervals[middle]) / 2;
+    const release = Date.parse(history?.releaseDate);
+    // 最近一次促销可以很久以前结束；它不是作品的发行年限截止日。
+    const asOf = Math.min(now, history?.fetchedAt || now);
+    const fullYear = Number.isFinite(release) && asOf - release >= 365 * 86400000;
+    return {
+      intervalDays: median === null ? null : Math.round(median),
+      intervalSamples: intervals.length,
+      annualPercent: fullYear && Number.isFinite(history?.annualDays)
+        ? Math.min(100, Math.round(history.annualDays / 365 * 100)) : null,
+      fullYear,
+    };
+  }
+
+  async function getSaleHistory(rjCode) {
+    if (!isValidRjCode(rjCode)) throw new Error("暂不支持这个作品编号的打折记录。");
+    if (saleHistoryRequests.has(rjCode)) return saleHistoryRequests.get(rjCode);
+    const read = async () => {
+      // 在跨标签锁内重新查库，让另一标签刚写好的结果也能被复用。
+      const cached = await getPriceRecord(rjCode);
+      const history = cached?.saleHistory;
+      const age = Date.now() - history?.fetchedAt;
+      if (history?.version === 1 && history.rjCode === rjCode &&
+          age >= 0 && age < CACHE_TTL_MS) return history;
+      const json = await gmRequestJson(buildApiUrl(rjCode), REQUEST_TIMEOUT_MS);
+      const next = extractSaleHistory(json, rjCode);
+      if (!next) throw new Error("没有取得这个作品编号的打折记录。");
+      try {
+        // 只更新历史字段，不覆盖其他并发任务刚写入的价格或收藏标记。
+        await upsertPriceRecord({ rjCode, saleHistory: next });
+      } catch (error) {
+        console.warn(`[${APP_NAME}] persist sale history failed:`, error);
+      }
+      return next;
+    };
+    const request = (async () => {
+      try {
+        return typeof navigator !== "undefined" && navigator.locks?.request
+          ? await navigator.locks.request(`dltracker-sale-history-${rjCode}`, read)
+          : await read();
+      } finally {
+        saleHistoryRequests.delete(rjCode);
+      }
+    })();
+    saleHistoryRequests.set(rjCode, request);
+    return request;
+  }
+
+  function saleHistoryDisplayDate(value) {
+    return new Date(value).toLocaleDateString("zh-CN", {
+      timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+    });
+  }
+
+  function renderSaleHistory(body, history, record) {
+    body.replaceChildren();
+    const add = (text, className = "") => {
+      const paragraph = document.createElement("p");
+      paragraph.className = className;
+      paragraph.textContent = text;
+      body.appendChild(paragraph);
+    };
+    add(`${history.title || record?.title || history.rjCode} · ${history.rjCode}`, "dltracker-sale-history-title");
+    const lowest = history.lowestPrice ?? record?.lowestPrice;
+    if (Number.isFinite(lowest)) add(`史低 ${toYen(lowest)}${history.lowestRegularPrice > lowest
+      ? ` · ${Math.round((1 - lowest / history.lowestRegularPrice) * 100)}%OFF` : ""}`);
+    const summary = summarizeSaleHistory(history);
+    if (history.annualDays !== null) {
+      add(`过去一年打折 ${history.annualDays} 天${summary.annualPercent === null
+        ? "" : `，约占全年 ${summary.annualPercent}%`}`, "dltracker-sale-history-summary");
+      if (!summary.fullYear) add("发行未满一年或发行日期未确认，仅显示来源提供的天数。", "dltracker-sale-history-note");
+    } else add("暂无年度打折天数数据。");
+    add(summary.intervalDays === null
+      ? "近期可确认的独立轮次不足，暂不估算打折间隔。"
+      : `近期打折通常间隔约 ${summary.intervalDays} 天（${summary.intervalSamples} 个可确认的开始到开始间隔，中位数）`);
+    if (history.logs.length) {
+      add("近期折扣记录（仅为来源返回的近期记录，不代表全年次数）");
+      const wrap = document.createElement("div");
+      wrap.className = "dltracker-sale-history-table-wrap";
+      const table = document.createElement("table");
+      const head = document.createElement("thead");
+      const header = document.createElement("tr");
+      for (const text of ["采集日期区间", "折扣", "价格"]) {
+        const th = document.createElement("th");
+        th.textContent = text;
+        header.appendChild(th);
+      }
+      head.appendChild(header);
+      const rows = document.createElement("tbody");
+      for (const log of [...history.logs].reverse()) {
+        const row = document.createElement("tr");
+        for (const text of [
+          `${saleHistoryDisplayDate(log.start)} ～ ${saleHistoryDisplayDate(log.end)}`,
+          `${Math.round((1 - log.price / log.regularPrice) * 100)}%OFF`,
+          toYen(log.price),
+        ]) {
+          const cell = document.createElement("td");
+          cell.textContent = text;
+          row.appendChild(cell);
+        }
+        rows.appendChild(row);
+      }
+      table.append(head, rows);
+      wrap.appendChild(table);
+      body.appendChild(wrap);
+      add(`近期记录截至 ${saleHistoryDisplayDate(history.logs[history.logs.length - 1].end)}（中国时间）。`, "dltracker-sale-history-note");
+    } else add("暂无近期折扣记录；这不代表从未打折。");
+    const trend = document.createElement("a");
+    trend.textContent = "打开完整价格趋势";
+    trend.href = buildDlwatcherPageUrl(history.rjCode);
+    trend.target = "_blank";
+    trend.rel = "noopener noreferrer";
+    body.appendChild(trend);
+    add(`数据来源：DLwatcher；读取于 ${saleHistoryDisplayDate(new Date(history.fetchedAt).toISOString())}。仅统计当前编号的平台直降，不含优惠券和多件活动。时间为采集记录，可能与实际活动边界有偏差；不预测下次打折日期。`, "dltracker-sale-history-note");
+  }
+
+  async function openSaleHistoryDialog(rjCode, record = null) {
+    closeReachDialog();
+    const overlay = document.createElement("div");
+    overlay.className = "dltracker-reach-overlay dltracker-sale-history-overlay";
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) closeReachDialog();
+    });
+    const dialog = document.createElement("section");
+    dialog.className = "dltracker-reach-dialog dltracker-sale-history-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", "打折记录");
+    dialog.tabIndex = -1;
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeReachDialog();
+    });
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    title.textContent = "打折记录";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "关闭");
+    close.addEventListener("click", closeReachDialog);
+    header.append(title, close);
+    const body = document.createElement("div");
+    body.className = "dltracker-reach-dialog-body";
+    body.textContent = "正在读取打折记录…";
+    dialog.append(header, body);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    lockReachDialogScroll();
+    dialog.focus({ preventScroll: true });
+    try {
+      const history = await getSaleHistory(rjCode);
+      if (overlay.isConnected) renderSaleHistory(body, history,
+        record?.sourceRjCode && record.sourceRjCode !== rjCode ? null : record);
+    } catch (error) {
+      if (overlay.isConnected) body.textContent = `打折记录读取失败：${error instanceof Error ? error.message : String(error)}。可稍后重新点击史低查看。`;
+    }
+  }
+
   function createSingleBuyBadge() {
     const badge = document.createElement("div");
     badge.className = "dltracker-single-buy-badge";
@@ -8480,6 +8710,7 @@
       ? (1 - lowestPrice / historyRegular) * 100
       : 0;
     grid.appendChild(createBrowseAnalysisFrame({
+      tag: "button",
       className: comparable && lowestPrice <= reachPrice
         ? "dltracker-browse-analysis-best"
         : "",
@@ -8491,6 +8722,7 @@
         ? "dltracker-browse-analysis-amount"
         : "",
       rate: historyRate,
+      onActivate: () => openSaleHistoryDialog(id, record),
     }));
     grid.appendChild(createBrowseAnalysisFrame({
       className: `dltracker-browse-analysis-trend${record?.dlwatcherUrl ? "" : " is-disabled"}`,
@@ -9780,8 +10012,9 @@
     };
     if (Number.isFinite(item.regularPrice)) input.regularPrice = item.regularPrice;
     if (Number.isFinite(item.discountRate)) input.discountRate = item.discountRate;
+    if (item.saleHistory) input.saleHistory = item.saleHistory;
     if (existing && !Number.isFinite(existing.lowestPrice)) {
-      // upsertPriceRecord 里的 Math.min(undefined, x) 会变成 NaN，这里直接覆盖。
+      // 历史专用记录可能尚无价格；直接补齐，同时保留已有收藏和历史字段。
       await storePut(STORE_PRICES, { ...existing, ...input });
       return;
     }
@@ -13084,6 +13317,7 @@
       historyClassNames.push("dltracker-best-reach-gold");
     }
     grid.appendChild(createCartDealPriceFrame({
+      tag: "button",
       className: historyClassNames.join(" "),
       label: "史低",
       price: !insight
@@ -13092,6 +13326,7 @@
           ? cartFrameLocalizedMoney(record.lowestPrice, cnyRate)
           : "暂无数据",
       rate: insight && Number.isFinite(record.lowestPrice) ? historyRate : null,
+      onActivate: () => openSaleHistoryDialog(record.rjCode || insight?.product?.id, record),
     }));
     grid.appendChild(createCartDealPriceFrame({
       className: "dltracker-cart-platform",
@@ -14806,13 +15041,14 @@
     let merged;
     if (existing) {
       const safeLowest =
-        typeof input.lowestPrice === "number"
+        Number.isFinite(input.lowestPrice)
           ? input.lowestPrice
           : existing.lowestPrice;
       merged = {
         ...existing,
         ...input,
-        lowestPrice: Math.min(existing.lowestPrice, safeLowest),
+        lowestPrice: Number.isFinite(existing.lowestPrice) && Number.isFinite(safeLowest)
+          ? Math.min(existing.lowestPrice, safeLowest) : safeLowest,
         updatedAt: now,
       };
     } else {
@@ -14924,6 +15160,7 @@
       GM_xmlhttpRequest({
         method: "GET",
         url,
+        anonymous: true,
         timeout: timeoutMs,
         headers: {
           Accept: "application/json",
@@ -14968,6 +15205,7 @@
           regularPrice: safeNumber(json?.lowestPrice?.priceInfo?.regularPrice),
           discountRate: safeNumber(json?.lowestPrice?.priceInfo?.discountRate),
           voiceActors: extractVoiceActorNames(json),
+          saleHistory: extractSaleHistory(json, rjCode),
           dlwatcherUrl: buildDlwatcherPageUrl(rjCode),
         };
       } catch (error) {
@@ -15053,6 +15291,7 @@
           regularPrice: cached.regularPrice,
           discountRate: cached.discountRate,
           voiceActors: cached.voiceActors,
+          saleHistory: cached.saleHistory,
           dlwatcherUrl: cached.dlwatcherUrl || buildDlwatcherPageUrl(code),
         };
         resolvedRjCode = code;
@@ -15079,6 +15318,7 @@
             regularPrice: cached.regularPrice,
             discountRate: cached.discountRate,
             voiceActors: cached.voiceActors,
+            saleHistory: cached.saleHistory,
             dlwatcherUrl:
               cached.dlwatcherUrl || buildDlwatcherPageUrl(resolved),
           };
@@ -15116,13 +15356,14 @@
       currentPrice,
       dlwatcherCurrentPrice:
         fetched.dlwatcherCurrentPrice ?? existing?.dlwatcherCurrentPrice,
-      lowestPrice: existing
+      lowestPrice: Number.isFinite(existing?.lowestPrice)
         ? Math.min(existing.lowestPrice, fetched.lowestPrice)
         : fetched.lowestPrice,
       sourceRjCode: resolvedRjCode,
       regularPrice: fetched.regularPrice,
       discountRate: fetched.discountRate,
       voiceActors: fetched.voiceActors ?? existing?.voiceActors ?? [],
+      saleHistory: fetched.saleHistory || existing?.saleHistory,
       lastChecked: nowIso(),
       dlwatcherUrl: fetched.dlwatcherUrl,
       isFavorite: Boolean(existing?.isFavorite || favoriteSet.has(rjCode)),
@@ -15258,12 +15499,13 @@
         currentPrice: existing?.currentPrice,
         dlwatcherCurrentPrice:
           fetched.dlwatcherCurrentPrice ?? existing?.dlwatcherCurrentPrice,
-        lowestPrice: existing
+        lowestPrice: Number.isFinite(existing?.lowestPrice)
           ? Math.min(existing.lowestPrice, fetched.lowestPrice)
           : fetched.lowestPrice,
         regularPrice: fetched.regularPrice,
         discountRate: fetched.discountRate,
         voiceActors: fetched.voiceActors ?? existing?.voiceActors ?? [],
+        saleHistory: fetched.saleHistory || existing?.saleHistory,
         lastChecked: nowIso(),
         dlwatcherUrl: fetched.dlwatcherUrl,
         isFavorite: true,
@@ -15384,8 +15626,15 @@
       card.classList.add("dltracker-cart-inline");
     }
 
-    const chip = document.createElement("span");
+    const chip = document.createElement("button");
+    chip.type = "button";
     chip.className = "dltracker-chip dltracker-history-chip";
+    chip.title = "查看打折记录";
+    chip.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void openSaleHistoryDialog(record?.rjCode, record);
+    });
 
     if (!record) {
       chip.classList.add("dltracker-error");
@@ -16081,6 +16330,62 @@
   background: #2f7e49;
   box-sizing: border-box;
   word-break: break-word;
+}
+
+.${UI_CLASSNAME} button.dltracker-history-chip {
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.${UI_CLASSNAME} button.dltracker-history-chip:focus-visible {
+  outline: 2px solid #245c82;
+  outline-offset: 2px;
+}
+
+.dltracker-sale-history-dialog a {
+  color: #245c82;
+  text-decoration: underline;
+}
+
+.dltracker-sale-history-title {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.dltracker-sale-history-summary {
+  color: #2f7e49;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.dltracker-sale-history-note {
+  color: #687780;
+  font-size: 11px;
+}
+
+.dltracker-sale-history-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+.dltracker-sale-history-dialog table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.dltracker-sale-history-dialog th,
+.dltracker-sale-history-dialog td {
+  padding: 7px 5px;
+  border-bottom: 1px solid #d8e0e5;
+  text-align: left;
+}
+
+.dltracker-sale-history-dialog p {
+  margin: 0 0 10px;
 }
 
 .${UI_CLASSNAME} .dltracker-chip-hot {
