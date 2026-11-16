@@ -23,15 +23,19 @@ function raw(logs = []) {
 }
 function sandbox(extra = {}) {
   const box = {
-    console, CACHE_TTL_MS: 86400000, REQUEST_TIMEOUT_MS: 10000,
+    console, CACHE_TTL_MS: 86400000, REQUEST_TIMEOUT_MS: 10000, SALE_HISTORY_NOT_FOUND_TTL_MS: 600000,
     isValidRjCode: (code) => /^[RB]J\d{6,}$/.test(code || ""),
     buildApiUrl: (code) => `https://dlwatcher.com/product/${code}.json`,
+    dealInsightById: new Map(),
+    loadDealCache: () => ({ metadata: {} }),
+    ensureProductMetadata: async () => new Map(),
     ...extra,
   };
   vm.runInNewContext(`const saleHistoryRequests = new Map();
-    ${["saleHistoryDate", "extractSaleHistory", "summarizeSaleHistory", "getSaleHistory", "upsertPriceRecord"]
+    ${["parseTranslationInfo", "saleHistoryDate", "saleHistoryTargetFromProduct", "resolveSaleHistoryTarget", "extractSaleHistory", "summarizeSaleHistory", "getSaleHistory", "upsertPriceRecord"]
       .map(functionSource).join("\n")}
-    globalThis.api = { extractSaleHistory, summarizeSaleHistory, getSaleHistory, upsertPriceRecord };`, box);
+    globalThis.api = { extractSaleHistory, summarizeSaleHistory, getSaleHistory, upsertPriceRecord,
+      saleHistoryTargetFromProduct, resolveSaleHistoryTarget };`, box);
   return box.api;
 }
 
@@ -151,11 +155,102 @@ test("只存历史的记录日后补价不会变NaN，也不覆盖收藏状态",
 });
 
 test("各入口使用可点击按钮，正常史低和已购补价都会保存历史", () => {
-  assert.match(functionSource("renderBrowseCardAnalysis"), /onActivate: \(\) => openSaleHistoryDialog\(id, record\)/);
+  assert.match(functionSource("renderBrowseCardAnalysis"), /onActivate: \(\) => openSaleHistoryDialog\(id, record, insight\?\.product\)/);
   assert.match(functionSource("renderCartDealLayout"), /onActivate: \(\) => openSaleHistoryDialog/);
   assert.match(functionSource("renderPriceCard"), /chip\.type = "button"[\s\S]*openSaleHistoryDialog/);
   assert.match(functionSource("fetchPriceFromDlwatcher"), /saleHistory: extractSaleHistory/);
   assert.match(functionSource("persistPurchasedLowest"), /input\.saleHistory = item\.saleHistory/);
   assert.match(functionSource("renderSaleHistory"), /不代表全年次数/);
   assert.match(functionSource("openSaleHistoryDialog"), /overlay\.isConnected/);
+  assert.match(functionSource("openSaleHistoryDialog"), /getSaleHistory\(target\.id\)/);
+});
+
+// 来自用户报告的五个编号及 DLsite 公开 translation_info，不保存标题或账号信息。
+const translationCases = [
+  ["RJ01602139", "RJ01602138", "RJ01559194"],
+  ["RJ01674473", "RJ01674472", "RJ01591710"],
+  ["RJ01468303", "RJ01452277", "RJ01449066"],
+  ["RJ01719078", "RJ01624486", "RJ01621796"],
+  ["RJ01625755", "RJ01625754", "RJ01438880"],
+];
+
+test("用户的五个译者子编号均查询同语言父编号，不查询404子编号或日语原作", async () => {
+  const requested = [];
+  const records = new Map();
+  let metadataCalls = 0;
+  const metadata = Object.fromEntries(translationCases.map(([child, parent, original]) => [child, {
+    raw: { translation_info: { is_child: true, parent_workno: parent, original_workno: original, lang: "CHI_HANS" } },
+  }]));
+  const api = sandbox({
+    loadDealCache: () => ({ metadata }),
+    ensureProductMetadata: async () => { metadataCalls++; return new Map(); },
+    getPriceRecord: async code => records.get(code),
+    gmRequestJson: async url => {
+      const code = url.match(/(RJ\d+)\.json/)[1];
+      requested.push(code);
+      assert.ok(translationCases.some(([, parent]) => parent === code));
+      return { ...raw(), productId: code };
+    },
+    storePut: async (_store, record) => { records.set(record.rjCode, record); },
+    STORE_PRICES: "prices", nowIso: () => new Date().toISOString(),
+  });
+  for (const [child, parent] of translationCases) {
+    const target = await api.resolveSaleHistoryTarget(child);
+    assert.equal(target.requestedId, child);
+    assert.equal(target.id, parent);
+    assert.equal((await api.getSaleHistory(target.id)).rjCode, parent);
+  }
+  assert.equal(metadataCalls, 0);
+  assert.equal(requested.join(), translationCases.map(([, parent]) => parent).join());
+});
+
+test("归一化原作、语言父编号及缺少父编号的子作品不会回退 original_workno", async () => {
+  const api = sandbox();
+  for (const info of [
+    { is_original: true },
+    { is_parent: true, original_workno: "RJ999999" },
+    { is_child: true, original_workno: "RJ999999" },
+    { is_child: true, parent_workno: "invalid", original_workno: "RJ999999" },
+  ]) {
+    assert.equal(api.saleHistoryTargetFromProduct(id, { id, translationInfo: info }).id, id);
+  }
+  assert.equal(api.saleHistoryTargetFromProduct(id, {
+    id: "RJ999999", translationInfo: { is_child: true, parent_workno: "RJ888888" },
+  }).id, id);
+  const target = api.saleHistoryTargetFromProduct(id.toLowerCase(), {
+    raw: { translation_info: JSON.stringify({ is_child: true, parent_workno: "rj01602138" }) },
+  });
+  assert.equal(target.id, "RJ01602138");
+});
+
+test("已有分析元数据优先复用；仅元数据完全缺失时按点击补读", async () => {
+  let calls = 0;
+  const product = { id, translationInfo: { is_child: true, parent_workno: "RJ01602138" } };
+  const api = sandbox({
+    ensureProductMetadata: async ids => { calls++; assert.equal(ids.join(), id); return new Map([[id, product]]); },
+  });
+  assert.equal((await api.resolveSaleHistoryTarget(id, product)).id, "RJ01602138");
+  assert.equal(calls, 0);
+  assert.equal((await api.resolveSaleHistoryTarget(id)).id, "RJ01602138");
+  assert.equal(calls, 1);
+});
+
+test("真正404显示未收录并缓存10分钟，过期后只按主动点击重新查询父编号", async () => {
+  let calls = 0;
+  let record;
+  const api = sandbox({
+    getPriceRecord: async () => record,
+    gmRequestJson: async () => { calls++; throw new Error("HTTP 404"); },
+    storePut: async (_store, data) => { record = data; },
+    STORE_PRICES: "prices", nowIso: () => new Date().toISOString(),
+  });
+  const first = await api.getSaleHistory(id);
+  assert.equal(first.notFound, true);
+  assert.equal(first.annualDays, null);
+  assert.equal(first.logs.length, 0);
+  await api.getSaleHistory(id);
+  assert.equal(calls, 1);
+  record.saleHistory.fetchedAt -= 600001;
+  await api.getSaleHistory(id);
+  assert.equal(calls, 2);
 });

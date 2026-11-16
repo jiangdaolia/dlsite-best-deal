@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DLsite 最优买法 + 史低
 // @namespace    https://github.com/jiangdaolia/dlsite-best-deal
-// @version      0.6.105
+// @version      0.6.106
 // @description  在 DLsite 页面显示史低、折后日元价、优惠券与本次可到价格
 // @author       Syoius & Cassandra-fox; coupon insights maintained by jiangdaolia
 // @license      MIT
@@ -31,8 +31,9 @@
   // derived from Cassandra-fox/dlTracker. See README and LICENSE for details.
 
   const APP_NAME = "DL Price Tracker";
-  const APP_VERSION = "0.6.105";
+  const APP_VERSION = "0.6.106";
   const saleHistoryRequests = new Map();
+  const SALE_HISTORY_NOT_FOUND_TTL_MS = 10 * 60 * 1000;
 
   const DLWATCHER_BASE = "https://dlwatcher.com/product";
   const FAVORITE_API_PATH = "/girls/load/favorite/product";
@@ -113,6 +114,10 @@
   const MAX_PRODUCT_METADATA_BATCH = 100;
   const MAX_PRODUCT_METADATA_ENTRIES = 2000;
   const RELEASE_NOTES = {
+    "0.6.106": [
+      "修复简中等翻译作品点击史低返回404：译者购买子编号改查同语言作品父编号，弹窗明确标注两个编号，不借用日语原版历史",
+      "真正未收录时显示暂无记录，不再提示稍后重试；缺失结果缓存10分钟，避免反复请求",
+    ],
     "0.6.105": [
       "点击列表、收藏、详情和购物车的史低，查看年度打折天数、近期打折间隔与折扣记录",
       "历史数据复用史低接口并缓存24小时；样本不足不推算频率，不预测下次打折日期",
@@ -8352,8 +8357,39 @@
     return Number.isFinite(time) ? new Date(time).toISOString() : null;
   }
 
+  function saleHistoryTargetFromProduct(rjCode, product) {
+    const requestedId = String(rjCode || "").toUpperCase();
+    if (product?.id && String(product.id).toUpperCase() !== requestedId) {
+      return { requestedId, id: requestedId };
+    }
+    const rawInfo = Object.keys(product?.translationInfo || {}).length
+      ? product.translationInfo : product?.raw?.translation_info;
+    const info = typeof rawInfo === "string" ? parseTranslationInfo(rawInfo) : rawInfo;
+    const parent = String(info?.parent_workno || "").toUpperCase();
+    // 只使用已确认的同语言父编号，original_workno 属于另一语言，不能回退。
+    return {
+      requestedId,
+      id: info?.is_child && isValidRjCode(parent) ? parent : requestedId,
+    };
+  }
+
+  async function resolveSaleHistoryTarget(rjCode, knownProduct = null) {
+    const id = String(rjCode || "").toUpperCase();
+    if (!isValidRjCode(id)) throw new Error("暂不支持这个作品编号的打折记录。");
+    const raw = loadDealCache().metadata[id]?.raw;
+    const products = [knownProduct, dealInsightById.get(id)?.product, raw ? { id, raw } : null];
+    let product = products.find((item) => item &&
+      (!item.id || String(item.id).toUpperCase() === id) &&
+      (item.raw?.translation_info || Object.keys(item.translationInfo || {}).length));
+    // 原作元数据没有翻译信息时也无需再读；只有完全没有元数据才按点击补查一次。
+    product ||= products.find((item) => item?.raw &&
+      (!item.id || String(item.id).toUpperCase() === id));
+    if (!product) product = (await ensureProductMetadata([id])).get(id);
+    return saleHistoryTargetFromProduct(id, product);
+  }
+
   function extractSaleHistory(json, rjCode, fetchedAt = Date.now()) {
-    // 不将语言原版等备用编号的历史算到当前 SKU 上。
+    // rjCode 已归一化为当前语言作品编号，不接受其他语言或其他作品的数据。
     if (json?.productId !== rjCode) return null;
     const annualDays = json.discountDaysOfLastYear;
     const logs = [];
@@ -8436,9 +8472,15 @@
       const history = cached?.saleHistory;
       const age = Date.now() - history?.fetchedAt;
       if (history?.version === 1 && history.rjCode === rjCode &&
-          age >= 0 && age < CACHE_TTL_MS) return history;
-      const json = await gmRequestJson(buildApiUrl(rjCode), REQUEST_TIMEOUT_MS);
-      const next = extractSaleHistory(json, rjCode);
+          age >= 0 && age < (history.notFound ? SALE_HISTORY_NOT_FOUND_TTL_MS : CACHE_TTL_MS)) return history;
+      let next;
+      try {
+        const json = await gmRequestJson(buildApiUrl(rjCode), REQUEST_TIMEOUT_MS);
+        next = extractSaleHistory(json, rjCode);
+      } catch (error) {
+        if (String(error?.message || error) !== "HTTP 404") throw error;
+        next = { ...extractSaleHistory({ productId: rjCode }, rjCode), notFound: true };
+      }
       if (!next) throw new Error("没有取得这个作品编号的打折记录。");
       try {
         // 只更新历史字段，不覆盖其他并发任务刚写入的价格或收藏标记。
@@ -8467,7 +8509,20 @@
     });
   }
 
-  function renderSaleHistory(body, history, record) {
+  function appendSaleHistorySource(body, history) {
+    const trend = document.createElement("a");
+    trend.textContent = "打开完整价格趋势";
+    trend.href = buildDlwatcherPageUrl(history.rjCode);
+    trend.target = "_blank";
+    trend.rel = "noopener noreferrer";
+    body.appendChild(trend);
+    const note = document.createElement("p");
+    note.className = "dltracker-sale-history-note";
+    note.textContent = `数据来源：DLwatcher；读取于 ${saleHistoryDisplayDate(new Date(history.fetchedAt).toISOString())}。仅统计当前语言作品的平台直降，不含优惠券和多件活动。时间为采集记录，可能与实际活动边界有偏差；不预测下次打折日期。`;
+    body.appendChild(note);
+  }
+
+  function renderSaleHistory(body, history, record, target = null) {
     body.replaceChildren();
     const add = (text, className = "") => {
       const paragraph = document.createElement("p");
@@ -8476,9 +8531,18 @@
       body.appendChild(paragraph);
     };
     add(`${history.title || record?.title || history.rjCode} · ${history.rjCode}`, "dltracker-sale-history-title");
+    if (target && target.requestedId !== history.rjCode) {
+      add(`当前购买编号 ${target.requestedId}；以下按同语言作品父编号 ${history.rjCode} 统计。`, "dltracker-sale-history-note");
+    }
     const lowest = history.lowestPrice ?? record?.lowestPrice;
-    if (Number.isFinite(lowest)) add(`史低 ${toYen(lowest)}${history.lowestRegularPrice > lowest
+    if (Number.isFinite(lowest)) add(`${history.notFound ? "已缓存史低" : "史低"} ${toYen(lowest)}${history.lowestRegularPrice > lowest
       ? ` · ${Math.round((1 - lowest / history.lowestRegularPrice) * 100)}%OFF` : ""}`);
+    if (history.notFound) {
+      add(`DLwatcher 暂未收录 ${history.rjCode} 的打折记录，无法统计打折频率。`);
+      add("已有史低缓存不包含完整折扣记录，不能据此推算频率；不会借用日语原版或其他语言的数据。", "dltracker-sale-history-note");
+      appendSaleHistorySource(body, history);
+      return;
+    }
     const summary = summarizeSaleHistory(history);
     if (history.annualDays !== null) {
       add(`过去一年打折 ${history.annualDays} 天${summary.annualPercent === null
@@ -8520,16 +8584,10 @@
       body.appendChild(wrap);
       add(`近期记录截至 ${saleHistoryDisplayDate(history.logs[history.logs.length - 1].end)}（中国时间）。`, "dltracker-sale-history-note");
     } else add("暂无近期折扣记录；这不代表从未打折。");
-    const trend = document.createElement("a");
-    trend.textContent = "打开完整价格趋势";
-    trend.href = buildDlwatcherPageUrl(history.rjCode);
-    trend.target = "_blank";
-    trend.rel = "noopener noreferrer";
-    body.appendChild(trend);
-    add(`数据来源：DLwatcher；读取于 ${saleHistoryDisplayDate(new Date(history.fetchedAt).toISOString())}。仅统计当前编号的平台直降，不含优惠券和多件活动。时间为采集记录，可能与实际活动边界有偏差；不预测下次打折日期。`, "dltracker-sale-history-note");
+    appendSaleHistorySource(body, history);
   }
 
-  async function openSaleHistoryDialog(rjCode, record = null) {
+  async function openSaleHistoryDialog(rjCode, record = null, knownProduct = null) {
     closeReachDialog();
     const overlay = document.createElement("div");
     overlay.className = "dltracker-reach-overlay dltracker-sale-history-overlay";
@@ -8563,11 +8621,13 @@
     lockReachDialogScroll();
     dialog.focus({ preventScroll: true });
     try {
-      const history = await getSaleHistory(rjCode);
-      if (overlay.isConnected) renderSaleHistory(body, history,
-        record?.sourceRjCode && record.sourceRjCode !== rjCode ? null : record);
+      const target = await resolveSaleHistoryTarget(rjCode, knownProduct);
+      if (!overlay.isConnected) return;
+      const history = await getSaleHistory(target.id);
+      const matchingRecord = (record?.sourceRjCode || record?.rjCode) === target.id ? record : null;
+      if (overlay.isConnected) renderSaleHistory(body, history, matchingRecord, target);
     } catch (error) {
-      if (overlay.isConnected) body.textContent = `打折记录读取失败：${error instanceof Error ? error.message : String(error)}。可稍后重新点击史低查看。`;
+      if (overlay.isConnected) body.textContent = `打折记录读取失败（${rjCode}）：${error instanceof Error ? error.message : String(error)}。可稍后重新点击史低查看。`;
     }
   }
 
@@ -8722,7 +8782,7 @@
         ? "dltracker-browse-analysis-amount"
         : "",
       rate: historyRate,
-      onActivate: () => openSaleHistoryDialog(id, record),
+      onActivate: () => openSaleHistoryDialog(id, record, insight?.product),
     }));
     grid.appendChild(createBrowseAnalysisFrame({
       className: `dltracker-browse-analysis-trend${record?.dlwatcherUrl ? "" : " is-disabled"}`,
@@ -13326,7 +13386,7 @@
           ? cartFrameLocalizedMoney(record.lowestPrice, cnyRate)
           : "暂无数据",
       rate: insight && Number.isFinite(record.lowestPrice) ? historyRate : null,
-      onActivate: () => openSaleHistoryDialog(record.rjCode || insight?.product?.id, record),
+      onActivate: () => openSaleHistoryDialog(record.rjCode || insight?.product?.id, record, insight?.product),
     }));
     grid.appendChild(createCartDealPriceFrame({
       className: "dltracker-cart-platform",
@@ -15633,7 +15693,8 @@
     chip.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      void openSaleHistoryDialog(record?.rjCode, record);
+      void openSaleHistoryDialog(record?.rjCode, record,
+        dealInsightById.get(String(record?.rjCode || "").toUpperCase())?.product);
     });
 
     if (!record) {
