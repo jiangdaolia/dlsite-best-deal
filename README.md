@@ -8,9 +8,9 @@
 
 ## 安装
 
-**[安装 DLsite 优惠助手 + 史低 v0.6.105](https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@5e65d9e9720ab8b7031ae961329394582ad605c4/userscript/dl-price-tracker.user.js)**
+**[安装 DLsite 优惠助手 + 史低 v0.6.106](https://cdn.jsdelivr.net/gh/jiangdaolia/dlsite-best-deal@8fff2201e154dd902dea501bef47821ad5e61925/userscript/dl-price-tracker.user.js)**
 
-上面这条固定到 v0.6.105 的代码提交，避免 `@latest` 的 tag 解析缓存返回旧版。桌面端可使用 Tampermonkey、Violentmonkey 等用户脚本管理器；Via 等支持 `.user.js` 的手机浏览器可直接打开安装链接。
+上面这条固定到 v0.6.106 的代码提交，避免 `@latest` 的 tag 解析缓存返回旧版。桌面端可使用 Tampermonkey、Violentmonkey 等用户脚本管理器；Via 等支持 `.user.js` 的手机浏览器可直接打开安装链接。
 
 装完之后就不用再手动装了：脚本的更新地址是 GitHub 官方的**最新 release 附件永久地址**（`releases/latest/download/...`，内容永远指向最新一版），同时脚本自己每 6 小时问一次最新版本，真有新版时右下角会出现一条可关闭的小提示，点「去更新」即可——两条路都不依赖 `@latest` 的解析缓存。
 
