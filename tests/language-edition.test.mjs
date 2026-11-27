@@ -70,6 +70,7 @@ vm.runInNewContext(
     cartIdsFromMemberStatus,
     boughtIdsFromPayload,
     languageEditionsFromDocument,
+    languageEditionsFromList,
     sortLanguageComparisonRows,
     languageWinnerRows,
     translationChildrenFromMetadata,
@@ -90,6 +91,7 @@ const {
   cartIdsFromMemberStatus,
   boughtIdsFromPayload,
   languageEditionsFromDocument,
+  languageEditionsFromList,
   sortLanguageComparisonRows,
   languageWinnerRows,
   translationChildrenFromMetadata,
@@ -253,6 +255,28 @@ test("语言选择器一次给出父编号、中文语言名和 DLsite 顺序", 
   assert.equal(editions[1].displayOrder, 5);
 });
 
+// 2026-11-27 实测：作品页已改成 Nuxt，页面里没有旧选择器；
+// /maniax/api/=/product.json?workno=RJ01368362 的 language_editions 字段是 label 不是 display_label。
+test("product.json 的 language_editions（字段叫 label）也能认，空清单退回只有日语", () => {
+  const editions = languageEditionsFromList([
+    { workno: "RJ01368362", edition_id: 36413, edition_type: "language", display_order: 1, label: "日本語", lang: "JPN" },
+    { workno: "RJ01393664", edition_id: 36413, edition_type: "language", display_order: 5, label: "簡体中文", lang: "CHI_HANS" },
+    { workno: "RJ01393619", edition_id: 36413, edition_type: "language", display_order: 7, label: "繁体中文", lang: "CHI_HANT" },
+  ]);
+  assert.equal(editions.length, 3);
+  assert.equal(editions[0].language, "日语");
+  assert.equal(editions[1].language, "简体中文");
+  assert.equal(editions[2].parentId, "RJ01393619");
+  assert.equal(editions[2].lang, "CHI_HANT");
+  assert.equal(editions[2].displayOrder, 7);
+  const fallback = languageEditionsFromList([], "RJ01614384");
+  assert.equal(fallback.length, 1);
+  assert.equal(fallback[0].parentId, "RJ01614384");
+  assert.equal(fallback[0].lang, "JPN");
+  // 旧页面没有选择器时，languageEditionsFromDocument 仍退回只有日语
+  assert.equal(languageEditionsFromDocument({ querySelector: () => null }, "RJ01614384").length, 1);
+});
+
 test("官方账号状态按 status 区分立即购买与稍后再买", () => {
   const result = cartIdsFromMemberStatus({
     cart: [
@@ -334,7 +358,7 @@ test("RJ01684785这类残留失效译者SKU时保留已取得的在售译者", (
   );
   assert.match(
     functionSource("buildLanguageComparisonRows"),
-    /if \(editionChildIds\.length && !children\.length\)/,
+    /if \(editionChildIds\.length && !children\.length && product\.onSale\)/,
   );
   assert.doesNotMatch(
     functionSource("buildLanguageComparisonRows"),
@@ -473,7 +497,7 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /ACCOUNT_REFRESH_COOLDOWN_MS = 60 \* 1000/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_SIZE = 40/);
   assert.match(source, /ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 \* 1000/);
-  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 12/);
+  assert.match(source, /ACCOUNT_INDEX_REQUEST_VERSION = 13/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_STORAGE_KEY = "dltracker-account-index-lock-v1"/);
   assert.match(source, /ACCOUNT_INDEX_LOCK_TTL_MS = 60 \* 1000/);
   assert.match(source, /fetchSameOriginText\(url, "作品信息接口", \{\s*anonymous: true/);
@@ -540,6 +564,15 @@ test("语言比较使用七列表、账号冷却与官方单件购物车请求",
   assert.match(source, /归并历史已购SKU/);
   assert.match(source, /cache\.parents\[String\(id \|\| ""\)\.toUpperCase\(\)\] = family\.familyId/);
   assert.match(source, /fetchSameOriginText\(url, "语言版本详情", \{\s*anonymous: true,/);
+  assert.match(
+    functionSource("ensureLanguageFamily"),
+    /\/api\/=\/product\.json`[\s\S]*?searchParams\.set\("workno", identity\.parentId\)[\s\S]*?languageEditionsFromList\(detail\?\.language_editions/,
+  );
+  assert.match(source, /LANGUAGE_FAMILY_CACHE_STORAGE_KEY = "dltracker-language-family-cache-v2"/);
+  assert.match(
+    functionSource("refreshAccountIndex"),
+    /previousEntriesUsable =\s*dealNumber\(previous\.requestVersion\) === ACCOUNT_INDEX_REQUEST_VERSION;[\s\S]*?persistAccountIndex\(\{\s*\.\.\.previous,\s*\.\.\.\(previousEntriesUsable \? \{\} : \{ entries: \{\} \}\),/,
+  );
   assert.match(source, /stage: `补读作品详情 \$\{id\}`[\s\S]*?ensureLanguageFamily\(id, \{[\s\S]*?knownProduct: fallbackProduct/);
   assert.match(source, /failedIds\.slice\(0, 3\)[\s\S]*?\$\{failed\}项未取得/);
   assert.match(source, /`\$\{label\}请求失败：\$\{error instanceof Error/);
