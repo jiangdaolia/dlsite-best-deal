@@ -97,13 +97,16 @@
   const CART_SNAPSHOT_STORAGE_KEY = "dltracker-cart-snapshot-v5";
   const ACCOUNT_INDEX_STORAGE_KEY = "dltracker-account-index-v1";
   const ACCOUNT_INDEX_LOCK_STORAGE_KEY = "dltracker-account-index-lock-v1";
-  const LANGUAGE_FAMILY_CACHE_STORAGE_KEY = "dltracker-language-family-cache-v1";
+  // v2：语言版本改从 product.json 读；v1 里存的是作品页改版后读坏的「只有日语」。
+  const LANGUAGE_FAMILY_CACHE_STORAGE_KEY = "dltracker-language-family-cache-v2";
+  const STALE_LANGUAGE_FAMILY_CACHE_STORAGE_KEY = "dltracker-language-family-cache-v1";
   const LANGUAGE_DIALOG_RESTORE_STORAGE_KEY = "dltracker-language-dialog-restore-v1";
   const ACCOUNT_REFRESH_COOLDOWN_MS = 60 * 1000;
   const LANGUAGE_FAMILY_TTL_MS = 24 * 60 * 60 * 1000;
   const ACCOUNT_METADATA_BATCH_SIZE = 40;
   const ACCOUNT_METADATA_BATCH_PAUSE_MS = 10 * 1000;
-  const ACCOUNT_INDEX_REQUEST_VERSION = 12;
+  // 13：语言版本改读 product.json，12 及以前存下的语言条目不沿用，重读一次。
+  const ACCOUNT_INDEX_REQUEST_VERSION = 13;
   const ACCOUNT_INDEX_LOCK_TTL_MS = 60 * 1000;
   const ACCOUNT_READ_PREEMPTED_TEXT = "本页读取已被另一页面接管";
   const DLSITE_MEMBER_STATUS_PATH = "/load/member/status";
@@ -3641,9 +3644,14 @@
       }
       return saveAccountIndex(index, { throwOnFailure: true });
     };
+    // 读法改过（requestVersion 不同）时旧的语言条目一律不沿用。要在下面写入新版本号之前就清掉：
+    // 否则差分更新读到的已经是新版本号，旧条目会被原样留下；中途中断也不会留下冒充新版本的旧条目。
+    const previousEntriesUsable =
+      dealNumber(previous.requestVersion) === ACCOUNT_INDEX_REQUEST_VERSION;
     const flow = (async () => {
       persistAccountIndex({
         ...previous,
+        ...(previousEntriesUsable ? {} : { entries: {} }),
         lastManualAt: manualStartedAt,
         pausedReason: "",
         indexing: true,
@@ -4607,7 +4615,16 @@
     return { families: {}, parents: {} };
   }
 
+  let staleLanguageFamilyCacheRemoved = false;
   function loadLanguageFamilyCache() {
+    if (!staleLanguageFamilyCacheRemoved) {
+      staleLanguageFamilyCacheRemoved = true;
+      try {
+        localStorage.removeItem(STALE_LANGUAGE_FAMILY_CACHE_STORAGE_KEY);
+      } catch {
+        // noop
+      }
+    }
     try {
       const parsed = JSON.parse(
         localStorage.getItem(LANGUAGE_FAMILY_CACHE_STORAGE_KEY) || "null",
@@ -4634,17 +4651,14 @@
     }
   }
 
-  function languageEditionsFromDocument(doc, fallbackId = "") {
-    const selector = doc?.querySelector?.(
-      '[data-vue-component="language-edition-selector"][data-language-editions]',
-    );
-    let raw = [];
-    try { raw = JSON.parse(selector?.getAttribute("data-language-editions") || "[]"); } catch { /* noop */ }
+  // DLsite 的 language_editions 清单转成插件用的格式。
+  // 旧作品页选择器里的字段叫 display_label，product.json 里叫 label，两种都认。
+  function languageEditionsFromList(raw, fallbackId = "") {
     const editions = (Array.isArray(raw) ? raw : []).map((edition, order) => ({
       parentId: String(edition?.workno || "").toUpperCase(),
       lang: normalizedLanguageCode(edition?.lang),
-      language: languageDisplayName(edition?.lang, edition?.display_label),
-      displayLabel: dealPlainText(edition?.display_label),
+      language: languageDisplayName(edition?.lang, edition?.display_label ?? edition?.label),
+      displayLabel: dealPlainText(edition?.display_label ?? edition?.label),
       displayOrder: dealNumber(edition?.display_order, order),
       price: dealNumber(edition?.price, NaN),
       officialPrice: dealNumber(edition?.official_price, NaN),
@@ -4654,6 +4668,17 @@
     return isValidProductCode(id)
       ? [{ parentId: id, lang: "JPN", language: "日语", displayLabel: "日语", displayOrder: 0 }]
       : [];
+  }
+
+  // 旧版作品页（Vue 语言选择器）。2026-11 起作品页改成 Nuxt，页面里没有这个节点了，
+  // 语言版本改从 product.json 读（见 ensureLanguageFamily）；这里留着兼容旧页面。
+  function languageEditionsFromDocument(doc, fallbackId = "") {
+    const selector = doc?.querySelector?.(
+      '[data-vue-component="language-edition-selector"][data-language-editions]',
+    );
+    let raw = [];
+    try { raw = JSON.parse(selector?.getAttribute("data-language-editions") || "[]"); } catch { /* noop */ }
+    return languageEditionsFromList(raw, fallbackId);
   }
 
   function languageFamilyIdFromEditions(identity, editions) {
@@ -4696,17 +4721,23 @@
       editions = languageEditionsFromDocument(document, identity.parentId);
     }
     if (!editions.length || editions.length === 1 && editions[0].parentId === identity.parentId) {
-      const url = new URL(
-        `/${currentDlsiteSection()}/work/=/product_id/${identity.parentId}.html`,
-        location.origin,
-      );
-      const html = await fetchSameOriginText(url, "语言版本详情", {
+      // 作品页改成 Nuxt 后旧选择器不见了，读网页永远只得到「只有日语」。
+      // 改读 product.json：任一分区都能查任一作品，回应约 20～60KB（作品页约 700KB）；
+      // 查不到的编号回 []，按只有日语处理。
+      const url = new URL(`/${currentDlsiteSection()}/api/=/product.json`, location.origin);
+      url.searchParams.set("workno", identity.parentId);
+      const text = await fetchSameOriginText(url, "语言版本详情", {
         anonymous: true,
         requestSession,
       });
-      if (!/^\s*</.test(html)) throw new Error("语言版本详情没有返回网页");
-      const doc = new DOMParser().parseFromString(html, "text/html");
-      editions = languageEditionsFromDocument(doc, identity.parentId);
+      let payload = null;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        throw new Error("语言版本详情没有返回 JSON");
+      }
+      const detail = Array.isArray(payload) ? payload[0] : payload;
+      editions = languageEditionsFromList(detail?.language_editions, identity.parentId);
     }
     const familyId = languageFamilyIdFromEditions(identity, editions);
     const family = { familyId, fetchedAt: Date.now(), editions };
@@ -12289,7 +12320,9 @@
           editionChildIds,
           childMetadata,
         );
-        if (editionChildIds.length && !children.length) {
+        // 母作品本身没在卖（例如还没上架的英语版，on_sale=0）时，
+        // DLsite 也不给它的译者版资料：算「停售」，不当成读取失败。
+        if (editionChildIds.length && !children.length && product.onSale) {
           throw new Error("译者信息读取失败");
         }
         const purchasableChildren = children.filter((child) => child.onSale);
